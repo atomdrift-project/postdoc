@@ -1,0 +1,42 @@
+#!/bin/sh
+# Pre-commit gate for postdoc. Install with `make install-precommit`.
+#
+# Refuses the commit unless:
+#   1. Cargo.toml has no active local path override.
+#   2. `make test` passes.
+#   3. `make lint` passes (rustfmt --check, then clippy with -D warnings).
+#
+# Test runs BEFORE lint on purpose (mirrors ../scan and ../isomer): `cargo
+# test` fully builds the dependency tree, which clippy then reuses, so
+# `make lint` re-checks only postdoc itself instead of re-checking the whole
+# dep tree.
+#
+# Bypass intentionally with `git commit --no-verify`.
+#
+# Why check 1 covers *every* table, not just [patch]: postdoc is developed
+# against sibling checkouts (../scan, ../isomer, ../cleave), and none of them
+# exist in a fresh clone. A committed `path = "../"` — whether under
+# [dependencies] or a [patch] table — builds against a crate that exists on no
+# other machine, so it breaks CI and produces a release nobody else can
+# reproduce. Push the dep and pin a git rev instead.
+
+set -e
+
+root=$(git rev-parse --show-toplevel)
+cd "$root"
+
+# The `[^#]` guard keeps commented-out overrides (Cargo.toml keeps a running
+# log of them) from tripping it.
+if grep -nE '^[[:space:]]*[^#].*path[[:space:]]*=[[:space:]]*"\.\.' Cargo.toml; then
+	echo "pre-commit: refusing commit — Cargo.toml has a local path override (shown above)." >&2
+	echo "Push the dep and pin a git rev, or bypass with: git commit --no-verify" >&2
+	exit 1
+fi
+
+echo "pre-commit: running make test..."
+make test
+
+echo "pre-commit: running make lint..."
+make lint
+
+echo "pre-commit: ok"

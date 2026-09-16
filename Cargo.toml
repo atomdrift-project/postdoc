@@ -1,0 +1,114 @@
+[package]
+name = "postdoc"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+license = "Apache-2.0"
+description = "Worker and server coordination for the Atomdrift analysis fleet"
+repository = "https://github.com/atomdrift-project/postdoc"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+# `raw_value` lets a judge carry its engine's output pre-serialized, so a
+# report embeds it without a parse or a re-encode. At worker scale the cleave
+# report is the largest thing postdoc touches and it is pure pass-through.
+serde_json = { version = "1", features = ["raw_value"] }
+
+# The engines. Declared from git like every other dependency in the fleet; the
+# resolved commits stay pinned in Cargo.lock and `cargo update` advances them.
+# See the [patch] block below for developing against sibling checkouts.
+#
+# `default-features = false` drops cleave's jemalloc default, matching ../scan
+# and ../isomer: postdoc's binary owns its own allocator choice, and a library
+# has no business picking one for it.
+cleave = { git = "https://github.com/atomdrift-project/cleave.git", default-features = false }
+# Lib name `scan`, package name `atomdrift-scan` — the same split ../isomer
+# relies on. Supplies the model, the trait floor, and the interpreter.
+atomdrift-scan = { git = "https://github.com/atomdrift-project/scan.git" }
+# The differential judge.
+isomer = { git = "https://github.com/atomdrift-project/isomer.git" }
+
+# Mirrors the patch sections in ../cleave, ../scan and ../isomer. A [patch]
+# applies only from the root manifest, so every crate that can be a root has
+# to carry its own copy — postdoc is a root, so this is not optional and not
+# duplication that can be factored out. tree-sitter 0.27 is unpublished
+# (crates.io tops out at 0.26.x) and cleave requires it, so this is
+# load-bearing for resolution, not only for a fix. Both crates must come from
+# one source: tree-sitter uses its in-tree tree-sitter-language, and
+# `links = "tree-sitter-language"` permits exactly one copy in the graph.
+# Keep the rev in lockstep with the siblings; remove when a release lands.
+[patch.crates-io]
+tree-sitter = { git = "https://github.com/tree-sitter/tree-sitter", rev = "963b5a5a971021359cf091a63d4f1286bc319643" }
+tree-sitter-language = { git = "https://github.com/tree-sitter/tree-sitter", rev = "963b5a5a971021359cf091a63d4f1286bc319643" }
+
+# DEVELOPMENT OVERRIDE — must be commented out before committing.
+#
+# postdoc lands alongside changes in scan and isomer that are not pushed yet,
+# so until they are, it builds against the checkouts beside it. `scripts/
+# pre-commit` refuses a commit while these lines are active, which is the
+# point: a committed path override builds against crates that exist on no
+# other machine. When the sibling changes land, comment this out and
+# `cargo update -p atomdrift-scan -p isomer -p cleave`.
+#
+# Patching by source URL rather than adding path dependencies keeps one copy
+# of each crate in the graph. isomer reaches scan and cleave through the same
+# URLs, so without this its `scan::Classification` and postdoc's would be two
+# unrelated types that happen to share a name.
+[patch."https://github.com/atomdrift-project/cleave.git"]
+cleave = { path = "../cleave" }
+
+[patch."https://github.com/atomdrift-project/scan.git"]
+atomdrift-scan = { path = "../scan" }
+
+[patch."https://github.com/atomdrift-project/isomer.git"]
+isomer = { path = "../isomer" }
+
+[profile.release]
+strip = "debuginfo"
+lto = "thin"
+codegen-units = 16
+
+# Optimized but un-LTO'd: `make quick` builds then immediately runs the binary,
+# and fat LTO's link time dominates that loop. Mirrors ../scan and ../isomer.
+[profile.quick]
+inherits = "release"
+lto = false
+codegen-units = 16
+
+[profile.dev]
+debug = "line-tables-only"
+
+# Dependencies at opt-level 1 in dev builds. postdoc's own analysis work is all
+# in cleave and the model, reached through scan, so an unoptimized dependency
+# tree makes a debug run look far slower than it is. Matches ../scan.
+[profile.dev.package."*"]
+opt-level = 1
+
+# Mirrors ../scan's [workspace.lints], plus `unsafe_code = "deny"` — postdoc
+# coordinates other crates' analyses and has no reason to write any unsafe at
+# all, so it forbids the block outright rather than only policing
+# unsafe_op_in_unsafe_fn. Keep in sync with ../scan and ../isomer; a lint that
+# fires there should fire here.
+[lints.rust]
+unsafe_code = "deny"
+unsafe_op_in_unsafe_fn = "deny"
+rust_2018_idioms = { level = "deny", priority = -1 }
+unused_must_use = "deny"
+unused_imports = "deny"
+unused_mut = "deny"
+dead_code = "warn"
+unreachable_pub = "warn"
+missing_debug_implementations = "warn"
+missing_docs = "warn"
+noop_method_call = "warn"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+correctness = { level = "deny", priority = -1 }
+suspicious = { level = "deny", priority = -1 }
+style = { level = "warn", priority = -1 }
+complexity = { level = "warn", priority = -1 }
+perf = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
