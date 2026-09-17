@@ -81,16 +81,22 @@ against a caller's own budget happens when a lookup is answered, never here.
 
 ```
 postdoc worker --url https://hopper.example --name nuc
-postdoc serve  --addr 0.0.0.0:8080
 ```
 
 **worker** claims artifacts from hopper, judges them, and posts results back.
 It accepts the same arguments `atomscan worker` does, so hopper's supervised
 local worker is a binary-name change and nothing else.
 
-**serve** answers [beamline](https://github.com/atomdrift-project/beamline),
-its only caller: `GET /v1/lookup` for what is already known, `POST
-/v1/analyze` to spend an analysis slot, plus `/_/stats` and `/_/health`.
+**serve** is not built yet. It will be a drop-in for `atomscan serve`: every
+route scan answers, answered the same way, so swapping the binary is a
+deployment change and nothing else. `/v1` is scan's contract and does not
+move. The result object above is a different shape rather than an extension
+of it, so it gets `/v2`, which callers adopt one at a time.
+
+Today the worker posts the same `{ml, llm, raw}` body `atomscan worker` posts,
+so it can take claims beside one with nothing downstream noticing. The judges
+above are built and tested but not yet on that path; wiring them in is the
+step that changes what hopper stores.
 
 There is no one-shot CLI. `atomscan` and `isomer` are the tools for that.
 

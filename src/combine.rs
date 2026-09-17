@@ -52,13 +52,16 @@ impl Outcome {
     }
 }
 
-/// The worst outcome any engine reported, or `None` if none did.
+/// The verdict: what scan concluded, raised by what isomer concluded.
 ///
-/// `None` is not "benign": it is "nothing judged this", which a caller turns
-/// into an unanalyzed answer rather than a clean one.
+/// Scan always reports, because there is always a file to judge. Isomer
+/// reports only when hopper pointed at an earlier release. That is the whole
+/// truth about how many outcomes exist, so this takes those two rather than an
+/// iterator — an iterator could be empty, and "no engine judged this" is a
+/// state that cannot arise and must not need handling.
 #[must_use]
-pub fn worst(outcomes: impl IntoIterator<Item = Outcome>) -> Option<Outcome> {
-    outcomes.into_iter().reduce(Outcome::worse_of)
+pub fn verdict(scan: Outcome, isomer: Option<Outcome>) -> Outcome {
+    isomer.map_or(scan, |isomer| scan.worse_of(isomer))
 }
 
 /// The judges whose own band matches the verdict.
@@ -166,8 +169,9 @@ mod tests {
 
     #[test]
     fn worse_of_is_associative() {
-        // `worst` reduces left to right; an operator that is not associative
-        // would make the verdict depend on the order judges are listed in.
+        // Not load-bearing for two outcomes, but it is what lets a third
+        // engine be folded in later without the verdict depending on where in
+        // the order it lands.
         let cases = [
             clean(),
             at(Severity::Suspicious, 3000),
@@ -216,28 +220,17 @@ mod tests {
     }
 
     #[test]
-    fn nothing_judged_is_not_a_clean_bill() {
-        assert_eq!(worst([]), None);
-    }
-
-    #[test]
-    fn one_engine_alone_decides() {
-        let only = at(Severity::Suspicious, 3000);
-        assert_eq!(worst([only]), Some(only));
-    }
-
-    #[test]
     fn scan_and_isomer_fold_to_the_worse_one() {
         // The case the differential exists for: scan sees a clean file, the
         // diff against the previous release does not.
         let scan = clean();
         let isomer = at(Severity::Hostile, 25);
-        assert_eq!(worst([scan, isomer]), Some(isomer));
+        assert_eq!(verdict(scan, Some(isomer)), isomer);
 
         // And the reverse: a hostile file whose release added nothing.
         let scan = at(Severity::Hostile, 25);
         let isomer = clean();
-        assert_eq!(worst([scan, isomer]), Some(scan));
+        assert_eq!(verdict(scan, Some(isomer)), scan);
     }
 
     #[test]
@@ -245,7 +238,7 @@ mod tests {
         // No isomer outcome at all is the common case; it must not dilute or
         // raise what scan concluded on its own.
         let scan = at(Severity::Suspicious, 3000);
-        assert_eq!(worst([scan].into_iter().chain(None)), Some(scan));
+        assert_eq!(verdict(scan, None), scan);
     }
 
     #[test]

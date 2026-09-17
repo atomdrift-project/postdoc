@@ -39,15 +39,15 @@ pub struct Baseline {
     /// The bytes that were compared against.
     pub sha256: String,
     /// The coordinate of that release, when it is known.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub purl: Option<String>,
     /// Its version string, when it is known.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
     /// The corpus label it carries — hopper's vocabulary, not postdoc's, so a
     /// value this build has not heard of is still reported rather than
     /// refused. A baseline may legitimately be one that was itself convicted.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
     /// The budget at which the baseline itself grades hostile, if it has a
     /// verdict on file. Lets a reader weigh a comparison against a bad
@@ -94,33 +94,15 @@ impl Report {
     /// caller gates on; the evidence is what it asks for when it wants to
     /// know why.
     pub fn strip_raw(&mut self) {
-        for judge in self.judges_mut() {
-            judge.strip_raw();
-        }
-    }
-
-    /// Every judge, in the order they appear in the report.
-    pub fn judges_mut(&mut self) -> [&mut EngineJudge; 5] {
-        [
+        for judge in [
             &mut self.cleave,
             &mut self.ml,
             &mut self.llm,
             &mut self.diff,
             &mut self.diff_llm,
-        ]
-    }
-
-    /// Every judge, paired with the engine it came from.
-    #[must_use]
-    pub fn judges(&self) -> [(crate::report::JudgeId, &EngineJudge); 5] {
-        use crate::report::JudgeId;
-        [
-            (JudgeId::Cleave, &self.cleave),
-            (JudgeId::Ml, &self.ml),
-            (JudgeId::Llm, &self.llm),
-            (JudgeId::Diff, &self.diff),
-            (JudgeId::DiffLlm, &self.diff_llm),
-        ]
+        ] {
+            judge.strip_raw();
+        }
     }
 }
 
@@ -138,7 +120,7 @@ mod tests {
             severity,
             fires_at,
             confidence: None,
-            duration_ms: 10,
+            duration_ms: Some(10),
             version: "test".to_owned(),
             raw: Some(raw(json)),
         })
@@ -265,7 +247,13 @@ mod tests {
 
         let json = serde_json::to_value(&stripped).unwrap();
         assert_eq!(json["verdict"]["severity"], "hostile");
-        for (id, judge) in stripped.judges() {
+        for (id, judge) in [
+            (JudgeId::Cleave, &stripped.cleave),
+            (JudgeId::Ml, &stripped.ml),
+            (JudgeId::Llm, &stripped.llm),
+            (JudgeId::Diff, &stripped.diff),
+            (JudgeId::DiffLlm, &stripped.diff_llm),
+        ] {
             if let Some(assessment) = judge.assessment() {
                 assert!(assessment.raw.is_none(), "{id} kept its evidence");
             }

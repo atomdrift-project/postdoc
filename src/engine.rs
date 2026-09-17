@@ -2,9 +2,10 @@
 //!
 //! Scan grades into three classes and a firing level; isomer grades into five
 //! severities and maps them into scan's three itself. This module is where
-//! those arrive, and it is the only place in postdoc that names an engine's
-//! types. [`crate::report`] stays free of them so the wire contract can be
-//! reviewed and tested without an analysis stack.
+//! those arrive, and it is the only place in postdoc that translates an
+//! engine's vocabulary into postdoc's — every grade mapping, both directions,
+//! on one screen. [`crate::report`] stays free of engine types so the wire
+//! contract can be reviewed and tested without an analysis stack.
 //!
 //! Nothing here decides anything. Each conversion is a rename of a grade the
 //! engine already settled on, and the one judgement call — what isomer's
@@ -25,6 +26,34 @@ impl From<scan::Classification> for Severity {
             // the engine's own output for whoever needs the detail.
             _ => Self::Benign,
         }
+    }
+}
+
+/// Scan's per-file interpreter grade, in postdoc's bands.
+///
+/// The same three bands under a different name, so this is a rename.
+impl From<scan::interpret::LlmGrade> for Severity {
+    fn from(grade: scan::interpret::LlmGrade) -> Self {
+        match grade {
+            scan::interpret::LlmGrade::Hostile => Self::Hostile,
+            scan::interpret::LlmGrade::Suspicious => Self::Suspicious,
+            scan::interpret::LlmGrade::Benign => Self::Benign,
+        }
+    }
+}
+
+/// A postdoc band as scan names it.
+///
+/// The inverse of [`Severity`]'s `From<scan::Classification>`, needed to ask
+/// scan where a band's synthesized level sits. It lives beside that impl so
+/// the two directions cannot drift apart; the orphan rule is why it is a
+/// function and not a `From`.
+#[must_use]
+pub fn classification(severity: Severity) -> scan::Classification {
+    match severity {
+        Severity::Hostile => scan::Classification::Hostile,
+        Severity::Suspicious => scan::Classification::Suspicious,
+        Severity::Benign => scan::Classification::Benign,
     }
 }
 
@@ -58,6 +87,31 @@ pub fn isomer_severity(severity: isomer::Severity) -> Severity {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_grade_keeps_its_band() {
+        assert_eq!(
+            Severity::from(scan::interpret::LlmGrade::Hostile),
+            Severity::Hostile
+        );
+        assert_eq!(
+            Severity::from(scan::interpret::LlmGrade::Suspicious),
+            Severity::Suspicious
+        );
+        assert_eq!(
+            Severity::from(scan::interpret::LlmGrade::Benign),
+            Severity::Benign
+        );
+    }
+
+    #[test]
+    fn a_band_survives_the_round_trip_through_scans_vocabulary() {
+        // The two directions live together so they cannot drift; this is what
+        // says they still agree.
+        for severity in Severity::ALL {
+            assert_eq!(Severity::from(classification(severity)), severity);
+        }
+    }
 
     #[test]
     fn a_scan_class_keeps_its_meaning() {

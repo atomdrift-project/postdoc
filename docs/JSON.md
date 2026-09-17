@@ -1,11 +1,16 @@
 # The postdoc result object
 
 One analyzed artifact produces one of these. It is what `postdoc worker`
-posts to hopper, and what `postdoc serve` answers with when a caller asks for
-the full shape.
+posts to hopper, and what `postdoc serve` answers on `/v2`.
 
-Schema version `"1"`. This document is the contract; the types are in
-`src/report.rs`.
+It does **not** appear on `/v1`. That is scan's contract and postdoc inherits
+it unchanged, so `/v1/analyze?full=1` keeps returning `{ml, llm, raw}` and
+`/v1/lookup` keeps answering the decision shape it answers today. This object
+is a different shape rather than an extension of that one, which is what
+makes it a new version instead of a new field.
+
+Schema version `"1"` — the object's own, independent of the route's. This
+document is the contract; the types are in `src/report.rs`.
 
 ## Top level
 
@@ -82,9 +87,15 @@ Three shapes, discriminated by `status`.
 | `severity`    | string        | `benign`, `suspicious` or `hostile`. |
 | `fires_at`    | int \| null   | Always present, `null` when the engine measures no level. |
 | `confidence`  | float         | `0..1`. **Omitted** where the engine reports none. |
-| `duration_ms` | int           | How long this engine took. |
+| `duration_ms` | int           | How long this engine took. **Omitted** where it is not separately measured — see below. |
 | `version`     | string        | The engine build, model or ruleset behind it. |
 | `raw`         | object        | The engine's native output. **Omitted** unless asked for. |
+
+`duration_ms` is omitted rather than guessed. Some engines share a call:
+cleave's analysis and the model's inference happen inside one pass through
+scan and are not split, and isomer's interpreter runs inside its judgement.
+An invented share of a combined measurement would read like a real one to
+whoever is chasing a slow analysis.
 
 **`"skipped"`** — the engine was not asked. Exactly two fields, `status` and
 `reason`. Nothing ran, so there is nothing else to report.

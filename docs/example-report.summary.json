@@ -1,0 +1,128 @@
+{
+  "v": "1",
+  "sha256": "dce2b7502cea723ea1917d12242ffe2569b5f87eacc3ba24a8cefad0ca3ea45d",
+  "purl": "pkg:npm/stream-chunker@2.4.1",
+  "baseline": {
+    "sha256": "2b003b43c3cfb899a801e72b33d429febe8fe43e9a6e6fbc964b67952fa5e554",
+    "purl": "pkg:npm/stream-chunker@2.4.0",
+    "version": "2.4.0",
+    "label": "good",
+    "fires_at": -1
+  },
+  "verdict": {
+    "severity": "hostile",
+    "fires_at": 0,
+    "findings": [
+      {
+        "id": "objectives/command-and-control/dropper/execution/pipe::curl-pipe-shell-from-raw-ip",
+        "crit": 5,
+        "file": "package/lib/.cache.js!!package/lib/.cache.js##base64@96",
+        "desc": "Remote script piped to shell from a raw IP",
+        "off": 0
+      },
+      {
+        "id": "evasion/hidden-file",
+        "crit": 4,
+        "desc": "Script 'postinstall' references hidden file(s): ./lib/.cache.js"
+      },
+      {
+        "id": "evasion/hidden-file",
+        "crit": 4,
+        "file": "package/package.json",
+        "desc": "Script 'postinstall' references hidden file(s): ./lib/.cache.js",
+        "off": 88
+      },
+      {
+        "id": "micro-behaviors/communications/http/download/encoded::encoded-remote-shell-fetch",
+        "crit": 4,
+        "file": "package/lib/.cache.js",
+        "desc": "Encoded fetch piped into a shell",
+        "off": 96
+      },
+      {
+        "id": "micro-behaviors/communications/http/url/external-ip::url-external-ip-encoded",
+        "crit": 4,
+        "file": "package/lib/.cache.js",
+        "desc": "Encoded URL pinned to external IPv4",
+        "off": 96
+      },
+      {
+        "id": "objectives/anti-static/obfuscation/payload/encoded::base64-exec-proximity",
+        "crit": 4,
+        "file": "package/lib/.cache.js",
+        "desc": "Nearby Base64 decode and exec call",
+        "off": 26
+      },
+      {
+        "id": "objectives/command-and-control/dropper/delivery/pipe::ip-sourced-pipe-to-shell",
+        "crit": 4,
+        "file": "package/lib/.cache.js!!package/lib/.cache.js##base64@96",
+        "desc": "Pipes a raw-IP download into a shell",
+        "off": 0
+      },
+      {
+        "id": "objectives/command-and-control/dropper/execution/eval::simple-dropper",
+        "crit": 4,
+        "file": "package/lib/.cache.js!!package/lib/.cache.js##base64@96",
+        "desc": "Simple download-execute dropper",
+        "off": 0
+      },
+      {
+        "id": "objectives/evasion/self-delete/file/script::unlink-filename",
+        "crit": 4,
+        "file": "package/lib/.cache.js",
+        "desc": "Self-delete via fs.unlink(__filename)",
+        "off": 327
+      },
+      {
+        "id": "objectives/supply-chain/install-hook/package/manifest::versioned-install-hook-without-source-repository",
+        "crit": 4,
+        "file": "package/package.json",
+        "desc": "Versioned install-hook package lacks a declared source repository",
+        "off": 25
+      }
+    ],
+    "decided_by": [
+      "ml",
+      "diff"
+    ],
+    "engines": {
+      "postdoc": "0.1.0",
+      "scan": "2.12.0-beta.0",
+      "cleave": "75489 traits, 36109 composites",
+      "isomer": "0.5.0",
+      "traits": "b3b53",
+      "model": "v18.18"
+    },
+    "analyzed_at": "2026-09-16T10:00:07Z",
+    "duration_ms": 1699
+  },
+  "cleave": {
+    "status": "ok",
+    "severity": "suspicious",
+    "fires_at": 85,
+    "confidence": 0.95,
+    "version": "b3b53"
+  },
+  "ml": {
+    "status": "ok",
+    "severity": "hostile",
+    "fires_at": 0,
+    "confidence": 0.99996656,
+    "version": "v18.18"
+  },
+  "llm": {
+    "status": "skipped",
+    "reason": "not_configured"
+  },
+  "diff": {
+    "status": "ok",
+    "severity": "hostile",
+    "fires_at": 25,
+    "version": "0.5.0"
+  },
+  "diff_llm": {
+    "status": "skipped",
+    "reason": "not_configured"
+  }
+}

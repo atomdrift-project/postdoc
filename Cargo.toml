@@ -28,6 +28,44 @@ atomdrift-scan = { git = "https://github.com/atomdrift-project/scan.git" }
 # The differential judge.
 isomer = { git = "https://github.com/atomdrift-project/isomer.git" }
 
+# The binary's own needs: argument parsing, the async runtime the worker loop
+# runs on, and the subscriber that gives the analysis stack's `tracing` output
+# somewhere to go. postdoc emits no log records of its own — the engines do,
+# and a binary only has to install the sink — so the `tracing` facade itself is
+# not a dependency here.
+clap = { version = "4", features = ["derive", "env", "wrap_help"] }
+tokio = { version = "1", features = ["rt-multi-thread"] }
+anyhow = "1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Windows has no jemalloc here; mimalloc plays the same role. The CRT heap was
+# 12% exclusive on a two-Go profile and rayon workers convoy on it, which is
+# the same failure jemalloc is chosen to avoid elsewhere. Keep in lockstep with
+# `mod mimalloc_alloc` in src/main.rs.
+[target.'cfg(windows)'.dependencies]
+mimalloc = { version = "0.1", default-features = false }
+# `extended` exposes `mi_collect`. mimalloc has no background purge thread, so
+# an idle worker never returns retained segments on its own — and its RSS gates
+# its own intake.
+libmimalloc-sys = { version = "0.1", features = ["extended"] }
+tree-sitter = "0.27"
+
+# Keep this list in lockstep with `mod jemalloc` in src/main.rs. The tuning
+# string itself is `cleave::JEMALLOC_CONF`, shared with ../scan so every binary
+# running cleave's analysis gets the same allocator behaviour.
+[target.'cfg(all(unix, not(any(target_os = "freebsd", target_os = "dragonfly", target_os = "netbsd", target_os = "openbsd", target_os = "illumos", target_os = "solaris"))))'.dependencies]
+tikv-jemallocator = "0.7"
+# Already beneath tikv-jemallocator; named directly for its
+# malloc/calloc/realloc/free declarations, which carry the right C signatures
+# and the `_rjem_` link_name prefix its build script decides on.
+tikv-jemalloc-sys = "0.7"
+# Direct handle on tree-sitter (already in the graph via cleave) purely to call
+# `set_allocator` at startup: its C core otherwise allocates through the system
+# malloc, invisible to every jemalloc budget and decay policy the fleet is
+# tuned around. Version stays in lockstep with cleave's; `links =
+# "tree-sitter-language"` makes divergence a loud resolve error.
+tree-sitter = "0.27"
+
 # Mirrors the patch sections in ../cleave, ../scan and ../isomer. A [patch]
 # applies only from the root manifest, so every crate that can be a root has
 # to carry its own copy — postdoc is a root, so this is not optional and not

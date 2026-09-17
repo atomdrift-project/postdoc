@@ -78,15 +78,6 @@ pub enum Level {
 }
 
 impl Level {
-    /// The wire encoding: `-1` for [`Level::Never`], else the budget.
-    #[must_use]
-    pub const fn as_i32(self) -> i32 {
-        match self {
-            Self::At(budget) => budget as i32,
-            Self::Never => -1,
-        }
-    }
-
     /// The worse of two levels.
     ///
     /// Firing anywhere beats never firing, and among those that fire the
@@ -103,7 +94,11 @@ impl Level {
 
 impl Serialize for Level {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_i32(self.as_i32())
+        // `-1` for `Never`, else the budget.
+        serializer.serialize_i32(match *self {
+            Self::At(budget) => i32::from(budget),
+            Self::Never => -1,
+        })
     }
 }
 
@@ -238,10 +233,17 @@ pub struct Assessment<R> {
     /// The budget at which it grades hostile, when the engine measures one.
     pub fires_at: Option<Level>,
     /// The engine's own confidence, where it reports one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub confidence: Option<f32>,
-    /// Wall-clock time this engine took.
-    pub duration_ms: u64,
+    /// Wall-clock time this engine took, where it is separately measured.
+    ///
+    /// Omitted rather than guessed. Some engines share a call: cleave's
+    /// analysis and the model's inference happen inside one pass through
+    /// scan and are not split, and isomer's interpreter runs inside its
+    /// judgement. Reporting an invented share of a combined measurement
+    /// would read like a real one to whoever is chasing a slow analysis.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
     /// The engine build, model, or ruleset that produced this.
     pub version: String,
     /// The engine's native output. Absent when the caller did not ask for it.
@@ -327,22 +329,17 @@ enum Status {
 /// A judge as it lies on the wire, before its invariants are checked.
 ///
 /// Flat and permissive on purpose: this shape exists only so serde hands the
-/// real deserializer to the `raw` field. [`Judge`]'s own `Deserialize` turns
+/// real deserializer to the `raw` field. Every field is `Option`, which serde
+/// already reads as absent-means-`None`, so none of them needs a `default`. [`Judge`]'s own `Deserialize` turns
 /// one of these into a value whose status and contents cannot disagree.
 #[derive(Deserialize)]
 struct JudgeWire<R> {
     status: Status,
-    #[serde(default)]
     reason: Option<String>,
-    #[serde(default)]
     severity: Option<Severity>,
-    #[serde(default)]
     fires_at: Option<Level>,
-    #[serde(default)]
     confidence: Option<f32>,
-    #[serde(default)]
     duration_ms: Option<u64>,
-    #[serde(default)]
     version: Option<String>,
     raw: Option<R>,
 }
@@ -357,9 +354,7 @@ impl<'de, R: Deserialize<'de>> Deserialize<'de> for Judge<R> {
                     .ok_or_else(|| D::Error::missing_field("severity"))?,
                 fires_at: wire.fires_at,
                 confidence: wire.confidence,
-                duration_ms: wire
-                    .duration_ms
-                    .ok_or_else(|| D::Error::missing_field("duration_ms"))?,
+                duration_ms: wire.duration_ms,
                 version: wire
                     .version
                     .ok_or_else(|| D::Error::missing_field("version"))?,
@@ -397,19 +392,19 @@ pub struct Finding {
     /// Criticality ordinal: 3 notable, 4 suspicious, 5 hostile.
     pub crit: u8,
     /// The member file it fired on, within an archive.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub file: Option<String>,
     /// The package the member belongs to, when it is a dependency.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub pkg: Option<String>,
     /// One-line description of the trait.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub desc: Option<String>,
     /// Byte offset of the match.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub off: Option<u64>,
     /// Line number of the match, in text.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub line: Option<u64>,
 }
 
@@ -445,7 +440,7 @@ pub struct Verdict {
     /// The budget at which this artifact grades hostile.
     pub fires_at: Option<Level>,
     /// One sentence from whichever interpreter spoke, when one did.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     /// The worst findings, worst first.
     pub findings: Vec<Finding>,
@@ -558,7 +553,7 @@ mod tests {
             severity: Severity::Hostile,
             fires_at: Some(Level::At(25)),
             confidence: Some(0.93),
-            duration_ms: 80,
+            duration_ms: Some(80),
             version: "2.12.0".to_owned(),
             raw: Some(raw()),
         });
@@ -580,7 +575,7 @@ mod tests {
             severity: Severity::Benign,
             fires_at: None,
             confidence: None,
-            duration_ms: 900,
+            duration_ms: Some(900),
             version: "abc12345".to_owned(),
             raw: None,
         });
@@ -633,7 +628,7 @@ mod tests {
             severity: Severity::Suspicious,
             fires_at: Some(Level::At(3000)),
             confidence: None,
-            duration_ms: 1,
+            duration_ms: Some(1),
             version: "v".to_owned(),
             raw: None::<Raw>,
         });
@@ -660,7 +655,7 @@ mod tests {
             severity: Severity::Hostile,
             fires_at: Some(Level::At(25)),
             confidence: Some(0.9),
-            duration_ms: 80,
+            duration_ms: Some(80),
             version: "2.12.0".to_owned(),
             raw: Some(raw()),
         });
@@ -700,10 +695,6 @@ mod tests {
                 r#"{"status":"ok","duration_ms":1,"version":"v"}"#,
             ),
             (
-                "duration_ms",
-                r#"{"status":"ok","severity":"benign","version":"v"}"#,
-            ),
-            (
                 "version",
                 r#"{"status":"ok","severity":"benign","duration_ms":1}"#,
             ),
@@ -714,6 +705,22 @@ mod tests {
                 "expected the error to name `{missing}`, got: {err}"
             );
         }
+    }
+
+    #[test]
+    fn a_timing_nobody_measured_is_absent_rather_than_zero() {
+        // Zero would read as "instant" to whoever is chasing a slow analysis.
+        let judge: Judge<Raw> = Judge::Ok(Assessment {
+            severity: Severity::Benign,
+            fires_at: Some(Level::Never),
+            confidence: None,
+            duration_ms: None,
+            version: "v".to_owned(),
+            raw: None,
+        });
+        let json = serde_json::to_value(&judge).unwrap();
+        assert!(json.get("duration_ms").is_none(), "absent, not zero");
+        assert_eq!(serde_json::from_value::<Judge<Raw>>(json).unwrap(), judge);
     }
 
     #[test]

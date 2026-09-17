@@ -1,0 +1,2889 @@
+{
+  "v": "9",
+  "rev": "b3b53",
+  "root": "dce2b7502cea723ea1917d12242ffe2569b5f87eacc3ba24a8cefad0ca3ea45d",
+  "truncated": false,
+  "nodes": {
+    "dce2b7502cea723ea1917d12242ffe2569b5f87eacc3ba24a8cefad0ca3ea45d": {
+      "type": "npm",
+      "size": 1137,
+      "risk": 358,
+      "mol": "K(Mc)O\u2086(C\u2084AsErS\u2086DyXe)H\u2084(Cm\u2081\u2081Db\u2088OsPo\u2087)Md\u2083(InPa\u2084)",
+      "metrics": {
+        "binary": {
+          "peak_region_bytes": 1024,
+          "peak_region_entropy": 7.73
+        },
+        "file": {
+          "entropy": 7.75,
+          "size": 1137
+        },
+        "parse": {
+          "error_count": 1
+        }
+      },
+      "traits": [
+        {
+          "id": "objectives/supply-chain/install-hook/scripts/hook-file::process-env-json-payload",
+          "crit": 3,
+          "conf": 0.94,
+          "via": [
+            "75c70c563bd1c42d6ad0a75a23c0cda8f0de299e25d84a7bdbea96f48a0d18fd"
+          ]
+        },
+        {
+          "id": "micro-behaviors/process/create/shell/bridge::child-process-module-near-exec-call",
+          "crit": 3,
+          "conf": 0.94,
+          "uses": [
+            39,
+            62
+          ],
+          "via": [
+            "75c70c563bd1c42d6ad0a75a23c0cda8f0de299e25d84a7bdbea96f48a0d18fd"
+          ]
+        },
+        {
+          "id": "micro-behaviors/communications/http/request/client::http-client-usage",
+          "crit": 3,
+          "conf": 0.7,
+          "uses": [
+            86
+          ],
+          "via": [
+            "75c70c563bd1c42d6ad0a75a23c0cda8f0de299e25d84a7bdbea96f48a0d18fd"
+          ]
+        },
+        {
+          "id": "micro-behaviors/communications/url/encoded::encoded-http-url",
+          "crit": 3,
+          "conf": 0.85,
+          "via": [
+            "75c70c563bd1c42d6ad0a75a23c0cda8f0de299e25d84a7bdbea96f48a0d18fd"
+          ]
+        },
+        {
+          "id": "micro-behaviors/process/create/shell/spawn::curl-pipe-exec-sh-node",
+          "crit": 3,
+          "conf": 0.9,
+          "via": [
+            "75c70c563bd1c42d6ad0a75a23c0cda8f0de299e25d84a7bdbea96f48a0d18fd"
+          ]
+        },
+        {
+          "id": "micro-behaviors/communications/ip/literal::http-ip-url",
+          "crit": 3,
+          "conf": 0.95,
+          "uses": [
+            58
+          ],
+          "via": [
+            "75c70c563bd1c42d6ad0a75a23c0cda8f0de299e25d84a7bdbea96f48a0d18fd",
+            "b0b83fa5adc7498ff7c014cf126f4a508f503d3c98eeac61f182621b1c7eabff"
+          ]
+        },
+        {
+          "id": "micro-behaviors/data/decode/symbol-base64::buffer-from-base64",
+          "crit": 3,
+          "conf": 0.8,
+          "via": [
+            "75c70c563bd1c42d6ad0a75a23c0cda8f0de299e25d84a7bdbea96f48a0d18fd"
+          ]
+        },
+        {
+          "id": "supply-chain/missing-author",
+          "crit": 3,
+          "conf": 0.5
+        },
+        {
+          "id": "micro-behaviors/data/source/property/identity::host-user-object-fields",
+          "crit": 3,
+          "conf": 0.9,
+          "via": [
+            "75c70c563bd1c42d6ad0a75a23c0cda8f0de299e25d84a7bdbea96f48a0d18fd"
+          ]
+        },
+        {
+          "id": "objectives/command-and-control/dropper/execution/pipe::curl-pipe-shell-from-raw-ip",
+          "crit": 5,
+          "conf": 0.96,
+          "uses": [
+            5,
+            64
+          ],
+          "via": [
+            "75c70c563bd1c42d6ad0a75a23c0cda8f0de299e25d84a7bdbea96f48a0d18fd",
+            "b0b83fa5adc7498ff7c014cf126f4a508f503d3c98eeac61f182621b1c7eabff"
+          ]
+        },
+        {
+          "id": "micro-behaviors/communications/http/request/client::javascript-http-request-channel",
+          "crit": 3,
+          "conf": 0.9,
+          "uses": [
+            80
+          ],
+          "via": [
+            "75c70c563bd1c42d6ad0a75a23c0cda8f0de299e25d84a7bdbea96f48a0d18fd"
+          ]
+        },
+        {
+          "id": "objectives/command-and-control/dropper/delivery/pipe::curl-pipe-sh",
+          "crit": 3,
+          "conf": 0.7,
+          "via": [
+            "75c70c563bd1c42d6ad0a75a23c0cda8f0de299e25d84a7bdbea96f48a0d18fd"
+          ]
+        },
+        {
+          "id": "micro-behaviors/communications/http/post::request-options-post-method",
+          "crit": 3,
+          "conf": 0.86,
+          "via": [
+            "75c70c563bd1c42d6ad0a75a23c0cda8f0de299e25d84a7bdbea96f48a0d18fd"
+          ]
+        },
+        {
+          "id": "micro-behaviors/data/buffer::node-buffer-tostring-call",
+          "crit": 3,
+          "conf": 0.88,
+          "via": [
+            "75c70c563bd1c42d6ad0a75a23c0cda8f0de299e25d84a7bdbea96f48a0d18fd"
+          ]
+        },
+        {
+          "id": "objectives/supply-chain/install-hook/package/manifest::postinstall-runs-node-script",
+          "crit": 3,
+          "conf": 0.92
+        },
+        {
+          "id": "micro-behaviors/os/env/read::javascript",
+          "crit": 2,
+          "conf": 0.8,
+          "via": [
+            "75c70c563bd1c42d6ad0a75a23c0cda8f0de299e25d84a7bdbea96f48a0d18fd"
+          ]
+        },
+        {
+          "id": "objectives/supply-chain/install-hook/package/manifest::versioned-install-hook-without-source-repository",
+          "crit": 4,
+          "conf": 0.9,
+          "uses": [
+            20,
+            37
+          ],
+          "via": [
+            "dc82e038cdf32d9e1ef012742d2e1c2e2c922f1f83220cbda37380674d982c80"
+          ]
+        },
+        {
+          "id": "objectives/supply-chain/install-hook/scripts/declaration::postinstall-hook-declaration",
+          "crit": 3,
+          "conf": 0.96
+        },
+        {
+          "id": "metadata/package/scripts/lifecycle::versioned-install-hook-without-source-repository",
+          "crit": 3,
+          "conf": 0.9,
+          "uses": [
+            20,
+            37
+          ],
+          "via": [
+            "dc82e038cdf32d9e1ef012742d2e1c2e2c922f1f83220cbda37380674d982c80"
+          ]
+        },
+        {
+          "id": "micro-behaviors/communications/http/request/client::https-request",
+          "crit": 3,
+          "conf": 0.7,
+          "via": [
+            "75c70c563bd1c42d6ad0a75a23c0cda8f0de299e25d84a7bdbea96f48a0d18fd"
+          ]
+        },
+        {
+          "id": "metadata/package/scripts/lifecycle::install-hooks",
+          "crit": 2,
+          "conf": 1.0,
+          "uses": [
+            76
+          ],
+          "via": [
+            "dc82e038cdf32d9e1ef012742d2e1c2e2c922f1f83220cbda37380674d982c80"
+          ]
+        },
+        {
+          "id": "objectives/supply-chain/hidden-payload/runtime::node-base64-buffer-decode",
+          "crit": 3,
+          "conf": 0.88,
+          "via": [
+            "75c70c563bd1c42d6ad0a75a23c0cda8f0de299e25d84a7bdbea96f48a0d18fd"
+          ]
+        },
+        {
+          "id": "metadata/import/builtin::require-https",
+          "crit": 3,
+          "conf": 0.78,
+          "via": [
+            "75c70c563bd1c42d6ad0a75a23c0cda8f0de299e25d84a7bdbea96f48a0d18fd"
+          ]
+        },
+        {
+          "id": "micro-behaviors/data/control-flow/error-handling::empty-named-catch-text",
+          "crit": 3,
+          "conf": 0.92,
+          "via": [
+            "75c70c563bd1c42d6ad0a75a23c0cda8f0de299e25d84a7bdbea96f48a0d18fd"
+          ]
+        },
+        {
+          "id": "micro-behaviors/communications/http/download/curl::curl-cmd",
+          "crit": 2,
+          "conf": 0.7,
+          "via": [
+            "75c70c563bd1c42d6ad0a75a23c0cda8f0de299e25d84a7bdbea96f48a0d18fd"
+          ]
+        },
+        {
+          "id": "micro-behaviors/communications/http/post::node-https-request-post",
+          "crit": 3,
+          "conf": 0.84,
+          "via": [
+            "75c70c563bd1c42d6ad0a75a23c0cda8f0de299e25d84a7bdbea96f48a0d18fd"
+          ]
+        },
+        {
+          "id": "objectives/anti-static/obfuscation/payload/encoded::base64-exec-proximity",
+          "crit": 4,
+          "conf": 0.95,
+          "uses": [
+            32,
+            94
+          ],
+          "via": [
+            "75c70c563bd1c42d6ad0a75a23c0cda8f0de299e25d84a7bdbea96f48a0d18fd"
+          ]
+        },
+        {
+          "id": "metadata/package/versioning/scheme::npm-has-version",
+          "crit": 2,
+          "conf": 1.0
+        },
+        {
+          "id": "micro-behaviors/data/runtime/keywords::pipe-to-sh",
+          "crit": 1,
+          "conf": 0.88,
+          "via": [
+            "75c70c563bd1c42d6ad0a75a23c0cda8f0de299e25d84a7bdbea96f48a0d18fd"
+          ]
+        },
+        {
+          "id": "metadata/import/builtin::require-fs",
+          "crit": 2,
+          "conf": 0.7,
+          "via": [
+            "75c70c563bd1c42d6ad0a75a23c0cda8f0de299e25d84a7bdbea96f48a0d18fd"
+          ]
+        },
+        {
+          "id": "micro-behaviors/communications/http/request/body::http-upload-or-body-sink",
+          "crit": 1,
+          "conf": 0.86,
+          "uses": [
+            12,
+            25,
+            70,
+            80
+          ],
+          "via": [
+            "75c70c563bd1c42d6ad0a75a23c0cda8f0de299e25d84a7bdbea96f48a0d18fd"
+          ]
+        },
+        {
+          "id": "micro-behaviors/communications/ip/direct::external-ipv4-http-endpoint",
+          "crit": 3,
+          "conf": 0.95,
+          "uses": [
+            5
+          ],
+          "via": [
+            "75c70c563bd1c42d6ad0a75a23c0cda8f0de299e25d84a7bdbea96f48a0d18fd",
+            "b0b83fa5adc7498ff7c014cf126f4a508f503d3c98eeac61f182621b1c7eabff"
+          ]
+        },
+        {
+          "id": "micro-behaviors/process/create/exec::node-child-process-capability",
+          "crit": 3,
+          "conf": 0.8,
+          "uses": [
+            38
+          ],
+          "via": [
+            "75c70c563bd1c42d6ad0a75a23c0cda8f0de299e25d84a7bdbea96f48a0d18fd"
+          ]
+        },
+        {
+          "id": "metadata/package/empty::npm-empty-description-any",
+          "crit": 1,
+          "conf": 0.85,
+          "uses": [
+            27,
+            49
+          ],
+          "via": [
+            "dc82e038cdf32d9e1ef012742d2e1c2e2c922f1f83220cbda37380674d982c80"
+          ]
+        },
+        {
+          "id": "micro-behaviors/os/module/require::node-system-module-import-set",
+          "crit": 3,
+          "conf": 0.88,
+          "uses": [
+            22,
+            29,
+            38,
+            66
+          ],
+          "via": [
+            "75c70c563bd1c42d6ad0a75a23c0cda8f0de299e25d84a7bdbea96f48a0d18fd"
+          ]
+        },
+        {
+          "id": "well-known/malware/supply-chain/shai-hulud::antv-g-plugin-canvaskit-advisory-version",
+          "crit": 3,
+          "conf": 1.0
+        },
+        {
+          "id": "micro-behaviors/communications/http/request/client::http-method-calls",
+          "crit": 3,
+          "conf": 0.7,
+          "uses": [
+            19
+          ],
+          "via": [
+            "75c70c563bd1c42d6ad0a75a23c0cda8f0de299e25d84a7bdbea96f48a0d18fd"
+          ]
+        },
+        {
+          "id": "metadata/package/versioning/scheme::mature-version",
+          "crit": 2,
+          "conf": 0.7
+        },
+        {
+          "id": "metadata/import/builtin::require-child-process",
+          "crit": 3,
+          "conf": 0.8,
+          "via": [
+            "75c70c563bd1c42d6ad0a75a23c0cda8f0de299e25d84a7bdbea96f48a0d18fd"
+          ]
+        },
+        {
+          "id": "micro-behaviors/process/create/shell/bridge::child-process-keyword-literal",
+          "crit": 3,
+          "conf": 0.9,
+          "via": [
+            "75c70c563bd1c42d6ad0a75a23c0cda8f0de299e25d84a7bdbea96f48a0d18fd"
+          ]
+        },
+        {
+          "id": "objectives/command-and-control/beacon/network/http::direct-http-c2",
+          "crit": 4,
+          "conf": 0.95,
+          "uses": [
+            71,
+            101
+          ],
+          "via": [
+            "75c70c563bd1c42d6ad0a75a23c0cda8f0de299e25d84a7bdbea96f48a0d18fd",
+            "b0b83fa5adc7498ff7c014cf126f4a508f503d3c98eeac61f182621b1c7eabff"
+          ]
+        },
+        {
+          "id": "objectives/discovery/system/fingerprint/runtime::process-env-direct-dump",
+          "crit": 3,
+          "conf": 0.85,
+          "uses": [
+            15,
+            98
+          ],
+          "via": [
+            "75c70c563bd1c42d6ad0a75a23c0cda8f0de299e25d84a7bdbea96f48a0d18fd"
+          ]
+        },
+        {
+          "id": "micro-behaviors/communications/http/url/external-ip::url-external-ip-encoded",
+          "crit": 4,
+          "conf": 0.95,
+          "via": [
+            "75c70c563bd1c42d6ad0a75a23c0cda8f0de299e25d84a7bdbea96f48a0d18fd"
+          ]
+        },
+        {
+          "id": "micro-behaviors/process/create/shell/bridge::child-process-require",
+          "crit": 3,
+          "conf": 0.8,
+          "uses": [
+            38
+          ],
+          "via": [
+            "75c70c563bd1c42d6ad0a75a23c0cda8f0de299e25d84a7bdbea96f48a0d18fd"
+          ]
+        },
+        {
+          "id": "micro-behaviors/process/create/shell/path::shell-executable-reference",
+          "crit": 3,
+          "conf": 0.9,
+          "via": [
+            "75c70c563bd1c42d6ad0a75a23c0cda8f0de299e25d84a7bdbea96f48a0d18fd"
+          ]
+        },
+        {
+          "id": "evasion/hidden-file",
+          "crit": 4,
+          "conf": 0.85
+        },
+        {
+          "id": "micro-behaviors/data/decode/base64::node-base64-tostring-token",
+          "crit": 3,
+          "conf": 0.86,
+          "via": [
+            "75c70c563bd1c42d6ad0a75a23c0cda8f0de299e25d84a7bdbea96f48a0d18fd"
+          ]
+        },
+        {
+          "id": "metadata/encoded-payload/base64",
+          "crit": 3,
+          "conf": 0.9
+        },
+        {
+          "id": "objectives/supply-chain/install-hook/scripts/local-script::script-hidden-file-1",
+          "crit": 3,
+          "conf": 0.75
+        },
+        {
+          "id": "metadata/package/name/convention::npm-has-name",
+          "crit": 2,
+          "conf": 1.0
+        },
+        {
+          "id": "micro-behaviors/process/create/shell/pipeline::pipeline-terminates-in-shell",
+          "crit": 3,
+          "conf": 0.8,
+          "via": [
+            "75c70c563bd1c42d6ad0a75a23c0cda8f0de299e25d84a7bdbea96f48a0d18fd"
+          ]
+        },
+        {
+          "id": "micro-behaviors/data/string/conversion::tostring-call",
+          "crit": 3,
+          "conf": 0.94,
+          "via": [
+            "75c70c563bd1c42d6ad0a75a23c0cda8f0de299e25d84a7bdbea96f48a0d18fd"
+          ]
+        },
+        {
+          "id": "micro-behaviors/data/runtime/keywords::pipe-to-shell",
+          "crit": 1,
+          "conf": 0.88,
+          "uses": [
+            28
+          ],
+          "via": [
+            "75c70c563bd1c42d6ad0a75a23c0cda8f0de299e25d84a7bdbea96f48a0d18fd",
+            "b0b83fa5adc7498ff7c014cf126f4a508f503d3c98eeac61f182621b1c7eabff"
+          ]
+        },
+        {
+          "id": "micro-behaviors/process/create/load/local::try-require-empty-catch-text",
+          "crit": 3,
+          "conf": 0.97,
+          "via": [
+            "75c70c563bd1c42d6ad0a75a23c0cda8f0de299e25d84a7bdbea96f48a0d18fd"
+          ]
+        },
+        {
+          "id": "objectives/discovery/system/fingerprint/runtime::process-env-dump",
+          "crit": 3,
+          "conf": 0.88,
+          "uses": [
+            41
+          ],
+          "via": [
+            "75c70c563bd1c42d6ad0a75a23c0cda8f0de299e25d84a7bdbea96f48a0d18fd"
+          ]
+        },
+        {
+          "id": "metadata/package/files/runtime::javascript-lib-tree-artifact",
+          "crit": 3,
+          "conf": 0.95,
+          "via": [
+            "75c70c563bd1c42d6ad0a75a23c0cda8f0de299e25d84a7bdbea96f48a0d18fd"
+          ]
+        },
+        {
+          "id": "micro-behaviors/communications/http/request/client::node-http-client-imports",
+          "crit": 3,
+          "conf": 0.8,
+          "uses": [
+            22
+          ],
+          "via": [
+            "75c70c563bd1c42d6ad0a75a23c0cda8f0de299e25d84a7bdbea96f48a0d18fd"
+          ]
+        },
+        {
+          "id": "objectives/supply-chain/install-hook/scripts/declaration::sparse-package-install-hook",
+          "crit": 3,
+          "conf": 0.85,
+          "uses": [
+            20
+          ],
+          "via": [
+            "dc82e038cdf32d9e1ef012742d2e1c2e2c922f1f83220cbda37380674d982c80"
+          ]
+        },
+        {
+          "id": "micro-behaviors/communications/ip/literal::external-ipv4-http-url",
+          "crit": 3,
+          "conf": 0.9,
+          "via": [
+            "75c70c563bd1c42d6ad0a75a23c0cda8f0de299e25d84a7bdbea96f48a0d18fd"
+          ]
+        },
+        {
+          "id": "objectives/command-and-control/dropper/delivery/pipe::curl-pipe-shell",
+          "crit": 3,
+          "conf": 0.95,
+          "uses": [
+            11
+          ],
+          "via": [
+            "75c70c563bd1c42d6ad0a75a23c0cda8f0de299e25d84a7bdbea96f48a0d18fd",
+            "b0b83fa5adc7498ff7c014cf126f4a508f503d3c98eeac61f182621b1c7eabff"
+          ]
+        },
+        {
+          "id": "metadata/package/files/included::package-json-basename",
+          "crit": 3,
+          "conf": 0.95,
+          "via": [
+            "dc82e038cdf32d9e1ef012742d2e1c2e2c922f1f83220cbda37380674d982c80"
+          ]
+        },
+        {
+          "id": "micro-behaviors/communications/http/curl::curl-command-remote-url",
+          "crit": 3,
+          "conf": 0.85,
+          "via": [
+            "75c70c563bd1c42d6ad0a75a23c0cda8f0de299e25d84a7bdbea96f48a0d18fd"
+          ]
+        },
+        {
+          "id": "micro-behaviors/process/create/shell/bridge::object-exec-method-call",
+          "crit": 1,
+          "conf": 1.0,
+          "via": [
+            "75c70c563bd1c42d6ad0a75a23c0cda8f0de299e25d84a7bdbea96f48a0d18fd"
+          ]
+        },
+        {
+          "id": "metadata/package/empty::npm-low-quality-metadata",
+          "crit": 1,
+          "conf": 0.85,
+          "uses": [
+            27,
+            49,
+            87
+          ],
+          "via": [
+            "dc82e038cdf32d9e1ef012742d2e1c2e2c922f1f83220cbda37380674d982c80"
+          ]
+        },
+        {
+          "id": "micro-behaviors/process/create/shell/pipeline::curl-pipe-shell-text",
+          "crit": 3,
+          "conf": 0.9,
+          "via": [
+            "75c70c563bd1c42d6ad0a75a23c0cda8f0de299e25d84a7bdbea96f48a0d18fd"
+          ]
+        },
+        {
+          "id": "micro-behaviors/communications/ip/literal::external-ipv4-url-script",
+          "crit": 3,
+          "conf": 0.9,
+          "via": [
+            "75c70c563bd1c42d6ad0a75a23c0cda8f0de299e25d84a7bdbea96f48a0d18fd"
+          ]
+        },
+        {
+          "id": "metadata/import/builtin::require-os",
+          "crit": 2,
+          "conf": 0.7,
+          "via": [
+            "75c70c563bd1c42d6ad0a75a23c0cda8f0de299e25d84a7bdbea96f48a0d18fd"
+          ]
+        },
+        {
+          "id": "objectives/evasion/self-delete/file/script::unlink-filename",
+          "crit": 4,
+          "conf": 0.9,
+          "via": [
+            "75c70c563bd1c42d6ad0a75a23c0cda8f0de299e25d84a7bdbea96f48a0d18fd"
+          ]
+        },
+        {
+          "id": "metadata/package/freeform::pkg-skeleton-small",
+          "crit": 3,
+          "conf": 0.7,
+          "via": [
+            "dc82e038cdf32d9e1ef012742d2e1c2e2c922f1f83220cbda37380674d982c80"
+          ]
+        },
+        {
+          "id": "micro-behaviors/process/interpreter/shell::bin-sh",
+          "crit": 3,
+          "conf": 0.6,
+          "via": [
+            "75c70c563bd1c42d6ad0a75a23c0cda8f0de299e25d84a7bdbea96f48a0d18fd"
+          ]
+        },
+        {
+          "id": "micro-behaviors/communications/http/post::post",
+          "crit": 3,
+          "conf": 0.7,
+          "via": [
+            "75c70c563bd1c42d6ad0a75a23c0cda8f0de299e25d84a7bdbea96f48a0d18fd"
+          ]
+        },
+        {
+          "id": "objectives/command-and-control/remote-command/control::current-script-filename-marker",
+          "crit": 1,
+          "conf": 0.94,
+          "via": [
+            "75c70c563bd1c42d6ad0a75a23c0cda8f0de299e25d84a7bdbea96f48a0d18fd"
+          ]
+        },
+        {
+          "id": "metadata/import/builtin::runtime-api-import-set",
+          "crit": 3,
+          "conf": 0.8,
+          "uses": [
+            22,
+            29,
+            38,
+            66
+          ],
+          "via": [
+            "75c70c563bd1c42d6ad0a75a23c0cda8f0de299e25d84a7bdbea96f48a0d18fd"
+          ]
+        },
+        {
+          "id": "micro-behaviors/communications/ip/literal::external-ipv4-script",
+          "crit": 3,
+          "conf": 0.85,
+          "via": [
+            "75c70c563bd1c42d6ad0a75a23c0cda8f0de299e25d84a7bdbea96f48a0d18fd"
+          ]
+        },
+        {
+          "id": "objectives/command-and-control/dropper/delivery/pipe::ip-sourced-pipe-to-shell",
+          "crit": 4,
+          "conf": 0.93,
+          "uses": [
+            4,
+            11,
+            58
+          ],
+          "via": [
+            "75c70c563bd1c42d6ad0a75a23c0cda8f0de299e25d84a7bdbea96f48a0d18fd",
+            "b0b83fa5adc7498ff7c014cf126f4a508f503d3c98eeac61f182621b1c7eabff"
+          ]
+        },
+        {
+          "id": "micro-behaviors/communications/http/download/encoded::encoded-remote-shell-fetch",
+          "crit": 4,
+          "conf": 0.95,
+          "via": [
+            "75c70c563bd1c42d6ad0a75a23c0cda8f0de299e25d84a7bdbea96f48a0d18fd"
+          ]
+        },
+        {
+          "id": "objectives/supply-chain/install-hook/scripts/declaration::has-postinstall",
+          "crit": 3,
+          "conf": 0.85
+        },
+        {
+          "id": "objectives/execution/interpreter/script/npm::npm-postinstall-script",
+          "crit": 3,
+          "conf": 1.0
+        },
+        {
+          "id": "micro-behaviors/process/interpreter/npm::npm-script-interpreter",
+          "crit": 3,
+          "conf": 0.85
+        },
+        {
+          "id": "micro-behaviors/communications/http/download/curl::http-download-shell-launch-literal",
+          "crit": 3,
+          "conf": 0.96,
+          "via": [
+            "75c70c563bd1c42d6ad0a75a23c0cda8f0de299e25d84a7bdbea96f48a0d18fd"
+          ]
+        },
+        {
+          "id": "micro-behaviors/communications/http/request/client::post-method-text",
+          "crit": 3,
+          "conf": 0.94
+        },
+        {
+          "id": "micro-behaviors/data/decode/base64::base64-decode-call-text",
+          "crit": 3,
+          "conf": 0.86,
+          "via": [
+            "75c70c563bd1c42d6ad0a75a23c0cda8f0de299e25d84a7bdbea96f48a0d18fd"
+          ]
+        },
+        {
+          "id": "objectives/supply-chain/install-hook/scripts/dynamic-install::base64-decoded-module-const",
+          "crit": 3,
+          "conf": 0.9,
+          "via": [
+            "75c70c563bd1c42d6ad0a75a23c0cda8f0de299e25d84a7bdbea96f48a0d18fd"
+          ]
+        },
+        {
+          "id": "micro-behaviors/data/control-flow/error-handling::empty-catch-block",
+          "crit": 3,
+          "conf": 0.9
+        },
+        {
+          "id": "objectives/command-and-control/infrastructure/ip::ip-address-url",
+          "crit": 3,
+          "conf": 0.8,
+          "via": [
+            "75c70c563bd1c42d6ad0a75a23c0cda8f0de299e25d84a7bdbea96f48a0d18fd"
+          ]
+        },
+        {
+          "id": "micro-behaviors/data/serialize/json::parsed-or-environment-json-stringify",
+          "crit": 3,
+          "conf": 0.86,
+          "via": [
+            "75c70c563bd1c42d6ad0a75a23c0cda8f0de299e25d84a7bdbea96f48a0d18fd"
+          ]
+        },
+        {
+          "id": "micro-behaviors/communications/http/request/client::node-http",
+          "crit": 3,
+          "conf": 0.7,
+          "uses": [
+            19
+          ],
+          "via": [
+            "75c70c563bd1c42d6ad0a75a23c0cda8f0de299e25d84a7bdbea96f48a0d18fd"
+          ]
+        },
+        {
+          "id": "metadata/package/empty::npm-no-keywords",
+          "crit": 2,
+          "conf": 0.5
+        },
+        {
+          "id": "micro-behaviors/process/create/shell/spawn::curl-pipe-exec",
+          "crit": 3,
+          "conf": 0.9,
+          "uses": [
+            4
+          ],
+          "via": [
+            "75c70c563bd1c42d6ad0a75a23c0cda8f0de299e25d84a7bdbea96f48a0d18fd",
+            "b0b83fa5adc7498ff7c014cf126f4a508f503d3c98eeac61f182621b1c7eabff"
+          ]
+        },
+        {
+          "id": "micro-behaviors/data/control-flow/loop::js-length-loop-compound-add",
+          "crit": 3,
+          "conf": 0.85,
+          "via": [
+            "44d8422500d0823095bda9fc6f936ed2e0f31490d56f8fb5543e34f0581bd45a"
+          ]
+        },
+        {
+          "id": "metadata/package/entrypoint::main-root-javascript-entry",
+          "crit": 2,
+          "conf": 0.9
+        },
+        {
+          "id": "micro-behaviors/communications/http/request/client::generic-request-method-call",
+          "crit": 3,
+          "conf": 0.4,
+          "via": [
+            "75c70c563bd1c42d6ad0a75a23c0cda8f0de299e25d84a7bdbea96f48a0d18fd"
+          ]
+        },
+        {
+          "id": "micro-behaviors/os/module/require::cjs-require-in-try",
+          "crit": 3,
+          "conf": 0.9,
+          "via": [
+            "75c70c563bd1c42d6ad0a75a23c0cda8f0de299e25d84a7bdbea96f48a0d18fd"
+          ]
+        },
+        {
+          "id": "micro-behaviors/communications/http/download/curl::curl-silent-fail-flags-text",
+          "crit": 3,
+          "conf": 0.86,
+          "via": [
+            "75c70c563bd1c42d6ad0a75a23c0cda8f0de299e25d84a7bdbea96f48a0d18fd"
+          ]
+        },
+        {
+          "id": "micro-behaviors/data/decode/base64::base64-decoding",
+          "crit": 3,
+          "conf": 0.95,
+          "uses": [
+            6,
+            46
+          ],
+          "via": [
+            "75c70c563bd1c42d6ad0a75a23c0cda8f0de299e25d84a7bdbea96f48a0d18fd"
+          ]
+        },
+        {
+          "id": "micro-behaviors/data/string/conversion::tostring-token",
+          "crit": 3,
+          "conf": 1.0,
+          "via": [
+            "75c70c563bd1c42d6ad0a75a23c0cda8f0de299e25d84a7bdbea96f48a0d18fd"
+          ]
+        },
+        {
+          "id": "supply-chain/install-hook/postinstall",
+          "crit": 3,
+          "conf": 0.8
+        },
+        {
+          "id": "micro-behaviors/communications/http/download/cli::curl-wget-ipv4-url",
+          "crit": 3,
+          "conf": 0.95,
+          "via": [
+            "75c70c563bd1c42d6ad0a75a23c0cda8f0de299e25d84a7bdbea96f48a0d18fd"
+          ]
+        },
+        {
+          "id": "micro-behaviors/data/serialize/json::process-env-json-stringify",
+          "crit": 3,
+          "conf": 0.9
+        },
+        {
+          "id": "objectives/supply-chain/install-hook/package/manifest::postinstall-hook-key",
+          "crit": 3,
+          "conf": 0.85
+        },
+        {
+          "id": "micro-behaviors/communications/rpc::object-method-rpc-request",
+          "crit": 3,
+          "conf": 0.9,
+          "via": [
+            "75c70c563bd1c42d6ad0a75a23c0cda8f0de299e25d84a7bdbea96f48a0d18fd"
+          ]
+        },
+        {
+          "id": "micro-behaviors/communications/ip/literal::direct-ip-http-client",
+          "crit": 3,
+          "conf": 0.95,
+          "uses": [
+            2,
+            5,
+            10,
+            19,
+            24,
+            30,
+            36,
+            56,
+            80,
+            86,
+            91
+          ],
+          "via": [
+            "75c70c563bd1c42d6ad0a75a23c0cda8f0de299e25d84a7bdbea96f48a0d18fd",
+            "b0b83fa5adc7498ff7c014cf126f4a508f503d3c98eeac61f182621b1c7eabff"
+          ]
+        },
+        {
+          "id": "metadata/package/files/included::npm-publish-root-manifest",
+          "crit": 2,
+          "conf": 0.95,
+          "via": [
+            "dc82e038cdf32d9e1ef012742d2e1c2e2c922f1f83220cbda37380674d982c80"
+          ]
+        }
+      ],
+      "ctx": [
+        {
+          "ln": 0,
+          "b": "abZy8-B(h=00zRSzeXb$0ln/Ix=quiY/)Pthx1WPAdd/fQ:i5RQbDK9TY!Bjgrf#Nf$cyfcS4-u/AZ7aEuG2:)mXT#KD(YWJUH[es[U02kk]+QPal2?2vxENQ(VQOQf9cJ"
+        }
+      ]
+    },
+    "44d8422500d0823095bda9fc6f936ed2e0f31490d56f8fb5543e34f0581bd45a": {
+      "type": "javascript",
+      "size": 173,
+      "risk": 1,
+      "mol": "H(Db)",
+      "metrics": {
+        "ast": {
+          "call_count": 2,
+          "max_concat_chain": 2,
+          "max_depth": 12,
+          "member_count": 4,
+          "member_depth_max": 2,
+          "node_count": 87,
+          "op.add": 2,
+          "op.lt": 1,
+          "op_density.add": 0.02,
+          "op_density.lt": 0.01
+        },
+        "binary": {
+          "peak_region_bytes": 173,
+          "peak_region_entropy": 4.55
+        },
+        "binds": {
+          "count": 3
+        },
+        "file": {
+          "entropy": 4.55,
+          "size": 173
+        },
+        "functions": {
+          "avg_length_lines": 5,
+          "avg_name_length": 5,
+          "avg_param_name_length": 3.5,
+          "avg_params": 2,
+          "code_ratio": 0.83,
+          "density": 16.67,
+          "max_length_lines": 5,
+          "max_params": 2,
+          "min_length_lines": 5
+        },
+        "identifiers": {
+          "all_lowercase_ratio": 1,
+          "avg_entropy": 1.98,
+          "avg_length": 4.4,
+          "count": 20,
+          "length_stddev": 1.69,
+          "max_length": 7,
+          "min_length": 1,
+          "reuse_ratio": 0.5,
+          "sequential_names": 1,
+          "single_char_count": 1,
+          "single_char_ratio": 0.1,
+          "unique": 10
+        },
+        "strings": {
+          "avg_entropy": 2.92,
+          "avg_length": 10,
+          "bytes": 10,
+          "count": 1,
+          "max_length": 10
+        },
+        "text": {
+          "avg_line_length": 27.83,
+          "char_entropy": 4.55,
+          "digit_ratio": 0.01,
+          "identifier_density": 3.33,
+          "last_line_length": 2,
+          "line_length_stddev": 25.83,
+          "lines": 6,
+          "max_line_length": 78,
+          "max_ws_run": 1,
+          "normalized_string_count": 0.41,
+          "normalized_unique_identifiers": 3.87,
+          "space_count": 30,
+          "string_density": 0.17,
+          "suspicious_identifier_ratio": 0.1,
+          "top_char": 117,
+          "top_char_null": 0,
+          "top_char_ratio": 0.07,
+          "unique_chars": 36,
+          "whitespace_ratio": 0.21
+        }
+      },
+      "traits": [
+        {
+          "id": "micro-behaviors/data/control-flow/loop::js-length-loop-compound-add",
+          "crit": 3,
+          "conf": 0.85,
+          "at": [
+            [
+              79,
+              36
+            ]
+          ]
+        }
+      ],
+      "ctx": [
+        {
+          "ln": 0,
+          "line": 1,
+          "col": 1,
+          "b": "cV%GwaAITBx>8lji%]?ywozZ1e[GoDz/P@vauZ&VB-7Yhx(v(iv}Z15yBAUmw?k6Cx)KttaBsCray/tcB95KyB-X-?ax@bk3lQE6z/M%Gy?mYhx=]LYfGQy>auQ=QB.imxwO#d5xGEtJas/O$B7]@idiJLKBs}JPB7=$hB.imEy?Wx<c$$jPx=[]GB7]@idjEs=arUYoBAIRwaA8yAi%{x$3i"
+        }
+      ]
+    },
+    "dc82e038cdf32d9e1ef012742d2e1c2e2c922f1f83220cbda37380674d982c80": {
+      "type": "package.json",
+      "size": 127,
+      "risk": 78,
+      "mol": "K(Mc)O\u2082(S\u2083Xe)H(Po)Md(Pa\u2083)",
+      "metrics": {
+        "binary": {
+          "peak_region_bytes": 127,
+          "peak_region_entropy": 4.56
+        },
+        "file": {
+          "entropy": 4.56,
+          "size": 127
+        }
+      },
+      "traits": [
+        {
+          "id": "supply-chain/missing-author",
+          "crit": 3,
+          "conf": 0.5,
+          "at": [
+            [
+              0,
+              21
+            ]
+          ]
+        },
+        {
+          "id": "evasion/hidden-file",
+          "crit": 4,
+          "conf": 0.85,
+          "at": [
+            [
+              88,
+              15
+            ]
+          ]
+        },
+        {
+          "id": "supply-chain/install-hook/postinstall",
+          "crit": 3,
+          "conf": 0.8,
+          "at": [
+            [
+              88,
+              20
+            ]
+          ]
+        },
+        {
+          "id": "metadata/package/entrypoint::main-root-javascript-entry",
+          "crit": 2,
+          "conf": 0.9,
+          "at": [
+            [
+              43,
+              0
+            ]
+          ]
+        },
+        {
+          "id": "metadata/package/files/included::npm-publish-root-manifest",
+          "crit": 2,
+          "conf": 0.95
+        },
+        {
+          "id": "metadata/package/files/included::package-json-basename",
+          "crit": 3,
+          "conf": 0.95
+        },
+        {
+          "id": "metadata/package/name/convention::npm-has-name",
+          "crit": 2,
+          "conf": 1.0,
+          "at": [
+            [
+              1,
+              0
+            ]
+          ]
+        },
+        {
+          "id": "metadata/package/versioning/scheme::npm-has-version",
+          "crit": 2,
+          "conf": 1.0,
+          "at": [
+            [
+              25,
+              0
+            ]
+          ]
+        },
+        {
+          "id": "objectives/supply-chain/install-hook/scripts/local-script::script-hidden-file-1",
+          "crit": 3,
+          "conf": 0.75,
+          "at": [
+            [
+              77,
+              38
+            ]
+          ]
+        },
+        {
+          "id": "well-known/malware/supply-chain/shai-hulud::antv-g-plugin-canvaskit-advisory-version",
+          "crit": 3,
+          "conf": 1.0,
+          "at": [
+            [
+              25,
+              5
+            ]
+          ]
+        },
+        {
+          "id": "metadata/package/empty::npm-no-keywords",
+          "crit": 2,
+          "conf": 0.5
+        },
+        {
+          "id": "metadata/package/freeform::pkg-skeleton-small",
+          "crit": 3,
+          "conf": 0.7,
+          "at": [
+            [
+              25,
+              17
+            ]
+          ]
+        },
+        {
+          "id": "metadata/package/versioning/scheme::mature-version",
+          "crit": 2,
+          "conf": 0.7,
+          "at": [
+            [
+              25,
+              0
+            ]
+          ]
+        },
+        {
+          "id": "micro-behaviors/process/interpreter/npm::npm-script-interpreter",
+          "crit": 3,
+          "conf": 0.85,
+          "at": [
+            [
+              77,
+              20
+            ]
+          ]
+        },
+        {
+          "id": "objectives/execution/interpreter/script/npm::npm-postinstall-script",
+          "crit": 3,
+          "conf": 1.0,
+          "at": [
+            [
+              88,
+              20
+            ]
+          ]
+        },
+        {
+          "id": "objectives/supply-chain/install-hook/package/manifest::postinstall-hook-key",
+          "crit": 3,
+          "conf": 0.85,
+          "at": [
+            [
+              88,
+              20
+            ]
+          ]
+        },
+        {
+          "id": "objectives/supply-chain/install-hook/package/manifest::postinstall-runs-node-script",
+          "crit": 3,
+          "conf": 0.92,
+          "at": [
+            [
+              88,
+              20
+            ]
+          ]
+        },
+        {
+          "id": "objectives/supply-chain/install-hook/scripts/declaration::has-postinstall",
+          "crit": 3,
+          "conf": 0.85,
+          "at": [
+            [
+              88,
+              20
+            ]
+          ]
+        },
+        {
+          "id": "objectives/supply-chain/install-hook/scripts/declaration::postinstall-hook-declaration",
+          "crit": 3,
+          "conf": 0.96,
+          "at": [
+            [
+              88,
+              20
+            ]
+          ]
+        },
+        {
+          "id": "metadata/package/empty::npm-empty-description-any",
+          "crit": 1,
+          "conf": 0.85,
+          "at": [
+            [
+              1,
+              0
+            ]
+          ],
+          "uses": [
+            6,
+            7
+          ]
+        },
+        {
+          "id": "metadata/package/scripts/lifecycle::install-hooks",
+          "crit": 2,
+          "conf": 1.0,
+          "at": [
+            [
+              88,
+              0
+            ]
+          ],
+          "uses": [
+            17
+          ]
+        },
+        {
+          "id": "metadata/package/empty::npm-low-quality-metadata",
+          "crit": 1,
+          "conf": 0.85,
+          "at": [
+            [
+              1,
+              0
+            ]
+          ],
+          "uses": [
+            6,
+            7,
+            10
+          ]
+        },
+        {
+          "id": "metadata/package/scripts/lifecycle::versioned-install-hook-without-source-repository",
+          "crit": 3,
+          "conf": 0.9,
+          "at": [
+            [
+              25,
+              5
+            ],
+            [
+              88,
+              20
+            ]
+          ],
+          "uses": [
+            12,
+            20
+          ]
+        },
+        {
+          "id": "objectives/supply-chain/install-hook/package/manifest::versioned-install-hook-without-source-repository",
+          "crit": 4,
+          "conf": 0.9,
+          "at": [
+            [
+              25,
+              5
+            ],
+            [
+              88,
+              20
+            ]
+          ],
+          "uses": [
+            12,
+            20
+          ]
+        },
+        {
+          "id": "objectives/supply-chain/install-hook/scripts/declaration::sparse-package-install-hook",
+          "crit": 3,
+          "conf": 0.85,
+          "at": [
+            [
+              88,
+              20
+            ]
+          ],
+          "uses": [
+            20
+          ]
+        }
+      ],
+      "ctx": [
+        {
+          "ln": 0,
+          "line": 1,
+          "col": 1,
+          "b": "DM)uozdK[Lb6d<DwNPBcv}Z15yH}JgefYmGA=U@kzx.a=ga>yof^nd)zddc@b03]ZzE^s6e]2CKefX[Av}xL0wG<eVo?wqdefYdBA+PGmB0rU(b5?EwBzkSlByx04b03]=z!9A4e?.3PvLouzvpJ$Ze]2CKEshC"
+        }
+      ]
+    },
+    "75c70c563bd1c42d6ad0a75a23c0cda8f0de299e25d84a7bdbea96f48a0d18fd": {
+      "type": "javascript",
+      "size": 376,
+      "risk": 283,
+      "mol": "O\u2085(C\u2084AsErDyS\u2083)H\u2084(Cm\u2081\u2081Db\u2087OsPo\u2086)Md\u2083(InPa)",
+      "metrics": {
+        "ast": {
+          "call_count": 11,
+          "max_depth": 9,
+          "member_count": 8,
+          "member_depth_max": 3,
+          "node_count": 202
+        },
+        "binary": {
+          "peak_region_bytes": 376,
+          "peak_region_entropy": 5.43
+        },
+        "binds": {
+          "count": 5
+        },
+        "file": {
+          "entropy": 5.43,
+          "size": 376
+        },
+        "functions": {
+          "anonymous": 1,
+          "avg_length_lines": 1,
+          "code_ratio": 0.17,
+          "density": 16.67,
+          "max_length_lines": 1,
+          "min_length_lines": 1,
+          "no_params_count": 1,
+          "one_liners": 1
+        },
+        "identifiers": {
+          "all_lowercase_ratio": 0.83,
+          "all_uppercase_ratio": 0.04,
+          "avg_entropy": 1.92,
+          "avg_length": 5.04,
+          "count": 31,
+          "length_stddev": 2.58,
+          "max_length": 10,
+          "min_length": 1,
+          "reuse_ratio": 0.74,
+          "sequential_names": 2,
+          "single_char_count": 2,
+          "single_char_ratio": 0.09,
+          "underscore_prefix_count": 1,
+          "unique": 23
+        },
+        "imports": {
+          "count": 4,
+          "stdlib_count": 4,
+          "stdlib_ratio": 1
+        },
+        "strings": {
+          "avg_entropy": 2.27,
+          "avg_length": 10,
+          "base64_candidates": 1,
+          "bytes": 100,
+          "count": 10,
+          "entropy_stddev": 1.16,
+          "ip_count": 1,
+          "max_length": 48,
+          "path_count": 2,
+          "shell": 1
+        },
+        "text": {
+          "avg_line_length": 61.67,
+          "char_entropy": 5.43,
+          "digit_ratio": 0.07,
+          "encoded_string_ratio": 0.1,
+          "identifier_density": 5.17,
+          "last_line_length": 52,
+          "line_length_stddev": 23.58,
+          "lines": 6,
+          "max_line_length": 92,
+          "max_ws_run": 1,
+          "normalized_string_count": 4.08,
+          "normalized_unique_identifiers": 8.9,
+          "space_count": 3,
+          "string_density": 1.67,
+          "suspicious_identifier_ratio": 0.09,
+          "suspicious_string_ratio": 0.1,
+          "top_char": 101,
+          "top_char_null": 0,
+          "top_char_ratio": 0.07,
+          "unique_chars": 63,
+          "whitespace_ratio": 0.02
+        }
+      },
+      "traits": [
+        {
+          "id": "metadata/import/builtin::require-child-process",
+          "crit": 3,
+          "conf": 0.8,
+          "at": [
+            [
+              26,
+              7
+            ]
+          ]
+        },
+        {
+          "id": "metadata/import/builtin::require-fs",
+          "crit": 2,
+          "conf": 0.7,
+          "at": [
+            [
+              327,
+              0
+            ]
+          ]
+        },
+        {
+          "id": "metadata/import/builtin::require-https",
+          "crit": 3,
+          "conf": 0.78,
+          "at": [
+            [
+              57,
+              7
+            ]
+          ]
+        },
+        {
+          "id": "metadata/import/builtin::require-os",
+          "crit": 2,
+          "conf": 0.7,
+          "at": [
+            [
+              9,
+              0
+            ]
+          ]
+        },
+        {
+          "id": "metadata/package/files/runtime::javascript-lib-tree-artifact",
+          "crit": 3,
+          "conf": 0.95
+        },
+        {
+          "id": "micro-behaviors/communications/http/curl::curl-command-remote-url",
+          "crit": 3,
+          "conf": 0.85,
+          "at": [
+            [
+              96,
+              48
+            ]
+          ]
+        },
+        {
+          "id": "micro-behaviors/communications/http/download/encoded::encoded-remote-shell-fetch",
+          "crit": 4,
+          "conf": 0.95,
+          "at": [
+            [
+              96,
+              36
+            ]
+          ]
+        },
+        {
+          "id": "micro-behaviors/communications/http/post::node-https-request-post",
+          "crit": 3,
+          "conf": 0.84,
+          "at": [
+            [
+              207,
+              65
+            ]
+          ]
+        },
+        {
+          "id": "micro-behaviors/communications/http/post::post",
+          "crit": 3,
+          "conf": 0.7,
+          "at": [
+            [
+              267,
+              6
+            ]
+          ]
+        },
+        {
+          "id": "micro-behaviors/communications/http/post::request-options-post-method",
+          "crit": 3,
+          "conf": 0.86,
+          "at": [
+            [
+              260,
+              13
+            ]
+          ]
+        },
+        {
+          "id": "micro-behaviors/communications/http/request/client::https-request",
+          "crit": 3,
+          "conf": 0.7,
+          "at": [
+            [
+              207,
+              13
+            ]
+          ]
+        },
+        {
+          "id": "micro-behaviors/communications/rpc::object-method-rpc-request",
+          "crit": 3,
+          "conf": 0.9,
+          "at": [
+            [
+              212,
+              54
+            ]
+          ]
+        },
+        {
+          "id": "micro-behaviors/data/buffer::node-buffer-tostring-call",
+          "crit": 3,
+          "conf": 0.88,
+          "at": [
+            [
+              83,
+              20
+            ]
+          ]
+        },
+        {
+          "id": "micro-behaviors/data/control-flow/error-handling::empty-catch-block",
+          "crit": 3,
+          "conf": 0.9,
+          "at": [
+            [
+              373,
+              2
+            ]
+          ]
+        },
+        {
+          "id": "micro-behaviors/data/decode/base64::node-base64-tostring-token",
+          "crit": 3,
+          "conf": 0.86,
+          "at": [
+            [
+              146,
+              19
+            ]
+          ]
+        },
+        {
+          "id": "micro-behaviors/data/decode/symbol-base64::buffer-from-base64",
+          "crit": 3,
+          "conf": 0.8,
+          "at": [
+            [
+              83,
+              11
+            ]
+          ]
+        },
+        {
+          "id": "micro-behaviors/data/serialize/json::parsed-or-environment-json-stringify",
+          "crit": 3,
+          "conf": 0.86,
+          "at": [
+            [
+              178,
+              26
+            ]
+          ]
+        },
+        {
+          "id": "micro-behaviors/data/serialize/json::process-env-json-stringify",
+          "crit": 3,
+          "conf": 0.9,
+          "at": [
+            [
+              178,
+              4
+            ],
+            [
+              183,
+              9
+            ],
+            [
+              193,
+              7
+            ],
+            [
+              201,
+              3
+            ]
+          ]
+        },
+        {
+          "id": "micro-behaviors/data/source/property/identity::host-user-object-fields",
+          "crit": 3,
+          "conf": 0.9,
+          "at": [
+            [
+              221,
+              6
+            ]
+          ]
+        },
+        {
+          "id": "micro-behaviors/data/string/conversion::tostring-call",
+          "crit": 3,
+          "conf": 0.94,
+          "at": [
+            [
+              83,
+              20
+            ]
+          ]
+        },
+        {
+          "id": "micro-behaviors/data/string/conversion::tostring-token",
+          "crit": 3,
+          "conf": 1.0,
+          "at": [
+            [
+              156,
+              8
+            ]
+          ]
+        },
+        {
+          "id": "micro-behaviors/os/env/read::javascript",
+          "crit": 2,
+          "conf": 0.8,
+          "at": [
+            [
+              193,
+              0
+            ]
+          ]
+        },
+        {
+          "id": "micro-behaviors/os/module/require::cjs-require-in-try",
+          "crit": 3,
+          "conf": 0.9,
+          "at": [
+            [
+              323,
+              12
+            ]
+          ]
+        },
+        {
+          "id": "micro-behaviors/process/create/shell/bridge::child-process-keyword-literal",
+          "crit": 3,
+          "conf": 0.9,
+          "at": [
+            [
+              35,
+              13
+            ]
+          ]
+        },
+        {
+          "id": "micro-behaviors/process/create/shell/bridge::object-exec-method-call",
+          "crit": 1,
+          "conf": 1.0,
+          "at": [
+            [
+              293,
+              0
+            ]
+          ]
+        },
+        {
+          "id": "micro-behaviors/process/create/shell/path::shell-executable-reference",
+          "crit": 3,
+          "conf": 0.9,
+          "at": [
+            [
+              311,
+              7
+            ]
+          ]
+        },
+        {
+          "id": "micro-behaviors/process/create/shell/pipeline::pipeline-terminates-in-shell",
+          "crit": 3,
+          "conf": 0.8,
+          "at": [
+            [
+              96,
+              48
+            ]
+          ]
+        },
+        {
+          "id": "objectives/command-and-control/infrastructure/ip::ip-address-url",
+          "crit": 3,
+          "conf": 0.8,
+          "at": [
+            [
+              96,
+              48
+            ]
+          ]
+        },
+        {
+          "id": "objectives/command-and-control/remote-command/control::current-script-filename-marker",
+          "crit": 1,
+          "conf": 0.94,
+          "at": [
+            [
+              352,
+              0
+            ]
+          ]
+        },
+        {
+          "id": "objectives/evasion/self-delete/file/script::unlink-filename",
+          "crit": 4,
+          "conf": 0.9,
+          "at": [
+            [
+              327,
+              18
+            ]
+          ]
+        },
+        {
+          "id": "objectives/supply-chain/hidden-payload/runtime::node-base64-buffer-decode",
+          "crit": 3,
+          "conf": 0.88,
+          "at": [
+            [
+              83,
+              72
+            ]
+          ]
+        },
+        {
+          "id": "objectives/supply-chain/install-hook/scripts/dynamic-install::base64-decoded-module-const",
+          "crit": 3,
+          "conf": 0.9,
+          "at": [
+            [
+              83,
+              81
+            ]
+          ]
+        },
+        {
+          "id": "objectives/supply-chain/install-hook/scripts/hook-file::process-env-json-payload",
+          "crit": 3,
+          "conf": 0.94,
+          "at": [
+            [
+              178,
+              27
+            ]
+          ]
+        },
+        {
+          "id": "micro-behaviors/communications/http/download/cli::curl-wget-ipv4-url",
+          "crit": 3,
+          "conf": 0.95,
+          "at": [
+            [
+              96,
+              48
+            ]
+          ]
+        },
+        {
+          "id": "micro-behaviors/communications/http/download/curl::curl-cmd",
+          "crit": 2,
+          "conf": 0.7,
+          "at": [
+            [
+              96,
+              48
+            ]
+          ]
+        },
+        {
+          "id": "micro-behaviors/communications/http/download/curl::curl-silent-fail-flags-text",
+          "crit": 3,
+          "conf": 0.86,
+          "at": [
+            [
+              96,
+              48
+            ]
+          ]
+        },
+        {
+          "id": "micro-behaviors/communications/http/download/curl::http-download-shell-launch-literal",
+          "crit": 3,
+          "conf": 0.96,
+          "at": [
+            [
+              96,
+              48
+            ]
+          ]
+        },
+        {
+          "id": "micro-behaviors/communications/http/request/client::generic-request-method-call",
+          "crit": 3,
+          "conf": 0.4,
+          "at": [
+            [
+              207,
+              14
+            ]
+          ]
+        },
+        {
+          "id": "micro-behaviors/communications/http/request/client::post-method-text",
+          "crit": 3,
+          "conf": 0.94,
+          "at": [
+            [
+              260,
+              6
+            ],
+            [
+              267,
+              6
+            ]
+          ]
+        },
+        {
+          "id": "micro-behaviors/communications/http/url/external-ip::url-external-ip-encoded",
+          "crit": 4,
+          "conf": 0.95,
+          "at": [
+            [
+              96,
+              36
+            ]
+          ]
+        },
+        {
+          "id": "micro-behaviors/communications/ip/literal::external-ipv4-http-url",
+          "crit": 3,
+          "conf": 0.9,
+          "at": [
+            [
+              96,
+              48
+            ]
+          ]
+        },
+        {
+          "id": "micro-behaviors/communications/ip/literal::external-ipv4-script",
+          "crit": 3,
+          "conf": 0.85,
+          "at": [
+            [
+              228,
+              11
+            ]
+          ]
+        },
+        {
+          "id": "micro-behaviors/communications/ip/literal::external-ipv4-url-script",
+          "crit": 3,
+          "conf": 0.9,
+          "at": [
+            [
+              96,
+              48
+            ]
+          ]
+        },
+        {
+          "id": "micro-behaviors/communications/url/encoded::encoded-http-url",
+          "crit": 3,
+          "conf": 0.85,
+          "at": [
+            [
+              96,
+              36
+            ]
+          ]
+        },
+        {
+          "id": "micro-behaviors/data/control-flow/error-handling::empty-named-catch-text",
+          "crit": 3,
+          "conf": 0.92,
+          "at": [
+            [
+              365,
+              10
+            ]
+          ]
+        },
+        {
+          "id": "micro-behaviors/data/decode/base64::base64-decode-call-text",
+          "crit": 3,
+          "conf": 0.86,
+          "at": [
+            [
+              83,
+              71
+            ]
+          ]
+        },
+        {
+          "id": "micro-behaviors/data/runtime/keywords::pipe-to-sh",
+          "crit": 1,
+          "conf": 0.88,
+          "at": [
+            [
+              96,
+              48
+            ]
+          ]
+        },
+        {
+          "id": "micro-behaviors/process/create/load/local::try-require-empty-catch-text",
+          "crit": 3,
+          "conf": 0.97,
+          "at": [
+            [
+              323,
+              52
+            ]
+          ]
+        },
+        {
+          "id": "micro-behaviors/process/create/shell/pipeline::curl-pipe-shell-text",
+          "crit": 3,
+          "conf": 0.9,
+          "at": [
+            [
+              96,
+              48
+            ]
+          ]
+        },
+        {
+          "id": "micro-behaviors/process/create/shell/spawn::curl-pipe-exec-sh-node",
+          "crit": 3,
+          "conf": 0.9,
+          "at": [
+            [
+              96,
+              48
+            ]
+          ]
+        },
+        {
+          "id": "micro-behaviors/process/interpreter/shell::bin-sh",
+          "crit": 3,
+          "conf": 0.6,
+          "at": [
+            [
+              311,
+              7
+            ]
+          ]
+        },
+        {
+          "id": "objectives/command-and-control/dropper/delivery/pipe::curl-pipe-sh",
+          "crit": 3,
+          "conf": 0.7,
+          "at": [
+            [
+              96,
+              48
+            ]
+          ]
+        },
+        {
+          "id": "metadata/import/builtin::runtime-api-import-set",
+          "crit": 3,
+          "conf": 0.8,
+          "at": [
+            [
+              9,
+              7
+            ]
+          ],
+          "uses": [
+            0,
+            1,
+            2,
+            3
+          ]
+        },
+        {
+          "id": "micro-behaviors/communications/http/request/body::http-upload-or-body-sink",
+          "crit": 1,
+          "conf": 0.86,
+          "at": [
+            [
+              260,
+              0
+            ]
+          ],
+          "uses": [
+            7,
+            8,
+            9,
+            38
+          ]
+        },
+        {
+          "id": "micro-behaviors/communications/http/request/client::http-method-calls",
+          "crit": 3,
+          "conf": 0.7,
+          "at": [
+            [
+              207,
+              13
+            ]
+          ],
+          "uses": [
+            10
+          ]
+        },
+        {
+          "id": "micro-behaviors/communications/http/request/client::javascript-http-request-channel",
+          "crit": 3,
+          "conf": 0.9,
+          "at": [
+            [
+              260,
+              6
+            ],
+            [
+              267,
+              6
+            ]
+          ],
+          "uses": [
+            38
+          ]
+        },
+        {
+          "id": "micro-behaviors/communications/http/request/client::node-http",
+          "crit": 3,
+          "conf": 0.7,
+          "at": [
+            [
+              207,
+              13
+            ]
+          ],
+          "uses": [
+            10
+          ]
+        },
+        {
+          "id": "micro-behaviors/communications/http/request/client::node-http-client-imports",
+          "crit": 3,
+          "conf": 0.8,
+          "at": [
+            [
+              57,
+              7
+            ]
+          ],
+          "uses": [
+            2
+          ]
+        },
+        {
+          "id": "micro-behaviors/data/runtime/keywords::pipe-to-shell",
+          "crit": 1,
+          "conf": 0.88,
+          "at": [
+            [
+              96,
+              48
+            ]
+          ],
+          "uses": [
+            46
+          ],
+          "via": [
+            "b0b83fa5adc7498ff7c014cf126f4a508f503d3c98eeac61f182621b1c7eabff"
+          ]
+        },
+        {
+          "id": "micro-behaviors/os/module/require::node-system-module-import-set",
+          "crit": 3,
+          "conf": 0.88,
+          "at": [
+            [
+              26,
+              7
+            ]
+          ],
+          "uses": [
+            0,
+            1,
+            2,
+            3
+          ]
+        },
+        {
+          "id": "micro-behaviors/process/create/exec::node-child-process-capability",
+          "crit": 3,
+          "conf": 0.8,
+          "at": [
+            [
+              26,
+              7
+            ]
+          ],
+          "uses": [
+            0
+          ]
+        },
+        {
+          "id": "micro-behaviors/process/create/shell/bridge::child-process-module-near-exec-call",
+          "crit": 3,
+          "conf": 0.94,
+          "at": [
+            [
+              35,
+              13
+            ],
+            [
+              293,
+              7
+            ]
+          ],
+          "uses": [
+            23,
+            24
+          ]
+        },
+        {
+          "id": "objectives/command-and-control/dropper/delivery/pipe::ip-sourced-pipe-to-shell",
+          "crit": 4,
+          "conf": 0.93,
+          "at": [
+            [
+              96,
+              48
+            ]
+          ],
+          "uses": [
+            40,
+            49,
+            51
+          ],
+          "via": [
+            "b0b83fa5adc7498ff7c014cf126f4a508f503d3c98eeac61f182621b1c7eabff"
+          ]
+        },
+        {
+          "id": "objectives/discovery/system/fingerprint/runtime::process-env-direct-dump",
+          "crit": 3,
+          "conf": 0.85,
+          "at": [
+            [
+              178,
+              4
+            ],
+            [
+              183,
+              9
+            ],
+            [
+              193,
+              11
+            ],
+            [
+              201,
+              3
+            ]
+          ],
+          "uses": [
+            17,
+            21
+          ]
+        },
+        {
+          "id": "micro-behaviors/communications/http/request/client::http-client-usage",
+          "crit": 3,
+          "conf": 0.7,
+          "at": [
+            [
+              207,
+              13
+            ]
+          ],
+          "uses": [
+            56
+          ]
+        },
+        {
+          "id": "objectives/discovery/system/fingerprint/runtime::process-env-dump",
+          "crit": 3,
+          "conf": 0.88,
+          "at": [
+            [
+              178,
+              4
+            ],
+            [
+              183,
+              9
+            ],
+            [
+              193,
+              11
+            ],
+            [
+              201,
+              3
+            ]
+          ],
+          "uses": [
+            63
+          ]
+        },
+        {
+          "id": "micro-behaviors/communications/ip/literal::http-ip-url",
+          "crit": 3,
+          "conf": 0.95,
+          "at": [
+            [
+              96,
+              48
+            ]
+          ],
+          "uses": [
+            40
+          ],
+          "via": [
+            "b0b83fa5adc7498ff7c014cf126f4a508f503d3c98eeac61f182621b1c7eabff"
+          ]
+        },
+        {
+          "id": "micro-behaviors/data/decode/base64::base64-decoding",
+          "crit": 3,
+          "conf": 0.95,
+          "at": [
+            [
+              83,
+              11
+            ],
+            [
+              146,
+              19
+            ]
+          ],
+          "uses": [
+            14,
+            15
+          ]
+        },
+        {
+          "id": "micro-behaviors/process/create/shell/bridge::child-process-require",
+          "crit": 3,
+          "conf": 0.8,
+          "at": [
+            [
+              26,
+              7
+            ]
+          ],
+          "uses": [
+            0
+          ]
+        },
+        {
+          "id": "micro-behaviors/process/create/shell/spawn::curl-pipe-exec",
+          "crit": 3,
+          "conf": 0.9,
+          "at": [
+            [
+              96,
+              48
+            ]
+          ],
+          "uses": [
+            49
+          ],
+          "via": [
+            "b0b83fa5adc7498ff7c014cf126f4a508f503d3c98eeac61f182621b1c7eabff"
+          ]
+        },
+        {
+          "id": "objectives/command-and-control/dropper/delivery/pipe::curl-pipe-shell",
+          "crit": 3,
+          "conf": 0.95,
+          "at": [
+            [
+              96,
+              48
+            ]
+          ],
+          "uses": [
+            51
+          ],
+          "via": [
+            "b0b83fa5adc7498ff7c014cf126f4a508f503d3c98eeac61f182621b1c7eabff"
+          ]
+        },
+        {
+          "id": "micro-behaviors/communications/ip/direct::external-ipv4-http-endpoint",
+          "crit": 3,
+          "conf": 0.95,
+          "at": [
+            [
+              96,
+              48
+            ]
+          ],
+          "uses": [
+            66
+          ],
+          "via": [
+            "b0b83fa5adc7498ff7c014cf126f4a508f503d3c98eeac61f182621b1c7eabff"
+          ]
+        },
+        {
+          "id": "micro-behaviors/communications/ip/literal::direct-ip-http-client",
+          "crit": 3,
+          "conf": 0.95,
+          "at": [
+            [
+              57,
+              7
+            ],
+            [
+              96,
+              48
+            ],
+            [
+              207,
+              13
+            ],
+            [
+              260,
+              6
+            ],
+            [
+              267,
+              6
+            ]
+          ],
+          "uses": [
+            10,
+            34,
+            37,
+            38,
+            53,
+            54,
+            55,
+            56,
+            57,
+            64,
+            66
+          ],
+          "via": [
+            "b0b83fa5adc7498ff7c014cf126f4a508f503d3c98eeac61f182621b1c7eabff"
+          ]
+        },
+        {
+          "id": "objectives/anti-static/obfuscation/payload/encoded::base64-exec-proximity",
+          "crit": 4,
+          "conf": 0.95,
+          "at": [
+            [
+              26,
+              7
+            ],
+            [
+              83,
+              11
+            ],
+            [
+              146,
+              19
+            ]
+          ],
+          "uses": [
+            60,
+            67
+          ]
+        },
+        {
+          "id": "objectives/command-and-control/dropper/execution/pipe::curl-pipe-shell-from-raw-ip",
+          "crit": 5,
+          "conf": 0.96,
+          "at": [
+            [
+              96,
+              48
+            ]
+          ],
+          "uses": [
+            48,
+            66
+          ],
+          "via": [
+            "b0b83fa5adc7498ff7c014cf126f4a508f503d3c98eeac61f182621b1c7eabff"
+          ]
+        },
+        {
+          "id": "objectives/command-and-control/beacon/network/http::direct-http-c2",
+          "crit": 4,
+          "conf": 0.95,
+          "at": [
+            [
+              57,
+              7
+            ],
+            [
+              96,
+              48
+            ],
+            [
+              207,
+              13
+            ],
+            [
+              260,
+              6
+            ],
+            [
+              267,
+              6
+            ],
+            [
+              352,
+              10
+            ]
+          ],
+          "uses": [
+            28,
+            72
+          ],
+          "via": [
+            "b0b83fa5adc7498ff7c014cf126f4a508f503d3c98eeac61f182621b1c7eabff"
+          ]
+        },
+        {
+          "id": "metadata/encoded-payload/base64",
+          "crit": 3,
+          "conf": 0.9,
+          "at": [
+            [
+              96,
+              45
+            ]
+          ]
+        }
+      ],
+      "ctx": [
+        {
+          "ln": 0,
+          "line": 1,
+          "col": 1,
+          "b": "v@DmaBrCHyj-UaNB.L(cc)@}OcN*PRA6nkMADL#owHF{oxLzo[uVp47v}x.5cN*PWBAzFyj-UaNB.L(cc)@XIBz#pGdlv(Dz/fSrayWG2B.kk%AXp%Az/3)IsU<97vNAC6v%HyVwjPQxpIz!ipde98pG68{pde-qpGhaMv)-b1vm9vvnK#P{cOcSOvrl0rg::.8Bz>91A+PA7c[dj+v@DmaBrCdjC0eC@pFJJ-BAh8kxk7$6c#:iBv}x.5e[F{zdlv(IBAzFye]>JyB.bSod0]SCB96C<g=l)Ce?]gxe&+{teo2JFBuhlngC0GNBz9Y.fjMvXzdN*5z!7)Rp!$1?cW^J]dlP>wEjl^WzE+ebzGWD<3s!3cwQ4=@c$j-OB7/c3y=S{%vRGZkB7=}Hdlv(UA^r1LwPq<bA+cTDw]/sGe{h5Fx(mY+D2vauuTEzVy?mG)zdLdTEpDYcv}Wo4dslEI"
+        }
+      ]
+    },
+    "b0b83fa5adc7498ff7c014cf126f4a508f503d3c98eeac61f182621b1c7eabff": {
+      "type": "shell",
+      "size": 36,
+      "risk": 119,
+      "mol": "O(C\u2083)H\u2082(Cm\u2085Po\u2083)",
+      "metrics": {
+        "binary": {
+          "peak_region_bytes": 36,
+          "peak_region_entropy": 4.03
+        },
+        "file": {
+          "entropy": 4.03,
+          "size": 36
+        }
+      },
+      "traits": [
+        {
+          "id": "micro-behaviors/communications/http/download/cli::curl-wget-ipv4-url",
+          "crit": 3,
+          "conf": 0.95,
+          "at": [
+            [
+              0,
+              27
+            ]
+          ]
+        },
+        {
+          "id": "micro-behaviors/communications/http/download/curl::curl-cmd",
+          "crit": 2,
+          "conf": 0.7,
+          "at": [
+            [
+              0,
+              0
+            ]
+          ]
+        },
+        {
+          "id": "micro-behaviors/communications/http/download/curl::curl-silent-fail-flags-text",
+          "crit": 3,
+          "conf": 0.86,
+          "at": [
+            [
+              0,
+              7
+            ]
+          ]
+        },
+        {
+          "id": "micro-behaviors/communications/http/url/scheme::cleartext-http-url",
+          "crit": 3,
+          "conf": 0.9,
+          "at": [
+            [
+              8,
+              23
+            ]
+          ]
+        },
+        {
+          "id": "micro-behaviors/communications/ip/literal::external-ipv4-http-url",
+          "crit": 3,
+          "conf": 0.9,
+          "at": [
+            [
+              8,
+              19
+            ]
+          ]
+        },
+        {
+          "id": "micro-behaviors/communications/ip/literal::external-ipv4-shell-endpoint",
+          "crit": 3,
+          "conf": 0.9,
+          "at": [
+            [
+              14,
+              13
+            ]
+          ]
+        },
+        {
+          "id": "micro-behaviors/communications/ip/literal::external-ipv4-url-script",
+          "crit": 3,
+          "conf": 0.9,
+          "at": [
+            [
+              8,
+              18
+            ]
+          ]
+        },
+        {
+          "id": "micro-behaviors/data/runtime/keywords::pipe-to-sh",
+          "crit": 1,
+          "conf": 0.88,
+          "at": [
+            [
+              31,
+              0
+            ]
+          ]
+        },
+        {
+          "id": "micro-behaviors/process/create/shell/pipeline::curl-pipe-sh-text",
+          "crit": 3,
+          "conf": 0.9,
+          "at": [
+            [
+              0,
+              36
+            ]
+          ]
+        },
+        {
+          "id": "micro-behaviors/process/create/shell/pipeline::curl-pipe-shell-text",
+          "crit": 3,
+          "conf": 0.9,
+          "at": [
+            [
+              0,
+              36
+            ]
+          ]
+        },
+        {
+          "id": "micro-behaviors/process/create/shell/spawn::curl-pipe-exec-sh-node",
+          "crit": 3,
+          "conf": 0.9,
+          "at": [
+            [
+              0,
+              36
+            ]
+          ]
+        },
+        {
+          "id": "objectives/command-and-control/dropper/delivery/pipe::curl-pipe-sh",
+          "crit": 3,
+          "conf": 0.7,
+          "at": [
+            [
+              0,
+              36
+            ]
+          ]
+        },
+        {
+          "id": "objectives/command-and-control/dropper/execution/eval::download-execute-quiet",
+          "crit": 3,
+          "conf": 0.95,
+          "at": [
+            [
+              0,
+              36
+            ]
+          ]
+        },
+        {
+          "id": "objectives/command-and-control/dropper/execution/pipe::inline__curl-silent-stdout__any_1",
+          "crit": 3,
+          "conf": 1.0,
+          "at": [
+            [
+              0,
+              15
+            ]
+          ]
+        },
+        {
+          "id": "micro-behaviors/communications/http/download/curl::curl",
+          "crit": 3,
+          "conf": 0.66,
+          "at": [
+            [
+              0,
+              7
+            ]
+          ],
+          "uses": [
+            1
+          ]
+        },
+        {
+          "id": "micro-behaviors/data/runtime/keywords::pipe-to-shell",
+          "crit": 1,
+          "conf": 0.88,
+          "at": [
+            [
+              31,
+              0
+            ]
+          ],
+          "uses": [
+            7
+          ]
+        },
+        {
+          "id": "objectives/command-and-control/dropper/delivery/pipe::ip-sourced-pipe-to-shell",
+          "crit": 4,
+          "conf": 0.93,
+          "at": [
+            [
+              0,
+              36
+            ],
+            [
+              8,
+              19
+            ]
+          ],
+          "uses": [
+            4,
+            10,
+            11
+          ]
+        },
+        {
+          "id": "micro-behaviors/process/create/shell/eval::shell-dynamic-command-execution",
+          "crit": 3,
+          "conf": 0.92,
+          "at": [
+            [
+              31,
+              5
+            ]
+          ],
+          "uses": [
+            15
+          ]
+        },
+        {
+          "id": "micro-behaviors/communications/ip/literal::http-ip-url",
+          "crit": 3,
+          "conf": 0.95,
+          "at": [
+            [
+              8,
+              19
+            ]
+          ],
+          "uses": [
+            4
+          ]
+        },
+        {
+          "id": "micro-behaviors/process/create/shell/spawn::curl-pipe-exec",
+          "crit": 3,
+          "conf": 0.9,
+          "at": [
+            [
+              0,
+              36
+            ]
+          ],
+          "uses": [
+            10
+          ]
+        },
+        {
+          "id": "objectives/command-and-control/dropper/delivery/pipe::curl-pipe-shell",
+          "crit": 3,
+          "conf": 0.95,
+          "at": [
+            [
+              0,
+              36
+            ]
+          ],
+          "uses": [
+            11
+          ]
+        },
+        {
+          "id": "micro-behaviors/communications/ip/direct::external-ipv4-http-endpoint",
+          "crit": 3,
+          "conf": 0.95,
+          "at": [
+            [
+              8,
+              19
+            ]
+          ],
+          "uses": [
+            18
+          ]
+        },
+        {
+          "id": "objectives/command-and-control/dropper/execution/eval::simple-dropper",
+          "crit": 4,
+          "conf": 0.9,
+          "at": [
+            [
+              0,
+              27
+            ]
+          ],
+          "uses": [
+            0,
+            19
+          ]
+        },
+        {
+          "id": "micro-behaviors/communications/ip/literal::direct-ip-http-client",
+          "crit": 3,
+          "conf": 0.95,
+          "at": [
+            [
+              0,
+              7
+            ],
+            [
+              8,
+              19
+            ]
+          ],
+          "uses": [
+            1,
+            18
+          ]
+        },
+        {
+          "id": "objectives/command-and-control/dropper/execution/pipe::curl-pipe-shell-from-raw-ip",
+          "crit": 5,
+          "conf": 0.96,
+          "at": [
+            [
+              0,
+              36
+            ],
+            [
+              8,
+              19
+            ]
+          ],
+          "uses": [
+            9,
+            18
+          ]
+        }
+      ]
+    }
+  },
+  "edges": [
+    {
+      "from": "dce2b7502cea723ea1917d12242ffe2569b5f87eacc3ba24a8cefad0ca3ea45d",
+      "to": "44d8422500d0823095bda9fc6f936ed2e0f31490d56f8fb5543e34f0581bd45a",
+      "rel": "member",
+      "at": "package/index.js"
+    },
+    {
+      "from": "dce2b7502cea723ea1917d12242ffe2569b5f87eacc3ba24a8cefad0ca3ea45d",
+      "to": "dc82e038cdf32d9e1ef012742d2e1c2e2c922f1f83220cbda37380674d982c80",
+      "rel": "member",
+      "at": "package/package.json"
+    },
+    {
+      "from": "dc82e038cdf32d9e1ef012742d2e1c2e2c922f1f83220cbda37380674d982c80",
+      "rel": "local",
+      "at": "index.js",
+      "to": "44d8422500d0823095bda9fc6f936ed2e0f31490d56f8fb5543e34f0581bd45a"
+    },
+    {
+      "from": "dce2b7502cea723ea1917d12242ffe2569b5f87eacc3ba24a8cefad0ca3ea45d",
+      "to": "75c70c563bd1c42d6ad0a75a23c0cda8f0de299e25d84a7bdbea96f48a0d18fd",
+      "rel": "member",
+      "at": "package/lib/.cache.js"
+    },
+    {
+      "from": "75c70c563bd1c42d6ad0a75a23c0cda8f0de299e25d84a7bdbea96f48a0d18fd",
+      "to": "b0b83fa5adc7498ff7c014cf126f4a508f503d3c98eeac61f182621b1c7eabff",
+      "rel": "decoded",
+      "at": "base64@96"
+    }
+  ]
+}

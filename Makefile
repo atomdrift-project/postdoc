@@ -10,6 +10,20 @@ CARGO = env -u MAKEFLAGS -u MAKELEVEL -u MFLAGS cargo
 
 PACKAGE := $(shell awk -F'"' '/^name = /{print $$2; exit}' Cargo.toml)
 
+# The site's LLM endpoint, passed as SCAN_LLM to every mode that runs one.
+#
+# This is a coordinate, not a default: postdoc cannot know where the vLLM
+# lives, the same way it cannot know where hopper lives. Behaviour defaults
+# belong in the binary; addresses belong here, once.
+#
+# The scheme is required — anything that is not `local` or `openrouter` is used
+# as a base URL verbatim, and a bare host:port fails in the HTTP client.
+# A comma-separated list is a failover chain tried in order, so put the
+# endpoint you would rather pay for last.
+LLM ?= http://10.9.8.149:8000/v1
+# Unset lets postdoc pick whatever the endpoint reports it serves.
+LLM_MODEL ?=
+
 .PHONY: all build release quick install lint fix test install-precommit clean help
 
 all: build
@@ -54,6 +68,56 @@ install-precommit:
 	chmod +x "$$(git rev-parse --git-dir)/hooks/pre-commit"
 	@echo "✓ Pre-commit hook installed."
 
+# --- Deployment --------------------------------------------------------------
+#
+# Three platforms, one contract: the deploy passes the two things it cannot
+# know — where hopper is and where the token lives — and the binary defaults
+# the rest. What differs per platform is supervision (systemd, rc.d, NSSM) and
+# the allocator tuning FreeBSD needs in its unit because it uses libc's
+# jemalloc rather than the one linked into the binary.
+
+.PHONY: worker deploy-worker deploy-server rollout
+
+## worker: run a worker in the foreground, as you, until Ctrl-C
+##         No service, no state directory — it reads ~/.tok/hopper directly.
+##         LLM= turns the interpreter off; LLM=<endpoint> points it elsewhere.
+worker: release
+	@[ -n "$(URL)" ] || { echo "usage: make worker URL=<hopper url>"; exit 1; }
+	@[ -r "$$HOME/.tok/hopper" ] || { \
+	  echo "error: no hopper token at ~/.tok/hopper; every claim would 401" >&2; exit 1; }
+	SCAN_LLM="$(LLM)" $(if $(LLM_MODEL),SCAN_LLM_MODEL="$(LLM_MODEL)",) \
+	  ./target/release/$(BINARY) worker --url "$(URL)"
+
+## deploy-worker: install and start a worker here (URL=<hopper url>)
+deploy-worker: release
+	@[ -n "$(URL)" ] || { echo "usage: make deploy-worker URL=<hopper url>"; exit 1; }
+	@$(MAKE) --no-print-directory _deploy MODE=worker URL="$(URL)"
+
+## deploy-server: install and start a server here (URL=<hopper url>, optional)
+deploy-server: release
+	@$(MAKE) --no-print-directory _deploy MODE=serve URL="$(URL)"
+
+## rollout: redeploy the fleet — hopper, then workers, then servers
+##          DRY_RUN=1 prints the plan; HOSTS="a b" skips discovery
+rollout:
+	./scripts/rollout.sh
+
+_deploy: export LLM := $(LLM)
+_deploy: export LLM_MODEL := $(LLM_MODEL)
+_deploy:
+	@case "$$(uname -s)" in \
+	  Linux)   install -m0755 target/release/$(BINARY) /usr/local/bin/$(BINARY); \
+	           ./scripts/deploy.sh "$(MODE)" "$(URL)" ;; \
+	  FreeBSD) install -m0755 target/release/$(BINARY) /usr/local/bin/$(BINARY); \
+	           ./scripts/deploy-freebsd.sh "$(MODE)" "$(URL)" ;; \
+	  MINGW*|MSYS*|CYGWIN*) \
+	           if command -v pwsh >/dev/null 2>&1; then ps=pwsh; else ps=powershell; fi; \
+	           "$$ps" -NoProfile -ExecutionPolicy Bypass \
+	             -File scripts/deploy-windows.ps1 -Mode "$(MODE)" -Url "$(URL)" ;; \
+	  *) echo "error: no deploy path for $$(uname -s); supported: Linux, FreeBSD, Windows" >&2; \
+	     exit 1 ;; \
+	esac
+
 clean:
 	$(CARGO) clean
 
@@ -67,4 +131,8 @@ help:
 	@echo "  fix       auto-fix clippy + rustfmt"
 	@echo "  test      run the test suite"
 	@echo "  install-precommit  gate commits on lint + test"
+	@echo "  worker         run a worker in the foreground (URL=<hopper url>)"
+	@echo "  deploy-worker  install + start a worker here (URL=<hopper url>)"
+	@echo "  deploy-server  install + start a server here"
+	@echo "  rollout        redeploy the fleet (DRY_RUN=1 to preview)"
 	@echo "  clean     cargo clean"

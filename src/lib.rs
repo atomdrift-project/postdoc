@@ -33,10 +33,12 @@
 
 pub mod combine;
 pub mod engine;
+pub mod judge;
 pub mod report;
 pub mod result;
 
 pub use combine::Outcome;
+pub use judge::{Analysis, report};
 pub use report::{Assessment, Engines, Finding, Judge, JudgeId, Level, Severity, Skipped, Verdict};
 pub use result::{Baseline, EngineJudge, Report, SCHEMA_VERSION};
 

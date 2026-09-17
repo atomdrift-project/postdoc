@@ -190,23 +190,52 @@ local worker as `atomscan worker --url … --name local [--data-dir …]
 `CLEAVE_VALIDATE_SOFT`, and `TMPDIR` set; `postdoc worker` accepts that argv
 verbatim, so the binary name is the only thing hopper's config changes.
 
-**serve** has exactly the routes beamline calls:
+**serve** is a drop-in replacement for `atomscan serve`. Every route scan
+answers, postdoc answers the same way: same paths, same request shapes, same
+status codes, same error codes, same `X-Scan-Source` header. Swapping the
+binary is a deployment change and nothing else.
 
-| Route              | Purpose |
-|--------------------|---------|
-| `GET  /v1/lookup`  | Decision for a purl, url, or sha256 against the caller's budget. Local index, then bloom, then hopper. Contract unchanged; `decided_by` added; `full=1` returns the result object. |
-| `POST /v1/analyze` | Analyze a purl, url, sha256 with `refresh=1`, or an uploaded body. NDJSON progress frames, then the decision; `full=1` returns the result object. `follow=` as today. |
-| `GET  /_/stats`    | What beamline's router reads: `ready`, `overloaded`, `slots_free`, `whale_slots`, `max_upload_mb`, `recent.p80_ms`, the `avg_job_ms*` family, and the `*lookup*` family. Nothing else. |
-| `GET  /_/health`   | Liveness; the one token-exempt route. |
+| Route | |
+|---|---|
+| `GET  /v1/lookup` | The decision API. |
+| `POST /v1/analyze` | Analyze and answer; NDJSON progress frames, then the decision. |
+| `POST /analyze`, `/analyze-purl`, `/analyze-path` | Upload, coordinate, and loopback-only path. |
+| `GET  /lookup`, `/status` | The legacy lookup and the reconnect probe. |
+| `GET  /_/health`, `/_/info`, `/_/stats` | Liveness, build facts, counters. |
+| `GET  /_/memory`, `/_/requests`, `/_/threads` | Operator diagnostics. |
+| `POST /_/reload`, `/_/update` | Hot-swap the bundles. |
 
-`X-Scan-Source` stays on every answer. Single-flight, the corpus deferral to
-hopper, the peer-CIDR plus bearer-token ACL with no loopback exemption, and
-the frozen idle-worker child all carry over from scan's server, as library
-modules. Model and traits refresh on a timer the way the worker already does,
-so there is no reload route. Everything else scan serves today (`/analyze`,
-`/analyze-purl`, `/analyze-path`, `/lookup`, `/status`, `/_/info`,
-`/_/reload`, `/_/update`, `/_/memory`, `/_/requests`, `/_/threads`) has no
-caller and does not exist here.
+An earlier draft cut this to the four routes beamline calls. That was wrong
+twice over. Beamline is the only *application* caller, but the `/_/*` routes
+have operators and deploy scripts behind them, and a survey that finds no
+code calling a route has not shown that nobody does. More importantly, a
+drop-in cannot be a subset: the point of the swap is that nothing else has to
+change at the same time.
+
+**`/v1` does not move.** It is scan's contract and postdoc inherits it
+unchanged. New fields may appear — a JSON consumer ignores what it does not
+know, and beamline spreads the object it receives — but no field changes
+meaning, changes type, or disappears. `/v1/analyze?full=1` keeps returning
+`{ml, llm, raw}`, because beamline tests for `ml.eng` and `raw` to decide
+whether it holds a full envelope.
+
+**`/v2` is where the result object lives.** The five judges, the baseline,
+`decided_by` and everything else this design adds are a different shape, not
+an extension of the old one, so they get a different version. `/v2/lookup`
+and `/v2/analyze` answer with it. Nothing is obliged to move: `/v1` stays as
+long as it has callers, and `/v2` is opt-in per caller rather than a
+migration with a date on it.
+
+This changes how the server gets built. The earlier draft had postdoc writing
+a small server against the `Analyzer` API. Byte-compatibility with `/v1` is
+not something to re-derive from a specification — it is a hundred small
+behaviours, each of which is a bug if it differs: which `X-Scan-Source`
+values are emitted, that `?url=` alone always answers 404, the
+`X-Hopper-Fresh` header alias, the 50-key limit, single-flight followers
+replaying a leader's rendered error, the 250 ms grace before progress frames
+begin. So scan's server modules move to postdoc substantially intact, and
+`/v2` is added beside them. The handlers are 267 KB and get split by route
+family on the way, but they are moved, not rewritten.
 
 There is no one-shot CLI. `atomscan` and `isomer` remain the tools for that.
 
@@ -347,8 +376,35 @@ No file over 2000 lines.
      shared band, which also fails to *compile* if scan is ever linked twice.
    - **done** — the concrete result (`src/result.rs`): the full report, a
      golden test pinning field order, a round trip, and the `full=1` strip.
-   - not started — `Analyzer::scan(Subject)`, the worker backend, the server
-     modules made public.
+   - **done** — scan reports the model and the floor apart. `ScanResult`
+     gained `model` (what the model alone reached, root and members, before
+     the floor) and `floor` (the gravest firing anywhere). Neither is
+     serialized, so the envelope is byte-identical — scan's two
+     serialization-parity tests prove it. Recovering the model's own reading
+     is cheap because the floor fires only on a model-Benign decision: on a
+     file it raised, the model said benign, and everywhere else the stored
+     decision is already the model's. This is what lets the `cleave` and `ml`
+     judges be two opinions rather than postdoc re-deriving one from the
+     other. 6 tests added; scan's suite is 746 and still green.
+   - **done** — the judges (`src/judge.rs`): each engine's result unpacked
+     into the judge that shows its pieces, the two outcomes folded, the
+     verdict written. An example runs it end to end against real bundles;
+     `docs/example-report.json` is its output.
+   - **done** — scan's worker startup resolves through `worker::Startup`.
+     The model bundle, operating point, slot count, memory ceiling and
+     trait-validation gate were decided in scan's CLI `main.rs`, private, so
+     no second binary could start a worker the same way. They now live beside
+     the worker they configure, and `atomscan`'s own command line is
+     unchanged — same flags, same `--help`, 746 tests still green.
+   - not started — `Analyzer::scan(Subject)`, the server modules made public.
+
+   A third thing changed while building: **`duration_ms` on a judge is
+   optional**. Only the interpreter is separately timed. Cleave's analysis and
+   the model's inference happen in one pass through scan, and isomer's
+   interpreter runs inside its judgement, so an invented share of a combined
+   measurement would read like a real one to whoever is chasing a slow
+   analysis. Splitting those timings properly is scan-side work, not a
+   postdoc guess.
 
    Two things changed while building. **The baseline moved to the top level**
    of the result: it describes what was analyzed, like `sha256` beside it,
@@ -368,14 +424,51 @@ No file over 2000 lines.
    because separating it would mean unpicking `Analysis::finish`. postdoc
    still reports the two judges apart, because a judgement carries the
    verdict both before and after the interpreter.
-2. **Worker.** `postdoc worker` as a backend to scan's loop, calling
-   `Analyzer::scan` and posting the legacy `{ml, llm, raw}` body. Wire output
-   is unchanged and hopper needs no change. This is the cutover-safe point:
-   postdoc can take claims beside scan workers with no consumer noticing.
-3. **Judges and server.** The judge envelope, `combine()`, the result
-   object, and the four-route server. Worker posts the result object. Hopper
-   accepts it and adds `verdict` and `judges`. Beamline reads `verdict`.
-4. **Diff.** Hopper: `purl` and `baseline` on claims, `/api/baseline`.
+2. **Worker.** `postdoc worker` running scan's loop and posting the legacy
+   `{ml, llm, raw}` body. Wire output is unchanged and hopper needs no
+   change. This is the cutover-safe point: postdoc can take claims beside
+   scan workers with no consumer noticing.
+
+   - **done** — the binary exists and accepts the argv hopper supervises a
+     local worker with, so the cutover is a binary name and nothing else.
+     A test pins that argv.
+   - The plan called for a backend trait here. There is nothing yet for one
+     to abstract: phase 2 posts the legacy body, which is scan's own
+     behaviour, so a trait would have one implementation and no second
+     caller. It arrives in phase 3, where the posted body actually differs.
+3. **Judges and the worker's new body.** The worker posts the result object;
+   hopper accepts it and adds `verdict` and `judges`. No server involved, so
+   nothing beamline calls changes yet.
+4. **The server moves.** Scan's server modules come over intact and `/v1`
+   answers byte-for-byte as it does now, proved by replaying recorded
+   requests against both binaries. This is the step that lets a deployment
+   swap `atomscan serve` for `postdoc serve`.
+
+   Taken in two parts, because the second is only worth doing once the first
+   proves the drop-in works:
+
+   - **done** — `postdoc serve` exists and runs scan's server. Startup
+     resolution moved to `server::Startup` beside `worker::Startup`: the
+     listen address, body limit, memory ceiling, allowed directories, CIDR
+     list, bearer token, model bundle, operating point and idle-worker slots
+     were all settled in scan's CLI, private, so no second binary could serve
+     the same way. `atomscan serve`'s own command line is unchanged.
+   - **done** — the startup rule refresh is `scan::refresh_rules_at_startup`,
+     shared by both binaries and both modes. It is also what creates a
+     `--traits-dir` on a fresh deploy; without it a server starts, reports
+     healthy, and fails every analysis.
+   - in progress — scan's 38 global flags become a public `clap::Args` that
+     both binaries flatten. Until then `postdoc serve` accepts only its own
+     14 flags, so an operator passing `--llm` or `--fetch` gets different
+     behaviour from `atomscan serve` and gets no warning about it. That is
+     the gap between "runs the same server" and "is a drop-in".
+   - not started — moving the server's source out of scan. Nothing needs it
+     until `/v2`, and while both binaries call one implementation there is
+     nothing to drift.
+5. **`/v2`.** `/v2/lookup` and `/v2/analyze` answer with the result object.
+   Beamline adopts it when it wants the judges; until then it keeps reading
+   `/v1` and nothing has to move.
+6. **Diff.** Hopper: `purl` and `baseline` on claims, `/api/baseline`.
    postdoc: `diff` and `diff_llm` judges.
 
 Retiring scan's serve and worker modes is separate work, after postdoc has
@@ -388,6 +481,10 @@ rolled out.
   `decided_by` and the level placement for each.
 - A golden test pins the result object's field order and the
   every-key-present rule, the way isomer's `envelope_shape_is_stable` does.
+- `/v1` compatibility is proved by replay, not by reading: the same recorded
+  requests go to `atomscan serve` and `postdoc serve`, and the responses are
+  compared body and header. Reading two implementations and agreeing they
+  look equivalent is how the small differences survive.
 - Worker and server run against scan's existing mock hopper binary, which
   gains the `baseline` claim field and `/api/baseline`.
 - Phase 2 is verified by diffing `POST /api/result` bodies from `atomscan
