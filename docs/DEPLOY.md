@@ -82,6 +82,56 @@ and routes tree-sitter's C allocator through it. The CRT heap measured 12%
 exclusive with rayon workers convoying on it, which is the contention jemalloc
 is chosen to avoid elsewhere.
 
+## Deploying stands atomscan down
+
+Every deploy, on all three platforms, disables and stops scan's services before
+it installs postdoc. `make rollout` inherits this because it runs the same
+`make deploy-worker` / `make deploy-server` on each host, and so does a deploy
+run by hand.
+
+| Platform | Stood down | How |
+| --- | --- | --- |
+| Linux | `scan-worker.service`, `scan.service` | `systemctl disable` then `stop` |
+| FreeBSD | `scan-worker`, `scan`, `ascan-worker` | `sysrc *_enable=NO` then `service stop` |
+| Windows | `scan-worker` | `Set-Service -StartupType Disabled` then `nssm stop` |
+
+Windows has one service because scan has no Windows server. FreeBSD has three
+because `ascan-worker` is `scan-worker`'s pre-rename name, and a host installed
+before that rename runs the same daemon under it.
+
+They cannot share a host. Each sizes its memory ceiling against the whole
+machine and each runs at nice -20, so a box running both carries two analysis
+daemons that each believe they own it. They claim from the same queue and reach
+the same memory ceiling together, which is how a host that survived either one
+alone gets OOM-killed running the pair.
+
+Three details carry the weight:
+
+**Scan stops before postdoc starts.** The overlap is the dangerous window. The
+gap is not, because hopper re-leases anything left unfinished.
+
+**It is a hard gate.** If a scan service will not stop, the deploy dies rather
+than starting postdoc beside it, which would produce exactly the collision the
+step exists to prevent.
+
+On FreeBSD and Windows that check reaches past the service, because on both a
+stop can leave an `atomscan` process behind. FreeBSD's `daemon(8)` pidfile names
+the supervisor, not the child it forked, so a stop that times out leaves the
+analysis process running and still holding leases. On Windows nssm kills the
+tree it supervises, but a worker started by hand or orphaned by an earlier crash
+sits outside it. Both reap the straggler the way scan's own uninstaller does —
+FreeBSD by process name, Windows by command line so an interactive `atomscan
+scan` is untouched — and only on a host where a scan service was actually stood
+down. An `atomscan` someone is running by hand elsewhere is left alone.
+
+**Disabled, not uninstalled.** The unit file and rc.d script stay on disk, and
+on Windows the service stays registered. Disabling stops a reboot from
+restoring the collision; removing the service is uninstalling scan, which is a
+separate decision and belongs to scan's own uninstall scripts.
+
+This happens on every deploy path, including the one the rollout drives, so
+there is no way to install postdoc on a host and leave scan running beside it.
+
 ## Memory
 
 postdoc resolves its own ceiling, `min(50% RAM, 32 GiB)`, and sheds work when
@@ -152,9 +202,26 @@ be cutting the connection driving it.
 roster: `/etc/systemd/system/postdoc-worker.service`,
 `/usr/local/etc/rc.d/postdoc_worker`, and the server equivalents. A host can
 be reimaged or repurposed between check-ins, and the unit on disk is the only
-thing that knows what it is now. A worker's hopper URL is re-read out of its
-own unit rather than taken from the roster, so a worker pointed at a different
-queue stays pointed at it.
+thing that knows what it is now.
+
+Windows keeps no unit file, so the service manager is asked instead:
+`sc.exe query postdoc-worker`. Worker only, the way scan's rollout has it,
+since scan has no Windows server to have modelled one on. A Windows host needs
+an ssh server and a POSIX `sh` for the rollout to drive it, which is the same
+thing scan's rollout assumes.
+
+It also needs that ssh session to be elevated, because registering a service
+and writing under `Program Files` both require it. `deploy-windows.ps1` refuses
+with `run this from an elevated prompt` rather than half-installing, so a host
+whose session is not elevated shows up as FAILED with that line in the summary's
+log tail. It does not self-elevate: `Start-Process -Verb RunAs` needs an
+interactive desktop and would hang an ssh session waiting for a consent dialog
+nobody can see.
+
+A worker's hopper URL is re-read out of its own unit rather than taken from the
+roster, so a worker pointed at a different queue stays pointed at it. On
+Windows that means `nssm get postdoc-worker AppParameters`, whose answer is
+UTF-16 and has its NULs stripped before anything tries to tokenize it.
 
 **The health gate asks two questions**, not one. Answering `/_/health` proves
 the port is bound; a small `uptime_secs` proves it is the *new* process
@@ -176,6 +243,5 @@ good end-to-end proof and is worth adding back if you want it.
 OmniOS SMF and Debian-over-SSH are all dropped. Scan carries deploy paths for
 them; postdoc supports Linux, FreeBSD and Windows and nothing else.
 
-Both binaries can run on one host: the service names differ (`postdoc` and
-`postdoc-worker` against scan's `scan` and `scan-worker`), which is how you
-compare them on real traffic before retiring the old one.
+The service names still differ — `postdoc` and `postdoc-worker` against scan's
+`scan` and `scan-worker` — but they no longer coexist. See below.

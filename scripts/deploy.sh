@@ -62,6 +62,43 @@ command -v systemctl >/dev/null 2>&1 || die "systemd not found"
 SUDO=""
 [ "$(id -u)" -eq 0 ] || SUDO=sudo
 
+# --- Retire atomscan ---------------------------------------------------------
+#
+# postdoc replaces `atomscan worker` and `atomscan serve`, and the two must not
+# run at the same time. Each sizes its memory ceiling against the whole host and
+# each runs at nice -20, so a box running both carries two analysis daemons that
+# each believe they own it: they claim from the same queue and arrive at the
+# same memory ceiling together, which is how a host that survived one of them
+# gets OOM-killed running both.
+#
+# Stopping scan *before* postdoc starts is deliberate. The overlap is the
+# dangerous window; a short gap with nothing analyzing is not, because hopper
+# re-leases anything unfinished.
+#
+# Disabled as well as stopped, so a reboot between now and scan's uninstall does
+# not quietly restore the collision. The unit file itself is left alone:
+# removing it is uninstalling scan, which is a separate decision from standing
+# it down here.
+for unit in scan-worker.service scan.service; do
+    # `is-enabled` catches a unit that is installed but currently stopped;
+    # `is-active` catches one still running from a unit file already removed.
+    if $SUDO systemctl is-enabled "$unit" >/dev/null 2>&1 ||
+       $SUDO systemctl is-active "$unit" >/dev/null 2>&1
+    then
+        log "Retiring ${unit}; postdoc replaces it"
+        # Two verbs rather than `disable --now`: that form fails outright when
+        # the unit file has already been removed, leaving a service that is
+        # still running unstopped. Disable first so a reboot cannot restore it.
+        $SUDO systemctl disable "$unit" >/dev/null 2>&1 || true
+        $SUDO systemctl stop "$unit" >/dev/null 2>&1 || true
+        # Starting postdoc anyway would produce exactly the simultaneous run
+        # this section exists to prevent, so this is a hard gate.
+        if $SUDO systemctl is-active --quiet "$unit"; then
+            die "${unit} did not stop; refusing to start postdoc beside it"
+        fi
+    fi
+done
+
 # --- Service account and state ----------------------------------------------
 
 if ! getent passwd "$SERVICE_USER" >/dev/null; then

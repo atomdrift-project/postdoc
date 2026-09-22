@@ -12,6 +12,12 @@
 # go one at a time, each proved healthy before the next is touched, because
 # they answer live traffic.
 #
+# Each host's deploy disables and stops `scan-worker` and `scan` before it
+# starts postdoc: the two cannot share a machine, since each sizes itself
+# against the whole of it. That lives in the deploy scripts rather than here,
+# so a deploy run by hand stands scan down too. A scan service that will not
+# stop fails the host's deploy, and the summary below shows it as FAILED.
+#
 # Env:
 #   DAYS          how far back a check-in still counts        (default 7)
 #   BATCH         workers deployed concurrently, 0 for all    (default 0)
@@ -118,7 +124,9 @@ fi
 
 # What runs on a host is decided by what is *installed* there, not by the
 # roster: a host can be reimaged or repurposed between check-ins, and the unit
-# on disk is the only thing that knows what it is now.
+# on disk is the only thing that knows what it is now. Windows has no unit file,
+# so its service manager is asked instead; it carries workers only, the way
+# scan's rollout has it, and needs an ssh server and a POSIX `sh` to be driven.
 #
 # Exit codes: 90 no repo, 91 no postdoc service.
 remote_script() {
@@ -143,20 +151,52 @@ for f in /etc/systemd/system/postdoc-worker.service \
          /usr/local/etc/rc.d/postdoc_worker; do
     if unit_live "$f"; then worker_unit="$f"; break; fi
 done
+
+# Windows keeps no unit file at all: deploy-windows.ps1 registers an NSSM
+# service, so the service manager is the only thing that can be asked. Spelled
+# `sc.exe` because a bare `sc` is a builtin in some shells. Worker only, the
+# way scan's rollout has it — there is no Windows server to find.
+if [ -z "$worker_unit" ] && sc.exe query postdoc-worker >/dev/null 2>&1; then
+    worker_unit="service:postdoc-worker"
+fi
 server_unit=""
 for f in /etc/systemd/system/postdoc.service \
          /usr/local/etc/rc.d/postdoc; do
     if unit_live "$f"; then server_unit="$f"; break; fi
 done
 
-git pull --ff-only
+# Bring the checkout up to date. Deploy hosts are checkouts, not workspaces, so
+# what has to hold is "the tree is the upstream branch" -- and `git pull`
+# cannot promise that: when main has been force-pushed it aborts with "Not
+# possible to fast-forward", failing the host for a reason that has nothing to
+# do with it. Fetching and resetting reaches the same commit either way, and
+# discards exactly the local commits and edits a deploy host is not supposed to
+# have. Untracked files -- build artifacts, caches, token files -- are left
+# alone.
+upstream=$(git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null) ||
+    upstream=origin/main
+git fetch --prune
+git reset --hard "$upstream"
 
 if [ -n "$server_unit" ]; then
     make deploy-server URL="${ROLLOUT_URL:-}"
 elif [ -n "$worker_unit" ]; then
     # Re-read the hopper URL out of the unit rather than assuming the roster's:
     # a worker pointed at a different queue must stay pointed at it.
-    url=$(grep -oE -- '--url[= ][^ "]+' "$worker_unit" | head -1 | sed 's/^--url[= ]//')
+    case "$worker_unit" in
+    service:*)
+        # nssm answers in UTF-16, which every tool after this would read as one
+        # character followed by a NUL; drop those before tokenizing. Handles
+        # `--url X` and `--url=X` alike.
+        url=$(nssm get postdoc-worker AppParameters 2>/dev/null |
+            tr -d '\000\r' | tr -s ' \t"' '\n\n\n' |
+            awk '/^--url=/ { sub(/^--url=/, ""); print; exit }
+                 /^--url$/ { getline; print; exit }')
+        ;;
+    *)
+        url=$(grep -oE -- '--url[= ][^ "]+' "$worker_unit" | head -1 | sed 's/^--url[= ]//')
+        ;;
+    esac
     [ -n "$url" ] || url="${ROLLOUT_URL:-}"
     [ -n "$url" ] || { echo "no --url in $worker_unit and no URL given" >&2; exit 91; }
     make deploy-worker URL="$url"

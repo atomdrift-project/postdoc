@@ -51,9 +51,62 @@ log() { printf '==> %s\n' "$*"; }
 [ "$(uname -s)" = FreeBSD ] || die "this is the FreeBSD path"
 [ -x "$BIN_PATH" ] || die "$BIN_PATH is missing or not executable"
 
+# As root nothing is needed; otherwise prefer doas, which is in the FreeBSD
+# base system, and fall back to sudo. Testing `command -v "$SUDO"` with SUDO
+# empty reports "not found" and would pick sudo even when already root.
 SUDO=""
-[ "$(id -u)" -eq 0 ] || SUDO=doas
-command -v "$SUDO" >/dev/null 2>&1 || SUDO=sudo
+if [ "$(id -u)" -ne 0 ]; then
+    if command -v doas >/dev/null 2>&1; then
+        SUDO=doas
+    elif command -v sudo >/dev/null 2>&1; then
+        SUDO=sudo
+    else
+        die "need doas or sudo"
+    fi
+fi
+
+# --- Retire atomscan ---------------------------------------------------------
+#
+# postdoc replaces `atomscan worker` and `atomscan serve`, and the two must not
+# run at the same time. Each sizes its memory ceiling against the whole host and
+# each runs at nice -20, so a box running both carries two analysis daemons that
+# each believe they own it: they claim from the same queue and arrive at the
+# same memory ceiling together, which is how a host that survived one of them
+# gets OOM-killed running both.
+#
+# Stopping scan *before* postdoc starts is deliberate. The overlap is the
+# dangerous window; a short gap with nothing analyzing is not, because hopper
+# re-leases anything unfinished.
+#
+# Disabled as well as stopped, so a reboot between now and scan's uninstall does
+# not quietly restore the collision. The rc.d script itself is left alone:
+# removing it is uninstalling scan, which is a separate decision from standing
+# it down here. `ascan-worker` is scan-worker's pre-rename name, and a host
+# installed before that rename runs the same daemon under it.
+retired=""
+for svc in scan-worker scan ascan-worker; do
+    [ -f "/usr/local/etc/rc.d/${svc}" ] || continue
+    log "Retiring ${svc}; postdoc replaces it"
+    # An rc.conf variable spells a hyphenated service with an underscore.
+    $SUDO sysrc "$(echo "$svc" | tr - _)_enable=NO" >/dev/null 2>&1 || true
+    $SUDO service "$svc" stop >/dev/null 2>&1 || true
+    retired=yes
+done
+
+# daemon(8)'s pidfile names the supervisor, not the atomscan child it forked, so
+# a stop that times out leaves the analysis process running and still holding
+# its leases. scan's own uninstaller reaps it by name for the same reason. Only
+# after a service was stood down, so a hand-run atomscan on a host with no scan
+# service installed is left alone. postdoc's binary is `postdoc`, so this can
+# never reach postdoc itself.
+if [ -n "$retired" ] && pgrep -x atomscan >/dev/null 2>&1; then
+    log "Reaping the atomscan process daemon(8) left behind"
+    $SUDO pkill -9 -x atomscan >/dev/null 2>&1 || true
+    sleep 1
+    if pgrep -x atomscan >/dev/null 2>&1; then
+        die "atomscan is still running; refusing to start postdoc beside it"
+    fi
+fi
 
 # --- Service account and state ----------------------------------------------
 

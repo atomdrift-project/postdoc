@@ -1,10 +1,10 @@
 <#
 .SYNOPSIS
-Install postdoc as a Windows service — `worker` or `serve`.
+Install postdoc as a Windows service - `worker` or `serve`.
 
 .DESCRIPTION
 Same contract as the systemd and rc.d paths: the binary owns its defaults and
-this passes only what it cannot know — where hopper is, and where the token
+this passes only what it cannot know - where hopper is, and where the token
 lives. What differs is the supervision, which is NSSM.
 
 .EXAMPLE
@@ -53,6 +53,58 @@ if (-not $identity.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrat
 $nssm = (Get-Command nssm -ErrorAction SilentlyContinue)
 if (-not $nssm) { Die 'nssm not found on PATH (winget install NSSM.NSSM)' }
 $nssm = $nssm.Source
+
+# --- Retire atomscan ----------------------------------------------------------
+#
+# postdoc replaces `atomscan worker`, and the two must not run at the same time.
+# Each sizes its memory ceiling against the whole host, so a box running both
+# carries two analysis daemons that each believe they own it: they claim from
+# the same queue and reach the same memory ceiling together, which is how a host
+# that survived either one alone gets killed running the pair.
+#
+# `scan-worker` is the only service scan installs here - it has no Windows
+# server - so it is the only collision, and it is stood down whichever mode
+# postdoc is being installed in.
+#
+# Stopped before postdoc starts, because the overlap is the dangerous window and
+# the gap is not: hopper re-leases anything left unfinished. Disabled as well,
+# so a reboot before scan is uninstalled cannot restore the collision. The
+# service stays registered - removing it is uninstalling scan, which is a
+# separate decision from standing it down here.
+$scanWorker = Get-Service 'scan-worker' -ErrorAction SilentlyContinue
+if ($scanWorker) {
+    Log "Standing scan-worker down (currently $($scanWorker.Status)); postdoc replaces it"
+
+    # Through the SCM rather than `nssm set scan-worker Start SERVICE_DISABLED`,
+    # so this still holds if nssm is ever removed while its service is not.
+    Set-Service -Name 'scan-worker' -StartupType Disabled
+
+    # nssm's own stop honours the AppStopMethodConsole that scan's service sets,
+    # giving an in-flight analysis its 30s to drain. Stop-Service is the blunt
+    # fallback for a service nssm no longer recognises.
+    & $nssm stop 'scan-worker' 2>$null | Out-Null
+    if ((Get-Service 'scan-worker').Status -ne 'Stopped') {
+        Stop-Service 'scan-worker' -Force -ErrorAction SilentlyContinue
+    }
+
+    # nssm kills the tree it supervises, but a worker started by hand or
+    # orphaned by an earlier crash sits outside that tree and still holds its
+    # leases. Matched on the command line the way scan's own uninstaller does
+    # it, so an interactive `atomscan scan` is left alone. postdoc ships as
+    # postdoc.exe, so this can never reach postdoc itself.
+    Get-CimInstance Win32_Process -Filter "Name = 'atomscan.exe'" |
+        Where-Object { $_.CommandLine -match 'worker' } |
+        ForEach-Object {
+            Log "Reaping orphaned atomscan worker (pid $($_.ProcessId))"
+            Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+        }
+
+    # Starting postdoc anyway would produce exactly the simultaneous run this
+    # section exists to prevent, so this is a hard gate.
+    if ((Get-Service 'scan-worker').Status -ne 'Stopped') {
+        Die 'scan-worker did not stop; refusing to start postdoc beside it'
+    }
+}
 
 # --- Install the binary -------------------------------------------------------
 
@@ -107,7 +159,7 @@ if (-not $svc) {
 & $nssm set $ServiceName Start SERVICE_AUTO_START | Out-Null
 
 # Restart always, 10s back-off. The throttle stops a tight crash loop from
-# pegging the box — the same shape as systemd's Restart/RestartSec.
+# pegging the box - the same shape as systemd's Restart/RestartSec.
 & $nssm set $ServiceName AppExit Default Restart | Out-Null
 & $nssm set $ServiceName AppRestartDelay 10000 | Out-Null
 & $nssm set $ServiceName AppThrottle 10000 | Out-Null
