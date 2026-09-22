@@ -48,7 +48,7 @@ mimalloc = { version = "0.1", default-features = false }
 # an idle worker never returns retained segments on its own — and its RSS gates
 # its own intake.
 libmimalloc-sys = { version = "0.1", features = ["extended"] }
-tree-sitter = "0.27"
+tree-sitter = "0.28"
 
 # Keep this list in lockstep with `mod jemalloc` in src/main.rs. The tuning
 # string itself is `cleave::JEMALLOC_CONF`, shared with ../scan so every binary
@@ -64,20 +64,23 @@ tikv-jemalloc-sys = "0.7"
 # malloc, invisible to every jemalloc budget and decay policy the fleet is
 # tuned around. Version stays in lockstep with cleave's; `links =
 # "tree-sitter-language"` makes divergence a loud resolve error.
-tree-sitter = "0.27"
+tree-sitter = "0.28"
 
 # Mirrors the patch sections in ../cleave, ../scan and ../isomer. A [patch]
 # applies only from the root manifest, so every crate that can be a root has
 # to carry its own copy — postdoc is a root, so this is not optional and not
-# duplication that can be factored out. tree-sitter 0.27 is unpublished
-# (crates.io tops out at 0.26.x) and cleave requires it, so this is
-# load-bearing for resolution, not only for a fix. Both crates must come from
-# one source: tree-sitter uses its in-tree tree-sitter-language, and
+# duplication that can be factored out. tree-sitter 0.28 is unpublished
+# (crates.io tops out at 0.27.x) and cleave requires it, so this is
+# load-bearing for resolution, not only for a fix. It must name the same fork
+# the siblings do — tstromberg/tree-sitter, which carries the illumos endian.h
+# fix — because the root manifest's patch is the one that applies, so pointing
+# it at upstream silently downgrades the whole graph. Both crates must come
+# from one source: tree-sitter uses its in-tree tree-sitter-language, and
 # `links = "tree-sitter-language"` permits exactly one copy in the graph.
-# Keep the rev in lockstep with the siblings; remove when a release lands.
+# Keep in lockstep with the siblings; remove when a release lands.
 [patch.crates-io]
-tree-sitter = { git = "https://github.com/tree-sitter/tree-sitter", rev = "963b5a5a971021359cf091a63d4f1286bc319643" }
-tree-sitter-language = { git = "https://github.com/tree-sitter/tree-sitter", rev = "963b5a5a971021359cf091a63d4f1286bc319643" }
+tree-sitter = { git = "https://github.com/tstromberg/tree-sitter", branch = "master" }
+tree-sitter-language = { git = "https://github.com/tstromberg/tree-sitter", branch = "master" }
 
 # DEVELOPMENT OVERRIDE — must be commented out before committing.
 #
