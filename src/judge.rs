@@ -6,6 +6,7 @@
 //! postdoc makes are which opinion to quote and which judges to credit.
 
 use scan::engine::{ScanResult, synthesized_level};
+use scan::interpret::Interpretation;
 use scan::model::Model;
 
 use crate::combine::{self, Outcome};
@@ -77,7 +78,7 @@ pub fn report(analysis: Analysis<'_>) -> Result<Report, serde_json::Error> {
     let findings = scan
         .cleave
         .as_ref()
-        .map(|report| scan::lookup::collect_hits(report, purl.as_deref()))
+        .map(|report| scan::engine::collect_hits(report, purl.as_deref()))
         .unwrap_or_default()
         .into_iter()
         .map(|hit| finding(hit, purl.as_deref()))
@@ -110,24 +111,23 @@ pub fn report(analysis: Analysis<'_>) -> Result<Report, serde_json::Error> {
     // llm: scan's interpreter. Its grade is its own opinion; how far that
     // moved the verdict is scan's business and shows in the verdict, not here.
     let llm = match &envelope.llm {
-        Some(interpretation) => match interpretation.grade {
-            Some(grade) => Judge::Ok(Assessment {
-                severity: grade.into(),
-                fires_at: None,
-                confidence: Some(interpretation.blended),
-                duration_ms: Some(interpret_ms),
-                version: interpretation.model.clone(),
-                raw: Some(raw(interpretation)?),
-            }),
-            // An interpretation with no grade is a call that failed; scan
-            // records why and keeps the ML verdict.
-            None => Judge::Error {
-                reason: interpretation
-                    .error
-                    .clone()
-                    .unwrap_or_else(|| "interpreter returned no grade".to_owned()),
-                duration_ms: interpret_ms,
+        Some(interpretation @ Interpretation::Graded(graded)) => Judge::Ok(Assessment {
+            severity: graded.grade.into(),
+            fires_at: None,
+            confidence: Some(graded.blended),
+            duration_ms: Some(interpret_ms),
+            version: graded.model.clone(),
+            raw: Some(raw(interpretation)?),
+        }),
+        // The call produced no grade; scan records why and keeps the ML
+        // verdict.
+        Some(Interpretation::Failed(failed)) => Judge::Error {
+            reason: if failed.error.is_empty() {
+                "interpreter returned no grade".to_owned()
+            } else {
+                failed.error.clone()
             },
+            duration_ms: interpret_ms,
         },
         None => Judge::Skipped {
             reason: llm_skipped,
@@ -235,7 +235,7 @@ pub fn report(analysis: Analysis<'_>) -> Result<Report, serde_json::Error> {
 fn reason(
     bands: &[(JudgeId, Option<Severity>)],
     verdict: Severity,
-    llm: Option<&scan::interpret::Interpretation>,
+    llm: Option<&Interpretation>,
     diff_nature: Option<String>,
 ) -> Option<String> {
     let credited = |id: JudgeId| {
@@ -243,9 +243,12 @@ fn reason(
             .iter()
             .any(|&(candidate, band)| candidate == id && band == Some(verdict))
     };
-    let from_scan = || {
-        llm.map(|i| i.interpretation.trim().to_owned())
-            .filter(|s| !s.is_empty())
+    let from_scan = || match llm {
+        Some(Interpretation::Graded(graded)) => {
+            Some(graded.interpretation.trim().to_owned()).filter(|s| !s.is_empty())
+        }
+        // A failed call has no sentence to quote.
+        Some(Interpretation::Failed(_)) | None => None,
     };
     let from_isomer = || diff_nature;
 
@@ -274,7 +277,7 @@ fn band_level(
 /// package only when it is a *different* one — a fetched dependency — because
 /// repeating the artifact's own coordinate on each of its findings says
 /// nothing the report has not already said at the top.
-fn finding(hit: scan::lookup::Hit, artifact: Option<&str>) -> Finding {
+fn finding(hit: scan::engine::Hit, artifact: Option<&str>) -> Finding {
     let some = |s: String| if s.is_empty() { None } else { Some(s) };
     Finding {
         id: hit.id,
@@ -360,7 +363,7 @@ mod tests {
 
     #[test]
     fn an_empty_field_is_absent_rather_than_blank() {
-        let hit = scan::lookup::Hit {
+        let hit = scan::engine::Hit {
             id: "objectives/execution/shell/bash".to_owned(),
             crit: 5,
             file: String::new(),
@@ -378,7 +381,7 @@ mod tests {
 
     #[test]
     fn a_finding_names_a_package_only_when_it_is_a_different_one() {
-        let hit = |pkg: &str| scan::lookup::Hit {
+        let hit = |pkg: &str| scan::engine::Hit {
             id: "x".to_owned(),
             crit: 5,
             file: String::new(),

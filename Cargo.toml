@@ -2,7 +2,7 @@
 name = "postdoc"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.94"
+rust-version = "1.97"
 license = "Apache-2.0"
 description = "Worker and server coordination for the Atomdrift analysis fleet"
 repository = "https://github.com/atomdrift-project/postdoc"
@@ -81,6 +81,13 @@ tree-sitter = "0.28"
 [patch.crates-io]
 tree-sitter = { git = "https://github.com/tstromberg/tree-sitter", branch = "master" }
 tree-sitter-language = { git = "https://github.com/tstromberg/tree-sitter", branch = "master" }
+# NetBSD and Solaris arms for wasmtime's signal trap handler, pulled in via
+# cleave -> yara-x. Upstream 45.0.3 has neither, so those builds stop at
+# compile_error!("unsupported platform"). Must match cleave's patch. The
+# branch name carries the version: when yara-x moves wasmtime, rebase the
+# branch onto the new tag or this patch silently stops applying (cargo only
+# warns).
+wasmtime = { git = "https://github.com/tstromberg/wasmtime.git", branch = "netbsd-solaris-45.0.3" }
 
 # DEVELOPMENT OVERRIDE — must be commented out before committing.
 #

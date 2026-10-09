@@ -37,7 +37,7 @@ fn main() -> Fallible {
     };
 
     let started = Instant::now();
-    let analyzer = scan::Analyzer::load(scan::models_repo::model_dir()?)?;
+    let analyzer = scan::Analyzer::load(scan::models_repo::ensure_model_dir()?)?;
     let scanned = analyzer.scan_file(&new, &filename(&new))?;
 
     // What hopper would have handed over with the claim. Here the predecessor

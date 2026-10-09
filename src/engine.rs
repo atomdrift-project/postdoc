@@ -59,20 +59,16 @@ pub fn classification(severity: Severity) -> scan::Classification {
 
 /// A scan firing level as postdoc records it.
 ///
-/// Scan spells this `Option<i32>`: `None` under manual thresholds, `Some(-1)`
-/// when nothing fires, and otherwise the budget. The shapes line up exactly,
-/// so this is a rename and not a reinterpretation.
+/// Scan has no level under manual thresholds, `Clean` when nothing fires, and
+/// otherwise the budget. The shapes line up exactly, so this is a rename and
+/// not a reinterpretation.
 #[must_use]
-pub fn level(scan_level: Option<i32>) -> Option<Level> {
-    scan_level.map(|raw| {
-        if raw < 0 {
-            return Level::Never;
-        }
-        // Scan's calibrated grid tops out at 25000, well inside `u16`. A
-        // wider value would be a different scale entirely; saturating keeps
-        // it in the looser direction, which cannot manufacture a conviction.
-        Level::At(u16::try_from(raw).unwrap_or(u16::MAX))
-    })
+pub fn level(scan_level: scan::model::Level) -> Option<Level> {
+    match scan_level {
+        scan::model::Level::Manual => None,
+        scan::model::Level::Clean => Some(Level::Never),
+        scan::model::Level::At(budget) => Some(Level::At(budget)),
+    }
 }
 
 /// What isomer concluded, in postdoc's bands.
@@ -131,18 +127,16 @@ mod tests {
 
     #[test]
     fn scans_level_encoding_reads_the_same_here() {
-        assert_eq!(level(None), None, "manual thresholds carry no level");
-        assert_eq!(level(Some(-1)), Some(Level::Never));
-        assert_eq!(level(Some(0)), Some(Level::At(0)));
-        assert_eq!(level(Some(25)), Some(Level::At(25)));
-        assert_eq!(level(Some(25_000)), Some(Level::At(25_000)));
-    }
-
-    #[test]
-    fn a_level_off_the_scale_cannot_manufacture_a_conviction() {
-        // Unreachable from scan's grid, but a saturating read must fail
-        // loose — a budget this wide convicts nobody.
-        assert_eq!(level(Some(i32::MAX)), Some(Level::At(u16::MAX)));
+        use scan::model::Level as ScanLevel;
+        assert_eq!(
+            level(ScanLevel::Manual),
+            None,
+            "manual thresholds carry no level"
+        );
+        assert_eq!(level(ScanLevel::Clean), Some(Level::Never));
+        assert_eq!(level(ScanLevel::At(0)), Some(Level::At(0)));
+        assert_eq!(level(ScanLevel::At(25)), Some(Level::At(25)));
+        assert_eq!(level(ScanLevel::At(25_000)), Some(Level::At(25_000)));
     }
 
     #[test]

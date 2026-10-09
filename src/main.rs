@@ -92,6 +92,7 @@ use std::net::SocketAddr;
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 
@@ -345,7 +346,7 @@ fn main() -> ExitCode {
     scan::traits_repo::prepare_runtime_env();
 
     match run(Cli::parse()) {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(code) => code,
         Err(error) => {
             eprintln!("postdoc: {error:#}");
             ExitCode::from(EXIT_ERROR)
@@ -353,7 +354,7 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(cli: Cli) -> anyhow::Result<()> {
+fn run(cli: Cli) -> anyhow::Result<ExitCode> {
     let command = cli.command;
     match command {
         Command::Worker {
@@ -370,47 +371,56 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             // worker and an atomscan worker start on identical footing — the
             // same model bundle, operating point, slot count, memory ceiling
             // and validation gate.
+            // A replica refuses worker routes, so only the primary address of
+            // a comma list is usable; the earlier ones are not a fallback.
+            let Some(hopper_url) = scan::upload::worker_endpoint(&url) else {
+                anyhow::bail!("--url names no hopper address");
+            };
             let config = scan::worker::Startup {
-                hopper_url: url,
+                hopper_url,
                 name,
                 workers: cli.daemon.workers,
-                poll_secs,
-                max_rss_gb: cli.daemon.max_rss_gb.unwrap_or(0),
+                poll_interval: Duration::from_secs(poll_secs),
+                max_rss: scan::memory::MaxRssPolicy::from_cli(cli.daemon.max_rss_gb.unwrap_or(0)),
                 nice,
                 data_dir,
                 max_jobs,
                 exit_if_empty,
-                traits_dir: cli.daemon.traits_dir.clone(),
-                update: cli.global.update,
-                model_dir: cli.global.model_dir.clone(),
-                // Both are global flags, so a worker has to honor them the way
-                // atomscan's does. Left unset they stay the bundle's choice,
-                // which is what a fleet worker normally runs on.
-                level: cli.global.level,
-                thresholds: cli.global.thresholds(),
-                no_update: cli.global.no_update,
                 no_validate,
-                slow_rule_ms: scan::cli::DEFAULT_SLOW_RULE_MS,
-                interpret: cli.global.interpret_config()?,
-                // A worker populates the shared corpus rather than answering
-                // one question quickly, so it takes every resolvable
-                // dependency: the fresh-risk window that keeps an interactive
-                // scan fast discards exactly the long tail the cache wants.
-                fetch: cli.global.fetch_policy(
-                    cli.global
-                        .follow
-                        .unwrap_or_else(scan::fetch::default_service_follow_policy),
-                    scan::fetch::WORKER_MAX_DEP_AGE_DAYS,
-                    true,
-                ),
-                zip_passwords: cli.global.zip_passwords.clone().into(),
+                rules: scan::worker::RulesStartup {
+                    model_dir: cli.global.model_dir.clone(),
+                    // Both are global flags, so a worker has to honor them the
+                    // way atomscan's does. Left unset they stay the bundle's
+                    // choice, which is what a fleet worker normally runs on.
+                    level: cli.global.level,
+                    thresholds: cli.global.thresholds(),
+                    traits_dir: cli.daemon.traits_dir.clone(),
+                    refresh: cli.global.refresh(),
+                    slow_rule_ms: scan::cli::DEFAULT_SLOW_RULE_MS,
+                    interpret: cli.global.interpret_config()?,
+                    // A worker populates the shared corpus rather than
+                    // answering one question quickly, so it takes every
+                    // resolvable dependency: the fresh-risk window that keeps
+                    // an interactive scan fast discards exactly the long tail
+                    // the cache wants.
+                    fetch: cli.global.fetch_policy(
+                        cli.global
+                            .follow
+                            .unwrap_or_else(scan::fetch::default_service_follow_policy),
+                        scan::fetch::WORKER_MAX_DEP_AGE_DAYS,
+                        true,
+                    ),
+                    zip_passwords: cli.global.zip_passwords.clone().into(),
+                },
             }
             .resolve()?;
 
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()?;
-            runtime.block_on(scan::worker::run(config))
+            // A stalled worker exits EX_TEMPFAIL so its supervisor restarts it.
+            let exit = runtime.block_on(scan::worker::run(config))?;
+            Ok(ExitCode::from(exit.code()))
         }
 
         Command::Serve {
@@ -431,38 +441,40 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             let config = scan::server::Startup {
                 bind,
                 max_size_mb,
-                max_rss_gb: cli.daemon.max_rss_gb.unwrap_or(0),
+                max_rss: scan::memory::MaxRssPolicy::from_cli(cli.daemon.max_rss_gb.unwrap_or(0)),
                 allowed_dirs,
                 extract_dir,
                 workers: cli.daemon.workers,
                 allow_cidr,
                 token_file,
-                traits_dir: cli.daemon.traits_dir.clone(),
-                update: cli.global.update,
-                no_update: cli.global.no_update,
                 hopper,
                 idle_worker_slots,
                 analysis_timeout_secs: analysis_timeout,
-                model_dir: cli.global.model_dir.clone(),
-                level: cli.global.level,
-                thresholds: cli.global.thresholds(),
-                slow_rule_ms: scan::cli::DEFAULT_SLOW_RULE_MS,
-                interpret: cli.global.interpret_config()?,
-                fetch: cli.global.fetch_policy(
-                    cli.global
-                        .follow
-                        .unwrap_or_else(scan::fetch::default_service_follow_policy),
-                    scan::fetch::DEFAULT_MAX_DEP_AGE_DAYS,
-                    true,
-                ),
-                zip_passwords: cli.global.zip_passwords.clone().into(),
+                rules: scan::worker::RulesStartup {
+                    model_dir: cli.global.model_dir.clone(),
+                    level: cli.global.level,
+                    thresholds: cli.global.thresholds(),
+                    traits_dir: cli.daemon.traits_dir.clone(),
+                    refresh: cli.global.refresh(),
+                    slow_rule_ms: scan::cli::DEFAULT_SLOW_RULE_MS,
+                    interpret: cli.global.interpret_config()?,
+                    fetch: cli.global.fetch_policy(
+                        cli.global
+                            .follow
+                            .unwrap_or_else(scan::fetch::default_service_follow_policy),
+                        scan::fetch::DEFAULT_MAX_DEP_AGE_DAYS,
+                        true,
+                    ),
+                    zip_passwords: cli.global.zip_passwords.clone().into(),
+                },
             }
             .resolve()?;
 
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()?;
-            runtime.block_on(scan::server::run(config))
+            runtime.block_on(scan::server::run(config))?;
+            Ok(ExitCode::SUCCESS)
         }
     }
 }
