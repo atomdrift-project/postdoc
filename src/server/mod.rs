@@ -10,13 +10,8 @@
 //!   GET  /_/info        — build and capacity, for sizing a client
 //!   GET  /_/stats       — live routing signals
 //!   GET  /_/memory, /_/requests, /_/threads — diagnostics
-//!   POST /_/reload      — reload the model bundle from disk (admin)
-//!   POST /_/update      — pull models and traits, then reload (admin)
-//!   GET  /lookup        — stored verdict by ?sha256= or ?purl= (no slot)
 //!   GET  /status        — whether an analysis of an artifact is running
-//!   POST /analyze       — upload a file, receive the scan envelope
-//!   POST /analyze-purl  — fetch a PURL (registry provenance included) and analyze
-//!   POST /analyze-path  — analyze a local path (loopback)
+//!                       (kept for beamline's reconnect routing)
 //!   GET  /v1/lookup     — decisions for one or many artifacts (no slot)
 //!   POST /v1/analyze    — a decision, streamed if the analysis is slow
 //!
@@ -94,10 +89,6 @@ pub(crate) struct ServerConfig {
     pub(crate) level: Option<u16>,
     /// Per-rule time budget before cleave logs a slow rule.
     pub(crate) slow_rule_ms: u64,
-    /// Directories `/analyze-path` may read. Empty refuses every request.
-    pub(crate) allowed_dirs: Vec<PathBuf>,
-    /// Where cleave extracts archive members for `/analyze-path` callers.
-    pub(crate) extract_dir: Option<PathBuf>,
     /// Concurrent analyses; at least one. Past it requests are refused, not
     /// queued.
     pub(crate) workers: usize,
@@ -142,8 +133,6 @@ impl Default for ServerConfig {
             thresholds: None,
             level: None,
             slow_rule_ms: scan::cli::DEFAULT_SLOW_RULE_MS,
-            allowed_dirs: Vec::new(),
-            extract_dir: None,
             workers: 1,
             idle_worker_slots: 0,
             allow_cidrs: Vec::new(),
@@ -195,11 +184,6 @@ pub(crate) struct Startup {
     pub(crate) max_size_mb: usize,
     /// The process RSS ceiling (`--max-rss-gb`).
     pub(crate) max_rss: scan::memory::MaxRssPolicy,
-    /// Comma-separated directories `/analyze-path` may read. Empty means the
-    /// route refuses every request, which is the safe default.
-    pub(crate) allowed_dirs: Option<String>,
-    /// Where archive members are extracted for the caller to fetch.
-    pub(crate) extract_dir: Option<PathBuf>,
     /// Concurrent request slots. `None` takes the worker default.
     pub(crate) workers: Option<NonZeroUsize>,
     /// Comma-separated CIDRs allowed to reach non-loopback routes.
@@ -232,19 +216,6 @@ impl Startup {
     /// open server because a file went away.
     pub(crate) fn resolve(self) -> anyhow::Result<ServerConfig> {
         let rules = self.rules.resolve()?;
-
-        // Canonicalized at startup so symlink-resolved request paths match in
-        // the `starts_with` checks `/analyze-path` gates on.
-        let allowed_dirs: Vec<PathBuf> = self
-            .allowed_dirs
-            .unwrap_or_default()
-            .split(',')
-            .filter(|s| !s.is_empty())
-            .map(|s| {
-                let path = PathBuf::from(s);
-                path.canonicalize().unwrap_or(path)
-            })
-            .collect();
 
         let workers = self
             .workers
@@ -297,8 +268,6 @@ impl Startup {
             thresholds: rules.thresholds,
             level: rules.level,
             slow_rule_ms: rules.slow_rule_ms,
-            allowed_dirs,
-            extract_dir: self.extract_dir,
             workers,
             idle_worker_slots,
             allow_cidrs,
@@ -859,9 +828,6 @@ struct AppState {
     /// Tasks stuck past the timeout — still occupying a slot until the
     /// blocking thread finally returns. Tracked for observability only.
     stuck_orphans: AtomicUsize,
-    /// Serializes `/_/reload` and `/_/update`. The guard is moved into the
-    /// blocking work, so it is held for as long as that work runs.
-    reload_lock: Arc<tokio::sync::Mutex<()>>,
     overloaded_since: Mutex<Option<Instant>>,
     in_flight: dashmap::DashMap<u64, InFlightRequest>,
     /// Machine-wide cores busy between consecutive `/_/stats` reads.
@@ -1296,7 +1262,6 @@ fn assemble(config: ServerConfig) -> anyhow::Result<(Router, Arc<AppState>)> {
         cpu: Arc::new(Semaphore::new(cores)),
         cpu_busy: CpuBusy::default(),
         stuck_orphans: AtomicUsize::new(0),
-        reload_lock: Arc::new(tokio::sync::Mutex::new(())),
         overloaded_since: Mutex::new(None),
         flights: Arc::new(flight::Flights::default()),
         in_flight: dashmap::DashMap::new(),
@@ -1314,10 +1279,6 @@ fn assemble(config: ServerConfig) -> anyhow::Result<(Router, Arc<AppState>)> {
     state.tasks.spawn(load_resources(Arc::clone(&state)));
     spawn_watchdog(&state);
 
-    // `{"purl": …}` needs a few hundred bytes; the router-wide upload limit
-    // would let it buffer a full artifact's worth of JSON before rejecting it.
-    const PURL_BODY_MAX: usize = 64 * 1024;
-
     // No ConcurrencyLimitLayer: each analyze handler refuses past capacity
     // with a 429 rather than queueing. Layers apply bottom-up, so the last
     // `.layer()` runs first per request; the ACL runs before the body limit so
@@ -1326,21 +1287,12 @@ fn assemble(config: ServerConfig) -> anyhow::Result<(Router, Arc<AppState>)> {
         .route("/_/health", get(diag::health))
         .route("/_/info", get(diag::info))
         .route("/_/stats", get(diag::stats))
-        .route("/_/reload", post(handlers::reload))
-        .route("/_/update", post(handlers::update))
         .route("/_/memory", get(diag::memory_stats))
         .route("/_/requests", get(diag::requests))
         .route("/_/threads", get(diag::threads))
-        .route("/lookup", get(handlers::lookup))
         .route("/status", get(handlers::status))
         .route("/v1/lookup", get(v1::v1_lookup))
         .route("/v1/analyze", post(v1::v1_analyze))
-        .route("/analyze", post(handlers::analyze))
-        .route(
-            "/analyze-purl",
-            post(handlers::analyze_purl).layer(DefaultBodyLimit::max(PURL_BODY_MAX)),
-        )
-        .route("/analyze-path", post(handlers::analyze_path))
         .layer(DefaultBodyLimit::max(state.config.max_body_size))
         .layer(middleware::from_fn_with_state(Arc::clone(&state), acl::acl))
         // Outermost: every request gets an id and an access-log line, including
@@ -1561,7 +1513,6 @@ pub(crate) async fn run(config: ServerConfig) -> anyhow::Result<()> {
         max_body_mb = config.max_body_size / 1024 / 1024,
         analysis_timeout_secs = config.analysis_timeout_secs,
         allow_cidrs = config.allow_cidrs.len(),
-        allowed_dirs = config.allowed_dirs.len(),
         authenticated = config.auth_digest.is_some(),
         "listening (resources loading in background)",
     );
@@ -1573,18 +1524,6 @@ pub(crate) async fn run(config: ServerConfig) -> anyhow::Result<()> {
     if config.auth_digest.is_none() {
         tracing::warn!(
             "no --token-file: the API is unauthenticated; any peer that reaches the socket can submit work",
-        );
-    }
-
-    // /analyze-path reads any file under --allowed-dirs and is restricted to
-    // loopback peers — but a tunnel makes every peer a loopback peer, so that
-    // restriction stops protecting it. Leave --allowed-dirs empty unless the
-    // host is genuinely local-only; with no allowed directory the route
-    // rejects every request.
-    if !config.allowed_dirs.is_empty() {
-        tracing::warn!(
-            allowed_dirs = config.allowed_dirs.len(),
-            "--allowed-dirs is set: /analyze-path can read those directories for any peer reaching loopback, including through a tunnel",
         );
     }
 

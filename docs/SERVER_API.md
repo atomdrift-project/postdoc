@@ -19,8 +19,6 @@ The defaults are deliberate. Override them only when you have a reason.
 | `--workers`      | physical performance-core count (min 2) | Hard cap on concurrent analyses. Excess requests get 503. |
 | `--max-size-mb`  | `100`              | Per-request upload limit.                                  |
 | `--max-rss-gb`   | `0` (auto)         | RSS ceiling. `0` reads the cgroup signal. `-1` disables.   |
-| `--allowed-dirs` | none               | Comma-separated roots permitted by `/analyze-path`.        |
-| `--extract-dir`  | none               | Where cleave unpacks archive members.                      |
 | `--allow-cidr`   | none               | Extra CIDR networks allowed beyond loopback.               |
 | `--token-file`   | none               | File holding the required bearer token. See below.         |
 | `--traits-dir`   | none               | Writable cleave traits directory (sets env on launch).     |
@@ -143,7 +141,7 @@ Four properties are deliberate:
   empty, or unreadable, the server refuses to start. It never falls back to
   serving unauthenticated.
 - **Rotation needs a restart.** The token is read once at startup;
-  `/_/reload` does not re-read it. A rotated-but-not-restarted server is the
+  rotation needs a restart. A rotated-but-not-restarted server is the
   usual cause of a 401 against a token file that looks correct — the access
   log's `cred_fp` field distinguishes that from a wrong token, see
   [Logging](#logging).
@@ -188,47 +186,14 @@ differences.
 
 ## Endpoints
 
-### `POST /analyze`
+### Removed legacy routes
 
-Multipart upload. One part named `file`. The filename is sanitised
-(`[A-Za-z0-9_.-]`, `..` collapsed, truncated to 63 bytes) and copied to
-a private temp directory so cleave sees a plausible extension.
-
-    curl -s -H "$AUTH" -F file=@/bin/ls http://127.0.0.1:49999/analyze | jq .ml
-
-Returns 200 with the [response envelope](JSON.md). 413 if the
-body exceeds `--max-size-mb`, 415 for unsupported types, 422 for
-truncated or malformed input, 503 if the server is starting or
-saturated, 504 if analysis exceeds the watchdog deadline.
-
-### `POST /analyze-path`
-
-JSON body: `{"path": "/absolute/path"}`. Loopback only, always — but see the
-tunnel caveat under [Authentication](#authentication): behind a tunnel,
-"loopback" includes every remote caller. The path is canonicalised before it
-is compared against `--allowed-dirs`, so symlinks cannot escape. Without
-`--allowed-dirs`, every request returns 403.
-
-    curl -s -H "$AUTH" -H 'content-type: application/json' \
-      -d '{"path":"/usr/bin/ls"}' \
-      http://127.0.0.1:49999/analyze-path | jq .ml
-
-Same response envelope as `/analyze`.
-
-### `POST /analyze-purl`
-
-JSON body: `{"purl": "pkg:npm/left-pad@1.3.0"}`. The `pkg:` scheme is
-optional (`npm/left-pad@1.3.0` is accepted). Scan resolves the package,
-looks up registry provenance itself, and returns the same envelope as
-`/analyze`. Takes an analyze slot. 400 if the argument is not a PURL.
-
-    curl -s -H "$AUTH" -H 'content-type: application/json' \
-      -d '{"purl":"pkg:npm/left-pad@1.3.0"}' \
-      http://127.0.0.1:49999/analyze-purl | jq .ml
-
-Beamline backends should start the server with `--follow --interpret
---analysis-timeout 1800` so dependency follow and LLM interpretation
-match a live `postdoc purl` run.
+`POST /analyze`, `POST /analyze-purl`, `POST /analyze-path`, `GET /lookup`,
+`POST /_/reload` and `POST /_/update` were removed. Beamline uses only
+`/v1/lookup`, `/v1/analyze`, `/status` and `/_/stats`; promoter uploads
+bytes to `POST /v1/analyze?full=1` (see `promoter-v1-migration.patch`).
+Rules/model updates now happen by server restart (deploy/rollout), not
+by API call. `GET /status` is kept for beamline's reconnect routing.
 
 ### `GET /v1/lookup`
 
@@ -369,100 +334,6 @@ analysis continues regardless — it is not that connection's to lose —
 and a caller that reconnects joins the run already in progress rather
 than starting a second one.
 
-### `GET /lookup`
-
-What scan already knows about an artifact or a package. Reads stored
-verdicts and the bloom filters; **never analyzes**. Takes no analyze
-slot and answers while the model is still loading, so a restarting
-server keeps serving lookups.
-
-    GET /lookup?sha256=<64hex>
-    GET /lookup?purl=<url-encoded>
-    GET /lookup?purl=<url-encoded>&sha256=<64hex>
-
-Name at least one key; neither is a 400. On `purl`, the `pkg:` prefix
-is optional (`npm/left-pad@1.3.0` works), and the value is canonicalized
-the way `/analyze-purl` and `postdoc purl` canonicalize it.
-
-Sending both is the cheapest way to ask, and is what a caller holding an
-artifact it can also name should do. The filters are separate — a digest
-and a locator are keyed independently — so each is evidence about the
-same artifact, and asking with both costs four in-memory probes instead
-of two rather than a second request.
-
-The two answers are merged the way a single key's good and bad channels
-already are: bad from either key wins, good from either key wins, and
-holding both at once is the `conflicted` decision that already exists for
-a key in both sets. So a digest in the good set whose release is in the
-bad set does not come back `skip` because the digest was asked first — it
-comes back `conflicted`, and the caller scans.
-
-A stored verdict is looked up by digest first, since a digest names exact
-bytes. The PURL's verdict is a second chance when the digest is unknown,
-and is returned only if it resolved to the same digest: a release whose
-artifact has changed is answering about something other than what was
-asked about.
-
-Both identifiers travel as query parameters. A PURL's own grammar
-carries `/`, `?` and `#`, so `pkg:npm/x@1?arch=x64` in a path segment
-would have everything from the `?` parsed as the URL's query and a
-`#subpath` dropped by the client — silently keying on a different
-package. Qualifiers are part of the identity the filters key on.
-
-A stored verdict is a 200:
-
-    {
-      "sha": "2cf24dba…",
-      "purl": "pkg:npm/evil@1.0.0",
-      "lvl": 3,
-      "eng": "2.8.0-beta.1",
-      "why": "Postinstall launches a reverse shell.",
-      "hits": [ { "id": "objectives/…", "crit": 5, "file": "lib/install.js",
-                  "pkg": "pkg:npm/evil@1.0.0", "desc": "…",
-                  "off": 109, "line": 12 } ],
-      "bloom": "unknown"
-    }
-
-`lvl` is the tightest false-positive budget per 100M benigns at which the
-artifact grades hostile; `-1` never fires. Gate on it. `why` is the
-interpreter's sentence when `--interpret` ran. Empty fields are omitted.
-
-`hits` carries at most three findings of criticality 3 or worse, worst
-first. `off` is the byte offset of the match within `file` and `line` its
-1-based source line, read from the context window that recorded the
-match; either may be absent, since a binary has no line structure and a
-report whose context was trimmed keeps only a coarse evidence span.
-
-Only findings *native* to the file they are reported on become hits. An
-archive repeats its members' findings on itself, carrying no path or
-offset of its own; those copies are dropped in favour of the member's,
-and a cross-file composite — which has no single place to point at — is
-dropped with them.
-
-Holding nothing is a 404 — with the filter's opinion still attached, so
-one round trip answers both questions:
-
-    { "error": "unknown sample", "bloom": "skip" }
-
-`bloom` is `skip` (known-good, not revoked), `known-bad`, `conflicted`
-(in both sets), or `unknown`. It rides on the 200 as well. A filter hit
-is not an analysis: it says a published set vouches for this key, not
-what the artifact is, so the two never collapse into one field. Missing
-filters fail closed (`unknown`).
-
-Verdicts are stored per ruleset (scan release, traits commit, model
-bundle), so a rules or model update reads as a miss rather than serving
-a verdict the current detector would no longer give. `SCAN_ANALYSIS_CACHE=0`
-disables the store, which degrades every lookup to `unknown sample`.
-
-Headers: `X-SHA256`, `X-Scan-Source: index`, and `Cache-Control` —
-`max-age=86400` on a verdict (immutable for the ruleset that produced
-it), `no-store` on a miss (it becomes a hit the moment anything analyzes
-the artifact). The scope is `private` when a token is configured.
-
-400 for a malformed digest, for a string that is not a PURL, or for
-anything other than exactly one key.
-
 ### `GET /status`
 
 `?sha256=…`, `?purl=…`, or both. Where an analysis of this artifact
@@ -531,17 +402,6 @@ analysed, which is why they are not public.
 
 Static facts: version, slot count, CPU count, upload and RSS limits,
 total memory, the model and traits commit hashes.
-
-### `POST /_/reload`
-
-Reread the model bundle from disk and hot-swap it atomically. Returns
-elapsed time. Use this after editing `evaluation.json` to change
-thresholds without restarting.
-
-### `POST /_/update`
-
-`git pull` the models and traits repositories, then reload. Returns
-which side changed and the new commits.
 
 ### `GET /_/memory`, `GET /_/requests`, `GET /_/threads`
 
@@ -729,8 +589,7 @@ The verdict mode is resolved as follows:
    and `ml.lvl` is `null`.
 
 The level/grid is baked in at server start. To change models: stop the
-server, or edit the bundle and `POST /_/reload`, or push new models and
-`POST /_/update`. The active level is fixed per server process; there is
+server and restart it. The active level is fixed per server process; there is
 no per-request override.
 
 See [JSON.md](JSON.md) for the full `ml.lvl` encoding and how consumers
@@ -745,10 +604,9 @@ The server is built for trusted networks. The defaults reflect that.
 - **No authentication. No TLS.** If the server is reachable from
   anywhere but localhost, put a reverse proxy in front of it that does
   both.
-- **`/analyze-path` is loopback-only, always.** `--allow-cidr` does
-  not widen it. The path is `canonicalize()`d before the
-  `--allowed-dirs` prefix check, so symlinks cannot point outside the
-  allowed roots.
+- **No loopback-trusted routes.** `/analyze-path`, `/_/reload` and
+  `/_/update` were removed, so tunnel loopback is never treated as
+  local trust.
 - **Filenames are sanitised.** Alnum plus `_.-` only. `..` is
   collapsed. The result is truncated to 63 bytes. The original name is
   never used on disk.

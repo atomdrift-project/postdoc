@@ -315,24 +315,34 @@ struct LocalFileIndex {
 /// needs no index at all. `LocalFileIndex` exists only to catch the remainder —
 /// samples that have moved out from under their recorded path — so it is a
 /// best-effort accelerator layered on top of this, never a prerequisite for it.
+/// Join `requested` under `root`, refusing anything that escapes it:
+/// absolute paths, `..` traversal, and symlinks whose target leaves the
+/// root. Hopper supplies the path, so it is untrusted input even though
+/// the SHA-256 check below would catch a wrong file — containment keeps
+/// the worker from even *reading* outside its data directory.
+fn contained_join(root: &Path, requested_path: &str) -> Option<PathBuf> {
+    let requested = Path::new(requested_path);
+    if requested.is_absolute() {
+        return None;
+    }
+    let canonical_root = root.canonicalize().ok()?;
+    let joined = canonical_root.join(requested);
+    // Canonicalize resolves `..` and symlinks; a not-yet-existing file
+    // cannot be contained-proven, so it is refused here and the caller
+    // falls back to downloading.
+    let canonical = joined.canonicalize().ok()?;
+    canonical.starts_with(&canonical_root).then_some(canonical)
+}
+
 fn resolve_on_disk(
     root: &Path,
     requested_path: &str,
     expected: &[u8; 32],
     expected_size: Option<u64>,
 ) -> Option<PathBuf> {
-    let requested = Path::new(requested_path);
-    let mut candidates: Vec<PathBuf> = Vec::new();
-    if requested.is_relative() {
-        candidates.push(root.join(requested));
-    } else if requested.is_absolute() {
-        candidates.push(requested.to_path_buf());
-        if let Ok(resolved) = requested.canonicalize()
-            && resolved != requested
-        {
-            candidates.push(resolved);
-        }
-    }
+    // Contained under `root` only: an absolute or escaping hopper path
+    // must not resolve, however well its digest would have matched.
+    let candidates: Vec<PathBuf> = contained_join(root, requested_path).into_iter().collect();
 
     for candidate in &candidates {
         let meta = match fs::metadata(candidate) {
@@ -3666,9 +3676,7 @@ async fn stage_payload(
 
     // Local files need no download or staging, so no size check applies.
     if let Some(dir) = data_dir
-        && tokio::fs::try_exists(dir.join(&job.path))
-            .await
-            .unwrap_or(false)
+        && contained_join(dir, &job.path).is_some_and(|p| p.is_file())
     {
         return Ok(PrefetchData::Local);
     }
@@ -3693,6 +3701,11 @@ async fn stage_payload(
 /// Download a job's payload the size-appropriate way: into memory below the
 /// spool threshold, streamed to a spool file above it. Shared by the prefetcher
 /// and `run_job`'s direct-download fallback so both routes stay RAM-safe.
+/// Marker in the error from [`Hopper::download_bytes_with_limit`] when the
+/// actual body exceeds the in-memory limit, so `fetch_payload` can reroute
+/// to the spool instead of treating it as a transient download failure.
+const DOWNLOAD_LIMIT_EXCEEDED: &str = "download limit exceeded";
+
 async fn fetch_payload(
     hopper: &Hopper,
     spool: &Arc<SpoolState>,
@@ -3700,10 +3713,38 @@ async fn fetch_payload(
 ) -> Result<PrefetchData> {
     let size = job.size().unwrap_or(0);
     if size <= spool.mem_threshold_bytes as u64 {
-        return hopper
-            .download_bytes(&job.sha256, &job.path)
+        // The claimed size selects this route, but it is untrusted: hopper
+        // may send a negative/unknown or understated size (see
+        // `ClaimJob::size`). Cap the actual body at the memory threshold;
+        // a body that outgrows RAM reroutes to the spool (which caps at
+        // MAX_JOB_BYTES) instead of buffering unboundedly.
+        match hopper
+            .download_bytes_with_limit(&job.sha256, &job.path, spool.mem_threshold_bytes as u64)
             .await
-            .map(PrefetchData::Memory);
+        {
+            Ok(bytes) => return Ok(PrefetchData::Memory(bytes)),
+            Err(e) if e.to_string().contains(DOWNLOAD_LIMIT_EXCEEDED) => {
+                let reserve = size.max(spool.mem_threshold_bytes as u64 + 1);
+                spool
+                    .try_reserve(reserve)
+                    .with_context(|| format!("cannot spool oversize payload for {}", job.sha256))?;
+                return match hopper
+                    .download_to_spool(spool, &job.sha256, &job.path)
+                    .await
+                {
+                    Ok(path) => Ok(PrefetchData::Spooled(SpooledPayload {
+                        path,
+                        size: reserve,
+                        spool: Arc::clone(spool),
+                    })),
+                    Err(e) => {
+                        spool.release(reserve);
+                        Err(e)
+                    }
+                };
+            }
+            Err(e) => return Err(e),
+        }
     }
     spool
         .try_reserve(size)
@@ -4623,13 +4664,49 @@ impl Hopper {
     /// Download file bytes from hopper, verifying their SHA-256. Tries the
     /// fast `/data/{path}` endpoint first (static file serving, no DB query),
     /// falling back to `/api/file/{sha256}` for older hopper versions.
+    // Retained as the MAX_JOB_BYTES-capped entry point; production staging
+    // goes through `download_bytes_with_limit` with the tighter RAM limit.
+    #[allow(dead_code)]
     async fn download_bytes(&self, sha256: &str, path: &str) -> Result<bytes::Bytes> {
+        self.download_bytes_with_limit(sha256, path, MAX_JOB_BYTES)
+            .await
+    }
+
+    /// Like [`Self::download_bytes`], but the actual body — not the claimed
+    /// job size or the `Content-Length` header — is capped at `max_bytes`
+    /// while streaming. `resp.bytes()` would buffer the whole body before
+    /// any check, so a hopper claiming a small/negative size but serving a
+    /// huge (or chunked, or redirect-final) body could force an unbounded
+    /// RAM allocation; here the advertised length is rejected up front when
+    /// present and the streamed total is enforced regardless of it.
+    async fn download_bytes_with_limit(
+        &self,
+        sha256: &str,
+        path: &str,
+        max_bytes: u64,
+    ) -> Result<bytes::Bytes> {
         let start = Instant::now();
-        let (resp, route) = self.download_response(sha256, path).await?;
+        let (mut resp, route) = self.download_response(sha256, path).await?;
         let url = resp.url().to_string();
-        let bytes = resp.bytes().await.with_context(|| {
+        if let Some(claimed) = resp.content_length()
+            && claimed > max_bytes
+        {
+            anyhow::bail!(
+                "{DOWNLOAD_LIMIT_EXCEEDED}: Content-Length {claimed} exceeds {max_bytes} bytes: path={path} sha256={sha256} url={url}",
+            );
+        }
+        let mut buf = Vec::new();
+        while let Some(chunk) = resp.chunk().await.with_context(|| {
             format!("download body failed: path={path} sha256={sha256} url={url}")
-        })?;
+        })? {
+            if buf.len() as u64 + chunk.len() as u64 > max_bytes {
+                anyhow::bail!(
+                    "{DOWNLOAD_LIMIT_EXCEEDED}: body exceeds {max_bytes} bytes: path={path} sha256={sha256} url={url}",
+                );
+            }
+            buf.extend_from_slice(&chunk);
+        }
+        let bytes = bytes::Bytes::from(buf);
         // Up to half the staging buffer — gigabytes — so hashed off the async
         // threads.
         let digest: [u8; 32] = {
@@ -5083,19 +5160,21 @@ mod tests {
                 size
             )
             .as_deref(),
-            Some(stored.as_path()),
+            Some(stored.canonicalize().expect("canonical").as_path()),
         );
-        // Absolute path, taken as given.
-        assert_eq!(
+        // Absolute paths are refused outright, even inside the root:
+        // hopper must name files relative to --data-dir.
+        assert!(
             resolve_on_disk(
                 root.path(),
                 stored.to_str().expect("utf8 abs"),
                 &expected,
                 size,
             )
-            .as_deref(),
-            Some(stored.as_path()),
+            .is_none()
         );
+        // And a `..` escape never resolves.
+        assert!(resolve_on_disk(root.path(), "../escape.bin", &expected, size).is_none());
         // A file whose content doesn't match the digest is never served.
         let wrong = sha256_from_hex(&sha256_hex(b"different bytes")).expect("decode sha256");
         assert!(
@@ -5200,7 +5279,16 @@ mod tests {
             )
             .expect("resolve path");
 
-        assert_eq!(resolved.as_deref(), Some(root.path().join(rel).as_path()));
+        assert_eq!(
+            resolved.as_deref(),
+            Some(
+                root.path()
+                    .join(rel)
+                    .canonicalize()
+                    .expect("canonical")
+                    .as_path()
+            )
+        );
     }
 
     /// The disk fallback should reject a file whose SHA-256 doesn't match,
@@ -5227,7 +5315,7 @@ mod tests {
     /// Absolute paths from the DB that exist on disk should be resolved
     /// via the disk fallback even when not in the index.
     #[test]
-    fn disk_fallback_resolves_absolute_path_not_in_index() {
+    fn disk_fallback_refuses_absolute_path_not_in_index() {
         let root = tempfile::tempdir().expect("create temp dir");
         let index = LocalFileIndex::build(root.path().to_path_buf(), 4).expect("build index");
 
@@ -5245,7 +5333,9 @@ mod tests {
             )
             .expect("resolve path");
 
-        assert_eq!(resolved.as_deref(), Some(path.as_path()));
+        // An absolute path outside the root is refused: the worker must
+        // not read wherever hopper points it.
+        assert_eq!(resolved.as_deref(), None);
     }
 
     #[test]
@@ -5302,6 +5392,26 @@ mod tests {
         );
         let _ = stream.write_all(head.as_bytes()).await;
         let _ = stream.write_all(body).await;
+        let _ = stream.flush().await;
+    }
+
+    /// Chunked response with no `Content-Length`, so only a streaming cap
+    /// (not a header pre-check) can bound the body.
+    async fn respond_chunked(stream: &mut tokio::net::TcpStream, body: &[u8]) {
+        use tokio::io::AsyncWriteExt;
+        let _ = stream
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
+            )
+            .await;
+        for chunk in body.chunks(4) {
+            let _ = stream
+                .write_all(format!("{:x}\r\n", chunk.len()).as_bytes())
+                .await;
+            let _ = stream.write_all(chunk).await;
+            let _ = stream.write_all(b"\r\n").await;
+        }
+        let _ = stream.write_all(b"0\r\n\r\n").await;
         let _ = stream.flush().await;
     }
 
@@ -5783,6 +5893,81 @@ mod tests {
         assert!(err.contains("sha256 mismatch"), "{err}");
         assert!(err.contains(&sha256_hex(PAYLOAD)), "{err}");
         server.await.unwrap();
+    }
+
+    /// Regression (prior-2 vs prior-7): the spool route caps the streamed
+    /// body at MAX_JOB_BYTES, but the memory route used `resp.bytes()` with
+    /// no cap at all, and it is selected by the *claimed* size — so a small,
+    /// zero, or negative claimed size with a large actual body buffered
+    /// unboundedly in RAM. The cap must trigger on the advertised length
+    /// and, for chunked bodies with no length, on the streamed total.
+    #[tokio::test]
+    async fn download_bytes_with_limit_rejects_oversize_body() {
+        const PAYLOAD: &[u8] = b"a body larger than the in-memory limit";
+        for chunked in [false, true] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let _ = read_target(&mut stream).await;
+                if chunked {
+                    respond_chunked(&mut stream, PAYLOAD).await;
+                } else {
+                    respond(&mut stream, "200 OK", PAYLOAD).await;
+                }
+            });
+            let err = test_hopper(&format!("http://{addr}"))
+                .download_bytes_with_limit(&sha256_hex(PAYLOAD), "incoming/sample.bin", 8)
+                .await
+                .expect_err("oversize body must be rejected")
+                .to_string();
+            assert!(
+                err.contains(DOWNLOAD_LIMIT_EXCEEDED),
+                "chunked={chunked}: {err}"
+            );
+            server.await.unwrap();
+        }
+    }
+
+    /// Oversize regression at the routing level: claimed sizes that select
+    /// the memory route (understated, and negative = unknown) must not put
+    /// an over-threshold body in RAM — it reroutes to the spool instead.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn prefetch_one_spools_when_actual_body_exceeds_memory_threshold() {
+        const PAYLOAD: &[u8] = b"a payload too big for the ram buffer";
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let Some(target) = read_target(&mut stream).await else {
+                        return;
+                    };
+                    if target.starts_with("/data/") {
+                        respond(&mut stream, "200 OK", PAYLOAD).await;
+                    } else {
+                        respond(&mut stream, "404 Not Found", b"").await;
+                    }
+                });
+            }
+        });
+        for claimed in [4i64, -1] {
+            let job = claim_job(&sha256_hex(PAYLOAD), "samples/big.bin", claimed);
+            let pj = prefetch_one(
+                &test_hopper(&format!("http://127.0.0.1:{port}")),
+                None,
+                &test_spool(4),
+                job,
+            )
+            .await;
+            let data = pj
+                .data
+                .unwrap_or_else(|e| panic!("claimed={claimed}: oversize body must spool, got {e}"));
+            let PrefetchData::Spooled(payload) = data else {
+                panic!("claimed={claimed}: over-threshold body must not stage in memory");
+            };
+            assert_eq!(std::fs::read(&payload.path).unwrap(), PAYLOAD);
+        }
     }
 
     #[tokio::test]

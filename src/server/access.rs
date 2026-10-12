@@ -81,7 +81,6 @@ pub(super) struct Subject {
     sha256: Option<String>,
     purl: Option<String>,
     url: Option<String>,
-    path: Option<String>,
 }
 
 impl Subject {
@@ -111,16 +110,6 @@ impl Subject {
         Self {
             sha256: sha256.and_then(subject_field),
             url: subject_field(value),
-            ..Self::default()
-        }
-    }
-
-    /// A request about a file already on this host — `/analyze-path`. The path
-    /// as the caller wrote it, which is what they will search the log for; the
-    /// canonicalized form is on the handler's own line when they differ.
-    pub(super) fn path(value: &str) -> Self {
-        Self {
-            path: subject_field(value),
             ..Self::default()
         }
     }
@@ -157,8 +146,6 @@ pub(super) enum Auth {
     NoPeerInfo,
     /// Refused: peer IP matched no `--allow-cidr` network.
     PeerDenied,
-    /// Refused: a non-loopback peer asked for a loopback-only route.
-    LoopbackOnly,
     /// Refused: no `Authorization` header at all.
     NoCredential,
     /// Refused: an `Authorization` header that is not a usable `Bearer`
@@ -178,7 +165,6 @@ impl Auth {
             Self::Anonymous => "anon",
             Self::NoPeerInfo => "no-peer-info",
             Self::PeerDenied => "peer-denied",
-            Self::LoopbackOnly => "loopback-only",
             Self::NoCredential => "no-credential",
             Self::MalformedCredential => "malformed-credential",
             Self::BadToken { .. } => "bad-token",
@@ -348,7 +334,6 @@ pub(super) async fn access_log(
                 sha256 = subject.sha256.as_deref(),
                 purl = subject.purl.as_deref(),
                 url = subject.url.as_deref(),
-                path = subject.path.as_deref(),
                 cred_len,
                 cred_fp = cred_fp.as_deref(),
                 trace = trace.as_deref(),
@@ -382,15 +367,6 @@ mod tests {
         let by_purl = Subject::purl("pkg:npm/left-pad@1.3.0", Some("beef"));
         assert_eq!(by_purl.purl.as_deref(), Some("pkg:npm/left-pad@1.3.0"));
         assert_eq!(by_purl.sha256.as_deref(), Some("beef"));
-    }
-
-    /// A local-file request is named by the path the caller asked for.
-    #[test]
-    fn subject_carries_a_path() {
-        let subject = Subject::path("/srv/samples/a.bin");
-        assert_eq!(subject.path.as_deref(), Some("/srv/samples/a.bin"));
-        assert_eq!(subject.sha256, None);
-        assert_eq!(subject.purl, None);
     }
 
     /// A PURL lookup that missed resolves to no digest, and an absent field is

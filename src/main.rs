@@ -223,15 +223,6 @@ enum Command {
         #[arg(long, default_value = "100")]
         max_size_mb: usize,
 
-        /// Comma-separated directories `/analyze-path` may read. Empty means
-        /// that route refuses every request.
-        #[arg(long)]
-        allowed_dirs: Option<String>,
-
-        /// Where archive members are extracted for callers to fetch.
-        #[arg(long)]
-        extract_dir: Option<PathBuf>,
-
         /// Comma-separated CIDRs allowed to reach non-loopback routes.
         #[arg(long)]
         allow_cidr: Option<String>,
@@ -434,8 +425,6 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         Command::Serve {
             bind,
             max_size_mb,
-            allowed_dirs,
-            extract_dir,
             allow_cidr,
             token_file,
             hopper,
@@ -450,8 +439,6 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                 bind,
                 max_size_mb,
                 max_rss: scan::memory::MaxRssPolicy::from_cli(cli.daemon.max_rss_gb.unwrap_or(0)),
-                allowed_dirs,
-                extract_dir,
                 workers: cli.daemon.workers,
                 allow_cidr,
                 token_file,
@@ -650,8 +637,6 @@ mod tests {
             "/etc/postdoc/token",
             "--allow-cidr",
             "10.0.0.0/8,192.168.0.0/16",
-            "--allowed-dirs",
-            "/srv/samples",
             "--max-rss-gb",
             "-1",
         ])
@@ -662,7 +647,6 @@ mod tests {
             hopper,
             token_file,
             allow_cidr,
-            allowed_dirs,
             ..
         } = cli.command
         else {
@@ -672,7 +656,6 @@ mod tests {
         assert_eq!(hopper.as_deref(), Some("http://hopper:8081"));
         assert_eq!(token_file, Some(PathBuf::from("/etc/postdoc/token")));
         assert_eq!(allow_cidr.as_deref(), Some("10.0.0.0/8,192.168.0.0/16"));
-        assert_eq!(allowed_dirs.as_deref(), Some("/srv/samples"));
         assert_eq!(cli.daemon.max_rss_gb, Some(-1));
     }
 

@@ -150,6 +150,16 @@ fn is_token68_byte(byte: u8) -> bool {
 /// cannot surface in a log line, a `Debug` dump, or a core file. `Debug`
 /// redacts the digest as well: it is preimage-resistant, but there is no
 /// reason to print it either.
+/// Distinct byte values in `token`. A generated hex/base64 credential of
+/// 16+ bytes has many; a hand-typed or repeated-byte string has few.
+fn token_variety(token: &str) -> usize {
+    let mut seen = [false; 256];
+    for b in token.bytes() {
+        seen[b as usize] = true;
+    }
+    seen.iter().filter(|&&s| s).count()
+}
+
 #[derive(Clone, Copy)]
 pub(crate) struct TokenDigest([u8; 32]);
 
@@ -171,6 +181,16 @@ impl TokenDigest {
             return Err(format!(
                 "token is {len} bytes; at least {MIN_TOKEN_LEN} required"
             ));
+        }
+        // A token of one repeated byte (e.g. `aaaaaaaaaaaaaaaa`) meets the
+        // length floor but carries no entropy; refuse it at startup. Real
+        // generators emit hex/base64 with many distinct symbols.
+        if token_variety(token) < 8 {
+            return Err(
+                "token has too little variety to be a generated credential; \
+                 generate one (e.g. `openssl rand -hex 32`)"
+                    .to_string(),
+            );
         }
         // Trailing `=` is base64 padding, valid only at the end of a token68.
         let body = token.trim_end_matches('=');
@@ -269,17 +289,9 @@ fn fingerprint(credential: &[u8]) -> Fingerprint {
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Trusted;
 
-/// Routes that may only be reached from loopback regardless of
-/// `--allow-cidr`. `/analyze-path` accepts a server-side path and is gated
-/// against `--allowed-dirs`, but exposing it to the network would still hand
-/// any allowed peer a remote-read primitive against those directories. Keep
-/// it loopback-only.
-const LOOPBACK_ONLY_ROUTES: &[&str] = &["/analyze-path"];
-
-/// Routes that reload or update the models and rules the server runs. The
-/// bearer token is their credential; on a server without one, only loopback
-/// may call them.
-const ADMIN_ROUTES: &[&str] = &["/_/reload", "/_/update"];
+// Legacy loopback-only (`/analyze-path`) and admin (`/_/reload`,
+// `/_/update`) routes removed: no route gets loopback trust, because
+// behind a tunnel every remote caller arrives over loopback.
 
 /// The one route reachable without a bearer token, so that load balancers,
 /// tunnel health checks, and monitoring can probe liveness without holding a
@@ -326,8 +338,6 @@ pub(super) async fn acl(
     next: Next,
 ) -> Response {
     let path = req.uri().path();
-    let loopback_only = LOOPBACK_ONLY_ROUTES.contains(&path)
-        || (ADMIN_ROUTES.contains(&path) && state.config.auth_digest.is_none());
     let auth_exempt = path == HEALTH_ROUTE;
 
     let peer = req
@@ -343,17 +353,9 @@ pub(super) async fn acl(
     };
 
     // Gate 1: peer IP. Loopback passes; anything else needs an --allow-cidr
-    // match and can never reach a loopback-only route.
-    if !ip.is_loopback() {
-        if loopback_only {
-            return forbidden(
-                "this route requires a loopback connection",
-                Auth::LoopbackOnly,
-            );
-        }
-        if !state.config.allow_cidrs.iter().any(|c| c.contains(ip)) {
-            return forbidden("peer address not in any allow-cidr", Auth::PeerDenied);
-        }
+    // match.
+    if !ip.is_loopback() && !state.config.allow_cidrs.iter().any(|c| c.contains(ip)) {
+        return forbidden("peer address not in any allow-cidr", Auth::PeerDenied);
     }
 
     // Gate 2: bearer token. Loopback is not exempt — see the module docs.
@@ -367,6 +369,11 @@ pub(super) async fn acl(
             Presented::None => return tag(unauthorized(), Auth::NoCredential),
             Presented::Malformed => return tag(unauthorized(), Auth::MalformedCredential),
             Presented::Bearer(credential) => {
+                // Online guessing gets no oracle (identical 401) and no
+                // speed: a fixed delay caps attempts per connection far
+                // below any plausible token search. Valid tokens never
+                // pay it.
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
                 return tag(
                     unauthorized(),
                     Auth::BadToken {
@@ -482,7 +489,10 @@ mod tests {
     fn token_digest_rejects_short_tokens() {
         assert!(TokenDigest::new("").is_err());
         assert!(TokenDigest::new(&"a".repeat(MIN_TOKEN_LEN - 1)).is_err());
-        assert!(TokenDigest::new(&"a".repeat(MIN_TOKEN_LEN)).is_ok());
+        // Length alone is not entropy: a repeated byte is refused, a
+        // varied generated-looking token of the same length is not.
+        assert!(TokenDigest::new(&"a".repeat(MIN_TOKEN_LEN)).is_err());
+        assert!(TokenDigest::new("0123456789abcdef").is_ok());
     }
 
     /// The length floor and the charset gate are both startup checks: a token

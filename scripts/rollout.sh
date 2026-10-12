@@ -101,6 +101,12 @@ workers=""
 servers=""
 for entry in $roster; do
     host="${entry%-idle}"
+    # Worker names are self-chosen and reach ssh + local filenames below:
+    # a name like `-oProxyCommand=...` would be parsed as an ssh option
+    # despite quoting, and one with `/` would escape the status dir.
+    case "$host" in
+        *[!A-Za-z0-9._-]*|'') note "skipping unsafe worker name: $entry"; continue ;;
+    esac
     case " $SKIP " in *" $host "*) note "skipping $host"; continue ;; esac
     # Never redeploy the host running the rollout: it would cut the connection
     # driving it partway through.
@@ -211,7 +217,7 @@ status_of() { cut -d' ' -f2 "$work/$1.status" 2>/dev/null || echo "not-reached";
 connect() {
     host="$1"
     for _ in 1 2 3; do
-        ssh $SSH_OPTS -o BatchMode=no "$host" true >/dev/null 2>&1 && return 0
+        ssh $SSH_OPTS -o BatchMode=no -- "$host" true >/dev/null 2>&1 && return 0
     done
     echo "$host UNREACHABLE" > "$work/$host.status"
     warn "$host: unreachable"
@@ -224,7 +230,7 @@ deploy_host() {
     started=$(date +%s)
 
     ROLLOUT_URL="$URL" remote_script |
-        ssh $SSH_OPTS "$host" "ROLLOUT_URL='$URL' sh -s" >"$logfile" 2>&1 &
+        ssh $SSH_OPTS -- "$host" "ROLLOUT_URL='$URL' sh -s" >"$logfile" 2>&1 &
     ssh_pid=$!
     # A wedged deploy must not hold the whole rollout. The killer races the
     # deploy and loses in the normal case.
@@ -261,7 +267,7 @@ await_health() {
     host="$1"
     waited=0
     while [ "$waited" -lt "$HEALTH_WAIT" ]; do
-        body=$(ssh $SSH_OPTS "$host" \
+        body=$(ssh $SSH_OPTS -- "$host" \
             "curl -sf --max-time 10 http://$HEALTH_ADDR/_/health" 2>/dev/null || true)
         status=$(printf '%s' "$body" | sed -n 's/.*"status":"\([a-z]*\)".*/\1/p')
         uptime=$(printf '%s' "$body" | sed -n 's/.*"uptime_secs":\([0-9]*\).*/\1/p')
