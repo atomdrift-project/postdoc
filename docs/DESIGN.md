@@ -1,14 +1,14 @@
 # postdoc
 
-Status: in progress (2026-09-16). Phase 1 is under way; see
-[Phases](#phases) for what is built. Everything not marked there is still a
-plan.
+Historical proposal snapshot (2026-09-16). The phases below record the plan at
+that point; current commands and rollout behavior are documented in
+[README.md](../README.md), [DEPLOY.md](DEPLOY.md), and [SERVER_API.md](SERVER_API.md).
 
 postdoc replaces `atomscan serve` and `atomscan worker`. It is the process that
 sits between hopper and the analyzers: it claims samples, judges them, and
 posts a verdict. Its one HTTP caller is beamline. Scan, cleave, and isomer
-keep their library surfaces and their one-shot CLIs, and scan's own serve and
-worker modes stay untouched and deployable until postdoc has rolled out.
+keep their library surfaces and one-shot CLIs. During the transition, a
+Postdoc deployment retires the old Scan daemon on that host before starting.
 
 The one new capability is differential analysis. When a sample has a PURL,
 hopper names an earlier release of the same package that it already holds.

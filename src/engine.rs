@@ -77,7 +77,13 @@ pub fn level(scan_level: scan::model::Level) -> Option<Level> {
 /// that what its grades mean stays its decision and not postdoc's.
 #[must_use]
 pub fn isomer_severity(severity: isomer::Severity) -> Severity {
-    severity.band().into()
+    match severity {
+        isomer::Severity::Critical => Severity::Hostile,
+        isomer::Severity::High => Severity::Suspicious,
+        isomer::Severity::None | isomer::Severity::Low | isomer::Severity::Medium => {
+            Severity::Benign
+        }
+    }
 }
 
 #[cfg(test)]

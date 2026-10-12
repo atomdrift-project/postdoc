@@ -13,8 +13,6 @@ point at an earlier release of that package it already holds, and
 release that looks clean on its own can still have *added* something, and that
 is the shape most supply-chain compromises take.
 
-> NOTE: EARLY BUILD — the wire format is not yet stable.
-
 ## postdoc grades nothing
 
 Every severity in a result belongs to the engine that produced it.
@@ -87,16 +85,14 @@ postdoc worker --url https://hopper.example --name nuc
 It accepts the same arguments `atomscan worker` does, so hopper's supervised
 local worker is a binary-name change and nothing else.
 
-**serve** is not built yet. It will be a drop-in for `atomscan serve`: every
-route scan answers, answered the same way, so swapping the binary is a
-deployment change and nothing else. `/v1` is scan's contract and does not
-move. The result object above is a different shape rather than an extension
-of it, so it gets `/v2`, which callers adopt one at a time.
+**serve** implements Scan's existing `/v1` HTTP API with the same routes,
+request forms, authentication, and response shapes. Beamline can keep referring
+to these as Scan servers during the mixed-fleet transition; point new and
+replacement hosts at `postdoc serve` without changing `SCAN_URL` consumers.
 
-Today the worker posts the same `{ml, llm, raw}` body `atomscan worker` posts,
-so it can take claims beside one with nothing downstream noticing. The judges
-above are built and tested but not yet on that path; wiring them in is the
-step that changes what hopper stores.
+The worker and server implementations now live here. The server keeps Scan's
+existing `/v1` contract during rollout; the worker keeps its existing hopper
+claim and result payload contract.
 
 There is no one-shot CLI. `atomscan` and `isomer` are the tools for that.
 

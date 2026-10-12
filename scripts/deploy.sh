@@ -4,8 +4,8 @@
 #   scripts/deploy.sh worker https://hopper.example
 #   scripts/deploy.sh serve  [https://hopper.example]
 #
-# The binary owns its defaults. This script passes the two things it cannot
-# know — where hopper is, and where the bearer token lives — and nothing else.
+# The binary owns its defaults. This script passes the hopper URL and installs
+# the API and hopper credentials from their separate source files.
 # Every other setting has a default in postdoc, and a default stated in two
 # places is a default that will eventually disagree with itself.
 #
@@ -19,7 +19,8 @@
 #   NICE         scheduling priority            (default -20)
 #   LLM          SCAN_LLM: `local`, `openrouter`, or a base URL
 #   LLM_MODEL    SCAN_LLM_MODEL; unset lets postdoc pick
-#   TOKEN_FILE   hopper bearer token to install (default ~/.tok/hopper)
+#   HOPPER_TOKEN_FILE  hopper bearer token (default ~/.tok/hopper; TOKEN_FILE is a legacy alias)
+#   SCAN_TOKEN_FILE   API bearer token for Beamline (default ~/.tok/scan)
 
 set -eu
 
@@ -51,7 +52,8 @@ MEMORY_LOW="${MEMORY_LOW:-50%}"
 NICE="${NICE:--20}"
 LLM="${LLM:-}"
 LLM_MODEL="${LLM_MODEL:-}"
-TOKEN_FILE="${TOKEN_FILE:-$HOME/.tok/hopper}"
+HOPPER_TOKEN_FILE="${HOPPER_TOKEN_FILE:-${TOKEN_FILE:-$HOME/.tok/hopper}}"
+SCAN_TOKEN_FILE="${SCAN_TOKEN_FILE:-$HOME/.tok/scan}"
 
 die() { echo "error: $*" >&2; exit 1; }
 log() { printf '==> %s\n' "$*"; }
@@ -111,12 +113,19 @@ $SUDO install -d -m0700 -o "$SERVICE_USER" -g "$SERVICE_USER" "$STATE_HOME/.tok"
 
 # Hopper rejects an unauthenticated claim with 401, so a worker without this
 # starts, looks healthy, and never gets a job.
-if [ -r "$TOKEN_FILE" ]; then
-    log "Installing hopper token from $TOKEN_FILE"
+if [ -r "$HOPPER_TOKEN_FILE" ]; then
+    log "Installing hopper token from $HOPPER_TOKEN_FILE"
     $SUDO install -m0600 -o "$SERVICE_USER" -g "$SERVICE_USER" \
-        "$TOKEN_FILE" "$STATE_HOME/.tok/hopper"
-elif [ "$MODE" = worker ]; then
-    die "no hopper token at $TOKEN_FILE; a worker cannot claim without one"
+        "$HOPPER_TOKEN_FILE" "$STATE_HOME/.tok/hopper"
+elif [ "$MODE" = worker ] || { [ "$MODE" = serve ] && [ -n "$URL" ]; }; then
+    die "no hopper token at $HOPPER_TOKEN_FILE; hopper access needs one"
+fi
+
+if [ "$MODE" = serve ]; then
+    [ -r "$SCAN_TOKEN_FILE" ] || die "no API token at $SCAN_TOKEN_FILE; Beamline needs this credential"
+    log "Installing API token from $SCAN_TOKEN_FILE"
+    $SUDO install -m0600 -o "$SERVICE_USER" -g "$SERVICE_USER" \
+        "$SCAN_TOKEN_FILE" "$STATE_HOME/.tok/scan"
 fi
 
 # --- Arguments ---------------------------------------------------------------
@@ -126,7 +135,7 @@ fi
 if [ "$MODE" = worker ]; then
     EXEC_ARGS="worker --url $URL"
 else
-    EXEC_ARGS="serve --token-file $STATE_HOME/.tok/hopper"
+    EXEC_ARGS="serve --token-file $STATE_HOME/.tok/scan"
     [ -n "$URL" ] && EXEC_ARGS="$EXEC_ARGS --hopper $URL"
 fi
 

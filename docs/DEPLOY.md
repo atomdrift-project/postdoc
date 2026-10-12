@@ -18,12 +18,13 @@ Nothing else is supported, and the Makefile says so rather than guessing.
 
 ## The binary owns its defaults
 
-Deployment passes exactly two things postdoc cannot work out for itself:
-where hopper is, and where the bearer token lives.
+Deployment passes the hopper URL and installs credentials as files. The API
+credential used by Beamline and the hopper credential are separate secrets
+and must remain separate during the Scan/Postdoc fleet transition.
 
 ```
-worker   worker --url <hopper>
-serve    serve --token-file <state>/.tok/hopper [--hopper <hopper>]
+worker   worker --url <hopper>              # reads <state>/.tok/hopper
+serve    serve --token-file <state>/.tok/scan [--hopper <hopper>]
 ```
 
 Everything else — slot count, memory ceiling, nice value, bind address, body
@@ -42,6 +43,14 @@ unlike its neighbour.
 The same rule applies inside the binary: `--workers`, `--max-rss-gb` and
 `--traits-dir` apply to both modes, so they are declared once and shared, not
 written twice.
+
+For deployment, `~/.tok/scan` is installed as `<state>/.tok/scan` and passed
+to `serve --token-file`; it stays the API token Beamline supplies as
+`SCAN_TOKEN`. `SCAN_TOKEN_FILE` overrides its source path. The separate
+`~/.tok/hopper` is installed as `<state>/.tok/hopper` for worker/server hopper
+calls; `HOPPER_TOKEN_FILE` overrides its source path (`TOKEN_FILE` remains a
+legacy alias on Unix). A server deploy requires the API token; a hopper token
+is required only when that service will call hopper.
 
 ## The three platforms are treated alike
 

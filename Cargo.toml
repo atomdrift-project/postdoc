@@ -1,11 +1,16 @@
 [package]
 name = "postdoc"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.97"
 license = "Apache-2.0"
 description = "Worker and server coordination for the Atomdrift analysis fleet"
 repository = "https://github.com/atomdrift-project/postdoc"
+
+[features]
+default = ["cleave-breadcrumbs"]
+crt-heap = []
+cleave-breadcrumbs = []
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -24,7 +29,7 @@ serde_json = { version = "1", features = ["raw_value"] }
 cleave = { git = "https://github.com/atomdrift-project/cleave.git", default-features = false }
 # Lib name `scan`, package name `atomdrift-scan` — the same split ../isomer
 # relies on. Supplies the model, the trait floor, and the interpreter.
-atomdrift-scan = { git = "https://github.com/atomdrift-project/scan.git" }
+atomdrift-scan = { path = "../scan", features = ["daemon-support"] }
 # The differential judge.
 isomer = { git = "https://github.com/atomdrift-project/isomer.git" }
 
@@ -34,9 +39,26 @@ isomer = { git = "https://github.com/atomdrift-project/isomer.git" }
 # and a binary only has to install the sink — so the `tracing` facade itself is
 # not a dependency here.
 clap = { version = "4", features = ["derive", "env", "wrap_help"] }
-tokio = { version = "1", features = ["rt-multi-thread"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "fs", "signal", "net"] }
 anyhow = "1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing = "0.1"
+axum = { version = "0.8", features = ["multipart"] }
+bytes = "1"
+form_urlencoded = "1"
+futures-core = "0.3"
+hostname = "0.4"
+reqwest = { version = "0.12", features = ["json", "rustls-tls", "blocking", "multipart"], default-features = false }
+sha2 = "0.10"
+dashmap = "6"
+dirs = "6"
+rayon = "1"
+tempfile = "3"
+burton = { git = "https://github.com/atomdrift-project/burton.git" }
+fletch = { git = "https://github.com/atomdrift-project/fletch.git" }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 # Windows has no jemalloc here; mimalloc plays the same role. The CRT heap was
 # 12% exclusive on a two-Go profile and rayon workers convoy on it, which is

@@ -96,6 +96,14 @@ use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 
+mod admission;
+mod allocator;
+mod inflight;
+mod server;
+#[allow(unsafe_code)]
+mod suspend;
+mod worker;
+
 /// Operational error. A worker that cannot start says why and stops, rather
 /// than idling in a loop that will never claim anything.
 const EXIT_ERROR: u8 = 1;
@@ -244,7 +252,7 @@ enum Command {
         idle_worker_slots: Option<usize>,
 
         /// Per-request analysis timeout in seconds. `0` disables.
-        #[arg(long, default_value_t = scan::server::DEFAULT_ANALYSIS_TIMEOUT_SECS)]
+        #[arg(long, default_value_t = server::DEFAULT_ANALYSIS_TIMEOUT_SECS)]
         analysis_timeout: u64,
     },
 }
@@ -376,7 +384,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             let Some(hopper_url) = scan::upload::worker_endpoint(&url) else {
                 anyhow::bail!("--url names no hopper address");
             };
-            let config = scan::worker::Startup {
+            let config = worker::Startup {
                 hopper_url,
                 name,
                 workers: cli.daemon.workers,
@@ -387,7 +395,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                 max_jobs,
                 exit_if_empty,
                 no_validate,
-                rules: scan::worker::RulesStartup {
+                rules: worker::RulesStartup {
                     model_dir: cli.global.model_dir.clone(),
                     // Both are global flags, so a worker has to honor them the
                     // way atomscan's does. Left unset they stay the bundle's
@@ -419,7 +427,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                 .enable_all()
                 .build()?;
             // A stalled worker exits EX_TEMPFAIL so its supervisor restarts it.
-            let exit = runtime.block_on(scan::worker::run(config))?;
+            let exit = runtime.block_on(worker::run(config))?;
             Ok(ExitCode::from(exit.code()))
         }
 
@@ -438,7 +446,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             // corpus deferral for unknown lookups, and whether the companion
             // idle worker has anything to claim.
             let hopper = hopper.filter(|url| !url.trim().is_empty());
-            let config = scan::server::Startup {
+            let config = server::Startup {
                 bind,
                 max_size_mb,
                 max_rss: scan::memory::MaxRssPolicy::from_cli(cli.daemon.max_rss_gb.unwrap_or(0)),
@@ -450,7 +458,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                 hopper,
                 idle_worker_slots,
                 analysis_timeout_secs: analysis_timeout,
-                rules: scan::worker::RulesStartup {
+                rules: worker::RulesStartup {
                     model_dir: cli.global.model_dir.clone(),
                     level: cli.global.level,
                     thresholds: cli.global.thresholds(),
@@ -473,7 +481,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()?;
-            runtime.block_on(scan::server::run(config))?;
+            runtime.block_on(server::run(config))?;
             Ok(ExitCode::SUCCESS)
         }
     }
@@ -622,7 +630,7 @@ mod tests {
         );
         assert_eq!(
             analysis_timeout,
-            scan::server::DEFAULT_ANALYSIS_TIMEOUT_SECS,
+            server::DEFAULT_ANALYSIS_TIMEOUT_SECS,
             "the timeout default is scan's own constant, not a copy of its value"
         );
         assert!(hopper.is_none(), "a pure analyze service by default");

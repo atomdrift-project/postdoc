@@ -8,8 +8,6 @@ BINARY = postdoc
 # cleave) don't inherit a malformed MAKEFLAGS. Mirrors ../scan and ../isomer.
 CARGO = env -u MAKEFLAGS -u MAKELEVEL -u MFLAGS cargo
 
-PACKAGE := $(shell awk -F'"' '/^name = /{print $$2; exit}' Cargo.toml)
-
 # The site's LLM endpoint, passed as SCAN_LLM to every mode that runs one.
 #
 # This is a coordinate, not a default: postdoc cannot know where the vLLM
@@ -29,15 +27,15 @@ LLM_MODEL ?=
 all: build
 
 build:
-	$(CARGO) build
+	$(CARGO) build --locked
 
 release:
-	$(CARGO) build --release
+	$(CARGO) build --locked --release
 
 # Optimized but un-LTO'd, for targets that build then immediately run the
 # binary. See [profile.quick] in Cargo.toml.
 quick:
-	$(CARGO) build --profile quick
+	$(CARGO) build --locked --profile quick
 
 install: release
 	$(CARGO) install --path .
@@ -55,11 +53,11 @@ lint:
 # Auto-fix what clippy and rustfmt can fix on their own; fmt last so it tidies
 # any code clippy rewrote. Same target set as `lint`.
 fix:
-	$(CARGO) clippy --fix --all-targets --allow-dirty --allow-staged
+	$(CARGO) clippy --locked --fix --all-targets --allow-dirty --allow-staged
 	$(CARGO) fmt
 
 test:
-	$(CARGO) test --quiet
+	$(CARGO) test --locked --quiet
 
 # Install the pre-commit gate (no path overrides + make test + make lint).
 # Bypass an individual commit with `git commit --no-verify`.
@@ -70,9 +68,9 @@ install-precommit:
 
 # --- Deployment --------------------------------------------------------------
 #
-# Three platforms, one contract: the deploy passes the two things it cannot
-# know — where hopper is and where the token lives — and the binary defaults
-# the rest. What differs per platform is supervision (systemd, rc.d, NSSM) and
+# Three platforms, one contract: the deploy passes the hopper URL and installs
+# the distinct API and hopper credentials; the binary defaults the rest. What
+# differs per platform is supervision (systemd, rc.d, NSSM) and
 # the allocator tuning FreeBSD needs in its unit because it uses libc's
 # jemalloc rather than the one linked into the binary.
 

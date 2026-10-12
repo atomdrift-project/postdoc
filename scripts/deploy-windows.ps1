@@ -4,8 +4,8 @@ Install postdoc as a Windows service - `worker` or `serve`.
 
 .DESCRIPTION
 Same contract as the systemd and rc.d paths: the binary owns its defaults and
-this passes only what it cannot know - where hopper is, and where the token
-lives. What differs is the supervision, which is NSSM.
+this passes the hopper URL and installs the separate API and hopper
+credentials. What differs is the supervision, which is NSSM.
 
 .EXAMPLE
 scripts\deploy-windows.ps1 -Mode worker -Url https://hopper.example
@@ -23,8 +23,10 @@ param(
     [string]$Llm = '',
     # SCAN_LLM_MODEL. Unset lets postdoc pick what the endpoint reports.
     [string]$LlmModel = '',
-    # Hopper bearer token to install into the service's state directory.
-    [string]$TokenFile = (Join-Path $HOME '.tok\hopper')
+    # Hopper bearer token. Environment overrides keep parity with Unix deploys.
+    [string]$TokenFile = $(if ($env:HOPPER_TOKEN_FILE) { $env:HOPPER_TOKEN_FILE } elseif ($env:TOKEN_FILE) { $env:TOKEN_FILE } else { Join-Path $HOME '.tok\hopper' }),
+    # API bearer token used by Beamline as SCAN_TOKEN.
+    [string]$ScanTokenFile = $(if ($env:SCAN_TOKEN_FILE) { $env:SCAN_TOKEN_FILE } else { Join-Path $HOME '.tok\scan' })
 )
 
 $ErrorActionPreference = 'Stop'
@@ -112,6 +114,11 @@ $binSrc = Join-Path (Join-Path $PSScriptRoot '..') "target\release\$Binary"
 if (-not (Test-Path $binSrc)) { Die "$binSrc not found; run ``cargo build --release`` first" }
 
 New-Item -ItemType Directory -Force -Path $InstallDir, $StateHome, $LogDir, $TokDir | Out-Null
+# Tokens are inherited by the service as LocalSystem. Remove ProgramData's
+# broader inherited read access so ordinary local users cannot read either
+# credential.
+& icacls.exe $TokDir /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' | Out-Null
+if ($LASTEXITCODE -ne 0) { Die "could not restrict token directory ACL: $TokDir" }
 
 $svc = Get-Service $ServiceName -ErrorAction SilentlyContinue
 if ($svc -and $svc.Status -eq 'Running') {
@@ -124,12 +131,19 @@ Move-Item "$BinDst.new" $BinDst -Force
 
 # Hopper rejects an unauthenticated claim with 401, so a worker without this
 # starts, looks healthy, and never gets a job.
-$tokDst = Join-Path $TokDir 'hopper'
+$hopperTokDst = Join-Path $TokDir 'hopper'
 if (Test-Path $TokenFile) {
     Log "Installing hopper token from $TokenFile"
-    Copy-Item $TokenFile $tokDst -Force
-} elseif ($Mode -eq 'worker') {
-    Die "no hopper token at $TokenFile; a worker cannot claim without one"
+    Copy-Item $TokenFile $hopperTokDst -Force
+} elseif ($Mode -eq 'worker' -or ($Mode -eq 'serve' -and $Url)) {
+    Die "no hopper token at $TokenFile; hopper access needs one"
+}
+
+$scanTokDst = Join-Path $TokDir 'scan'
+if ($Mode -eq 'serve') {
+    if (-not (Test-Path $ScanTokenFile)) { Die "no API token at $ScanTokenFile; Beamline needs this credential" }
+    Log "Installing API token from $ScanTokenFile"
+    Copy-Item $ScanTokenFile $scanTokDst -Force
 }
 
 # --- Arguments ----------------------------------------------------------------
@@ -139,7 +153,7 @@ if (Test-Path $TokenFile) {
 $svcArgs = if ($Mode -eq 'worker') {
     "worker --url $Url"
 } else {
-    $a = "serve --token-file `"$tokDst`""
+    $a = "serve --token-file `"$scanTokDst`""
     if ($Url) { $a += " --hopper $Url" }
     $a
 }
