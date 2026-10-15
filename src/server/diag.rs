@@ -765,6 +765,7 @@ fn read_thread_info_linux() -> serde_json::Value {
 }
 
 #[cfg(target_os = "freebsd")]
+#[allow(unsafe_code)]
 fn read_thread_info_freebsd() -> serde_json::Value {
     use std::mem;
 
