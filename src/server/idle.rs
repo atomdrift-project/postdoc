@@ -172,6 +172,7 @@ fn worker_command(
         use std::os::unix::process::CommandExt;
         // SAFETY: runs between fork and exec. One `write(2)` to a proc file
         // with a stack buffer; no allocation.
+        #[allow(unsafe_code)]
         unsafe {
             cmd.pre_exec(|| {
                 let mut buf = [0u8; 8];
