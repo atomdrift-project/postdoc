@@ -106,8 +106,7 @@ _deploy:
 	@case "$$(uname -s)" in \
 	  Linux)   install -m0755 target/release/$(BINARY) /usr/local/bin/$(BINARY); \
 	           ./scripts/deploy.sh "$(MODE)" "$(URL)" ;; \
-	  FreeBSD) install -m0755 target/release/$(BINARY) /usr/local/bin/$(BINARY); \
-	           ./scripts/deploy-freebsd.sh "$(MODE)" "$(URL)" ;; \
+	  FreeBSD) ./scripts/deploy-freebsd.sh "$(MODE)" "$(URL)" "target/release/$(BINARY)" ;; \
 	  MINGW*|MSYS*|CYGWIN*) \
 	           if command -v pwsh >/dev/null 2>&1; then ps=pwsh; else ps=powershell; fi; \
 	           "$$ps" -NoProfile -ExecutionPolicy Bypass \

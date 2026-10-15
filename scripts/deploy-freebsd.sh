@@ -19,6 +19,7 @@
 set -eu
 
 MODE="${1:-}"
+BUILD_BIN="${3:-}"
 case "$MODE" in
     worker)
         URL="${2:-}"
@@ -52,8 +53,6 @@ die() { echo "error: $*" >&2; exit 1; }
 log() { printf '==> %s\n' "$*"; }
 
 [ "$(uname -s)" = FreeBSD ] || die "this is the FreeBSD path"
-[ -x "$BIN_PATH" ] || die "$BIN_PATH is missing or not executable"
-
 # As root nothing is needed; otherwise prefer doas, which is in the FreeBSD
 # base system, and fall back to sudo. Testing `command -v "$SUDO"` with SUDO
 # empty reports "not found" and would pick sudo even when already root.
@@ -67,6 +66,13 @@ if [ "$(id -u)" -ne 0 ]; then
         die "need doas or sudo"
     fi
 fi
+
+if [ -n "$BUILD_BIN" ]; then
+    [ -x "$BUILD_BIN" ] || die "$BUILD_BIN is missing or not executable"
+    log "Installing $BIN_PATH"
+    $SUDO install -m0755 "$BUILD_BIN" "$BIN_PATH"
+fi
+[ -x "$BIN_PATH" ] || die "$BIN_PATH is missing or not executable"
 
 # --- Retire atomscan ---------------------------------------------------------
 #
@@ -167,21 +173,21 @@ cat > "$TMP_RC" <<RCEOF
 
 name="${SERVICE_NAME}"
 rcvar="${SERVICE_NAME}_enable"
-load_rc_config \\\$name
+load_rc_config \$name
 
-: \\\${${SERVICE_NAME}_enable:="NO"}
-: \\\${${SERVICE_NAME}_nice:="${NICE}"}
-: \\\${${SERVICE_NAME}_llm:="${LLM}"}
-: \\\${${SERVICE_NAME}_logfile:="${LOGFILE}"}
+: \${${SERVICE_NAME}_enable:="NO"}
+: \${${SERVICE_NAME}_nice:="${NICE}"}
+: \${${SERVICE_NAME}_llm:="${LLM}"}
+: \${${SERVICE_NAME}_logfile:="${LOGFILE}"}
 # Seconds a graceful stop waits for in-flight analyses to drain before the
 # whole daemon(8) tree is SIGKILLed. Hopper re-leases anything unfinished.
-: \\\${${SERVICE_NAME}_stop_timeout:="20"}
+: \${${SERVICE_NAME}_stop_timeout:="20"}
 # FreeBSD has no oom_score_adj; protect(1) sets P_PROTECTED, which exempts the
 # process from the swap-exhaustion killer. Inherited across fork and survives
 # daemon(8)'s setuid.
-: \\\${${SERVICE_NAME}_protect:="YES"}
+: \${${SERVICE_NAME}_protect:="YES"}
 
-pidfile="/var/run/\\\${name}.pid"
+pidfile="/var/run/\${name}.pid"
 command="/usr/sbin/daemon"
 
 # MALLOC_CONF tunes FreeBSD's in-libc jemalloc to return freed memory promptly
@@ -208,8 +214,8 @@ malloc_conf="dirty_decay_ms:1000,muzzy_decay_ms:0,abort_conf:true,junk:false"
 # -r -R 5 supervises and restarts forever after any exit, so an OOM kill or a
 # panic self-heals. RUST_BACKTRACE=1 so a panic names the frame that raised it;
 # the cost is paid only on a panic, which is already a lost job.
-command_args="-c -f -r -R 5 -P \\\${pidfile} -o \\\${${SERVICE_NAME}_logfile} -u ${SERVICE_USER} \\
-  /usr/bin/env MALLOC_CONF=\\\${malloc_conf} RUST_BACKTRACE=1 SCAN_LLM=\\\${${SERVICE_NAME}_llm} ${LLM_MODEL_ENV} \\
+command_args="-c -f -r -R 5 -P \${pidfile} -o \${${SERVICE_NAME}_logfile} -u ${SERVICE_USER} \\
+  /usr/bin/env MALLOC_CONF=\${malloc_conf} RUST_BACKTRACE=1 SCAN_LLM=\${${SERVICE_NAME}_llm} ${LLM_MODEL_ENV} \\
   ${BIN_PATH} ${EXEC_ARGS}"
 
 # daemon(8) -u switches user with setusercontext(3), which applies the login
@@ -221,24 +227,24 @@ start_postcmd="${SERVICE_NAME}_postcmd"
 ${SERVICE_NAME}_postcmd()
 {
 	_p=0
-	while [ \\\$_p -lt 10 ]; do
-		_sup=\\\$(cat "\\\${pidfile}" 2>/dev/null)
-		case "\\\${_sup}" in
+	while [ \$_p -lt 10 ]; do
+		_sup=\$(cat "\${pidfile}" 2>/dev/null)
+		case "\${_sup}" in
 		''|*[!0-9]*) _sup="" ;;
 		esac
-		if [ -n "\\\${_sup}" ]; then
-			_kid=\\\$(pgrep -P "\\\${_sup}" 2>/dev/null | head -1)
-			if [ -n "\\\${_kid}" ]; then
+		if [ -n "\${_sup}" ]; then
+			_kid=\$(pgrep -P "\${_sup}" 2>/dev/null | head -1)
+			if [ -n "\${_kid}" ]; then
 				# Absolute priority, not \`renice -n\`, which is an increment
 				# on FreeBSD and would compound on every restart.
-				renice "\\\${${SERVICE_NAME}_nice}" -p "\\\${_kid}" >/dev/null 2>&1
+				renice "\${${SERVICE_NAME}_nice}" -p "\${_kid}" >/dev/null 2>&1
 				checkyesno ${SERVICE_NAME}_protect && \\
-					protect -p "\\\${_kid}" >/dev/null 2>&1
+					protect -p "\${_kid}" >/dev/null 2>&1
 				return 0
 			fi
 		fi
 		sleep 1
-		_p=\\\$((_p + 1))
+		_p=\$((_p + 1))
 	done
 	echo "${SERVICE_NAME}: could not find the supervised process." >&2
 }
@@ -250,32 +256,32 @@ ${SERVICE_NAME}_postcmd()
 stop_cmd="${SERVICE_NAME}_stop"
 ${SERVICE_NAME}_stop()
 {
-	_sup=\\\$(cat "\\\${pidfile}" 2>/dev/null)
-	case "\\\${_sup}" in
+	_sup=\$(cat "\${pidfile}" 2>/dev/null)
+	case "\${_sup}" in
 	''|*[!0-9]*) _sup="" ;;
 	esac
-	if [ -z "\\\${_sup}" ] || ! kill -0 "\\\${_sup}" 2>/dev/null; then
+	if [ -z "\${_sup}" ] || ! kill -0 "\${_sup}" 2>/dev/null; then
 		echo "${SERVICE_NAME} not running."
-		rm -f "\\\${pidfile}"
+		rm -f "\${pidfile}"
 		return 0
 	fi
-	echo "Stopping ${SERVICE_NAME} (pid \\\${_sup}); up to \\\${${SERVICE_NAME}_stop_timeout}s to drain."
-	kill -TERM "\\\${_sup}" 2>/dev/null
+	echo "Stopping ${SERVICE_NAME} (pid \${_sup}); up to \${${SERVICE_NAME}_stop_timeout}s to drain."
+	kill -TERM "\${_sup}" 2>/dev/null
 	_waited=0
-	while kill -0 "\\\${_sup}" 2>/dev/null; do
-		[ "\\\${_waited}" -ge "\\\${${SERVICE_NAME}_stop_timeout}" ] && break
+	while kill -0 "\${_sup}" 2>/dev/null; do
+		[ "\${_waited}" -ge "\${${SERVICE_NAME}_stop_timeout}" ] && break
 		sleep 1
-		_waited=\\\$((_waited + 1))
+		_waited=\$((_waited + 1))
 	done
-	if kill -0 "\\\${_sup}" 2>/dev/null; then
+	if kill -0 "\${_sup}" 2>/dev/null; then
 		echo "${SERVICE_NAME} did not drain in time; forcing SIGKILL."
-		kill -KILL "\\\${_sup}" 2>/dev/null
+		kill -KILL "\${_sup}" 2>/dev/null
 		pkill -9 -x ${BINARY} 2>/dev/null || true
 	fi
-	rm -f "\\\${pidfile}"
+	rm -f "\${pidfile}"
 }
 
-run_rc_command "\\\$1"
+run_rc_command "\$1"
 RCEOF
 
 log "Installing ${RC_FILE}"
