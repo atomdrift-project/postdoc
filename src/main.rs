@@ -220,7 +220,7 @@ enum Command {
         bind: SocketAddr,
 
         /// Largest request body accepted, in megabytes.
-        #[arg(long, default_value = "100")]
+        #[arg(long, default_value = "1024")]
         max_size_mb: usize,
 
         /// Comma-separated CIDRs allowed to reach non-loopback routes.
@@ -593,9 +593,9 @@ mod tests {
 
     #[test]
     fn serve_defaults_match_the_binary_it_replaces() {
-        // A drop-in that listens elsewhere, or accepts a different body size,
-        // is not a drop-in. These are `atomscan serve`'s defaults; if either
-        // side moves, the swap stops being a binary rename.
+        // A drop-in that listens elsewhere is not a drop-in: the bind is
+        // `atomscan serve`'s. The body limit was raised past its 100 MB so
+        // promoter's larger archives and images upload without a flag.
         let cli = Cli::try_parse_from(["postdoc", "serve"]).unwrap();
         let Command::Serve {
             bind,
@@ -610,7 +610,7 @@ mod tests {
         };
 
         assert_eq!(bind.to_string(), "127.0.0.1:49999");
-        assert_eq!(max_size_mb, 100);
+        assert_eq!(max_size_mb, 1024);
         assert!(
             cli.daemon.max_rss_gb.is_none(),
             "unset means postdoc resolves its own ceiling"

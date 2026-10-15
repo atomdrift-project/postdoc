@@ -127,7 +127,7 @@ impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             bind: SocketAddr::from(([127, 0, 0, 1], 49999)),
-            max_body_size: 100 * 1024 * 1024,
+            max_body_size: 1024 * 1024 * 1024,
             max_rss_bytes: None,
             model_dir: PathBuf::new(),
             thresholds: None,

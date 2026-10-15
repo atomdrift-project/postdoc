@@ -17,7 +17,7 @@ The defaults are deliberate. Override them only when you have a reason.
 | ---------------- | ------------------ | ---------------------------------------------------------- |
 | `--bind`         | `127.0.0.1:49999`  | Listen address.                                            |
 | `--workers`      | physical performance-core count (min 2) | Hard cap on concurrent analyses. Excess requests get 503. |
-| `--max-size-mb`  | `100`              | Per-request upload limit.                                  |
+| `--max-size-mb`  | `1024`             | Per-request upload limit.                                  |
 | `--max-rss-gb`   | `0` (auto)         | RSS ceiling. `0` reads the cgroup signal. `-1` disables.   |
 | `--allow-cidr`   | none               | Extra CIDR networks allowed beyond loopback.               |
 | `--token-file`   | none               | File holding the required bearer token. See below.         |
