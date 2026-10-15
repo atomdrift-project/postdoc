@@ -463,7 +463,6 @@ fn classify_upload(
 ) -> anyhow::Result<ScanResult> {
     let result = scan::analysis::classify_file(
         &upload.path,
-        None,
         Analysis {
             label: &upload.filename,
             ..template

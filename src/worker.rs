@@ -4012,10 +4012,8 @@ async fn run_job(
             };
             let result = match (payload, local.as_ref()) {
                 (Some(PrefetchData::Memory(data)), _) => classify_bytes(data, analysis),
-                (Some(PrefetchData::Spooled(spooled)), _) => {
-                    classify_file(&spooled.path, None, analysis)
-                }
-                (_, Some(path)) => classify_file(path, None, analysis),
+                (Some(PrefetchData::Spooled(spooled)), _) => classify_file(&spooled.path, analysis),
+                (_, Some(path)) => classify_file(path, analysis),
                 (None | Some(PrefetchData::Local), None) => Err(anyhow::anyhow!(
                     "no downloaded bytes and no local path for {label}"
                 )),
