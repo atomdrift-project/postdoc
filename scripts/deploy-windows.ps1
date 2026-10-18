@@ -20,13 +20,15 @@ param(
     # renewal, corpus deferral and the companion idle worker.
     [string]$Url,
     # SCAN_LLM: `local`, `openrouter`, or a base URL. Empty turns the pass off.
-    [string]$Llm = '',
+    [string]$Llm = $env:LLM,
     # SCAN_LLM_MODEL. Unset lets postdoc pick what the endpoint reports.
-    [string]$LlmModel = '',
+    [string]$LlmModel = $env:LLM_MODEL,
     # Hopper bearer token. Environment overrides keep parity with Unix deploys.
     [string]$TokenFile = $(if ($env:HOPPER_TOKEN_FILE) { $env:HOPPER_TOKEN_FILE } elseif ($env:TOKEN_FILE) { $env:TOKEN_FILE } else { Join-Path $HOME '.tok\hopper' }),
     # API bearer token used by Beamline as SCAN_TOKEN.
-    [string]$ScanTokenFile = $(if ($env:SCAN_TOKEN_FILE) { $env:SCAN_TOKEN_FILE } else { Join-Path $HOME '.tok\scan' })
+    [string]$ScanTokenFile = $(if ($env:SCAN_TOKEN_FILE) { $env:SCAN_TOKEN_FILE } else { Join-Path $HOME '.tok\scan' }),
+    [string]$LlmTokenFile = $(if ($env:LLM_TOKEN_FILE) { $env:LLM_TOKEN_FILE } else { Join-Path $HOME '.tok\llm' }),
+    [string]$OpenRouterTokenFile = $(if ($env:OPENROUTER_TOKEN_FILE) { $env:OPENROUTER_TOKEN_FILE } else { Join-Path $HOME '.tok\openrouter' })
 )
 
 $ErrorActionPreference = 'Stop'
@@ -55,6 +57,43 @@ if (-not $identity.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrat
 $nssm = (Get-Command nssm -ErrorAction SilentlyContinue)
 if (-not $nssm) { Die 'nssm not found on PATH (winget install NSSM.NSSM)' }
 $nssm = $nssm.Source
+
+# Validate the PATH inherited by the service before stopping any running work.
+# Windows tools are commonly installed with Scoop or winget by the operator.
+foreach ($tool in 'rizin', 'upx', 'innoextract') {
+    if (-not (Get-Command $tool -CommandType Application -ErrorAction SilentlyContinue)) {
+        Die "$tool is required; install it and add it to PATH before deploying"
+    }
+}
+$sevenZip = @('7z', '7za', '7zz', '7zr') | Where-Object {
+    Get-Command $_ -CommandType Application -ErrorAction SilentlyContinue
+} | Select-Object -First 1
+if (-not $sevenZip) {
+    Die '7-Zip is required; install it and add 7z, 7za, 7zz, or 7zr to PATH before deploying'
+}
+
+# Validate every supplied token before interrupting services. Reuse installed
+# credentials when the source file is absent; never accept a blank rotation.
+$orEndpoints = @($Llm -split ',' | Where-Object { $_ -match '^\s*(openrouter|https?://openrouter\.ai/.*)\s*$' })
+$endpoints = @($Llm -split ',' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+$hasExplicitKey = -not [string]::IsNullOrWhiteSpace($env:SCAN_LLM_KEY)
+$tokenSpecs = @(
+    @{ Name='hopper'; Source=$TokenFile; Required=($Mode -eq 'worker' -or [bool]$Url) },
+    @{ Name='scan'; Source=$ScanTokenFile; Required=($Mode -eq 'serve') },
+    @{ Name='llm'; Source=$LlmTokenFile; Required=$false },
+    @{ Name='openrouter'; Source=$OpenRouterTokenFile; Required=($orEndpoints.Count -gt 0 -and $orEndpoints.Count -eq $endpoints.Count -and -not $hasExplicitKey) }
+)
+foreach ($spec in $tokenSpecs) {
+    if ($hasExplicitKey -and (($orEndpoints.Count -gt 0 -and $spec.Name -eq 'openrouter') -or ($orEndpoints.Count -eq 0 -and $spec.Name -eq 'llm'))) { continue }
+    if (Test-Path $spec.Source) {
+        if ([string]::IsNullOrWhiteSpace([IO.File]::ReadAllText($spec.Source))) { Die "blank credential: $($spec.Source)" }
+    } elseif ($spec.Required) {
+        $installed = Join-Path $TokDir $spec.Name
+        if (-not (Test-Path $installed) -or [string]::IsNullOrWhiteSpace([IO.File]::ReadAllText($installed))) {
+            Die "no usable $($spec.Name) credential at $($spec.Source) or $installed"
+        }
+    }
+}
 
 # --- Retire atomscan ----------------------------------------------------------
 #
@@ -120,46 +159,80 @@ New-Item -ItemType Directory -Force -Path $InstallDir, $StateHome, $LogDir, $Tok
 & icacls.exe $TokDir /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' | Out-Null
 if ($LASTEXITCODE -ne 0) { Die "could not restrict token directory ACL: $TokDir" }
 
+$changed = $false
 $svc = Get-Service $ServiceName -ErrorAction SilentlyContinue
-if ($svc -and $svc.Status -eq 'Running') {
-    Log "Stopping $ServiceName"
-    & $nssm stop $ServiceName | Out-Null
+function Same-File($a, $b) {
+    return (Test-Path $a) -and (Test-Path $b) -and ((Get-FileHash $a).Hash -eq (Get-FileHash $b).Hash)
 }
-Log "Installing $BinDst"
-Copy-Item $binSrc "$BinDst.new" -Force
-Move-Item "$BinDst.new" $BinDst -Force
-
-# Hopper rejects an unauthenticated claim with 401, so a worker without this
-# starts, looks healthy, and never gets a job.
-$hopperTokDst = Join-Path $TokDir 'hopper'
-if (Test-Path $TokenFile) {
-    Log "Installing hopper token from $TokenFile"
-    Copy-Item $TokenFile $hopperTokDst -Force
-} elseif ($Mode -eq 'worker' -or ($Mode -eq 'serve' -and $Url)) {
-    Die "no hopper token at $TokenFile; hopper access needs one"
+foreach ($spec in $tokenSpecs) {
+    if ($hasExplicitKey -and (($orEndpoints.Count -gt 0 -and $spec.Name -eq 'openrouter') -or ($orEndpoints.Count -eq 0 -and $spec.Name -eq 'llm'))) { continue }
+    $destination = Join-Path $TokDir $spec.Name
+    if ((Test-Path $spec.Source) -and -not (Same-File $spec.Source $destination)) {
+        Copy-Item $spec.Source $destination -Force
+        $changed = $true
+    }
 }
-
+if ($hasExplicitKey) {
+    $keyName = if ($orEndpoints.Count -gt 0) { 'openrouter' } else { 'llm' }
+    $keyDestination = Join-Path $TokDir $keyName
+    $keyText = $env:SCAN_LLM_KEY + "`n"
+    if (-not (Test-Path $keyDestination) -or [IO.File]::ReadAllText($keyDestination) -ne $keyText) {
+        [IO.File]::WriteAllText($keyDestination, $keyText)
+        $changed = $true
+    }
+}
 $scanTokDst = Join-Path $TokDir 'scan'
-if ($Mode -eq 'serve') {
-    if (-not (Test-Path $ScanTokenFile)) { Die "no API token at $ScanTokenFile; Beamline needs this credential" }
-    Log "Installing API token from $ScanTokenFile"
-    Copy-Item $ScanTokenFile $scanTokDst -Force
-}
+$binaryChanged = -not (Same-File $binSrc $BinDst)
+$skipUpdate = $false
 
 # --- Arguments ----------------------------------------------------------------
 #
 # The whole list. Everything absent is postdoc's own default, which is the
 # point: one place decides, and `postdoc <mode> --help` states it.
-$svcArgs = if ($Mode -eq 'worker') {
-    "worker --url $Url"
+function Quote-Argument([string]$value) {
+    # CommandLineToArgvW escaping, including trailing backslashes.
+    return '"' + ([regex]::Replace($value, '(\\*)"', '$1$1\"') -replace '(\\+)$', '$1$1') + '"'
+}
+$arguments = @($Mode)
+if ($Mode -eq 'worker') {
+    $arguments += @('--url', $Url)
+    if ($env:DATA_DIR) { $arguments += @('--data-dir', $env:DATA_DIR) }
 } else {
-    $a = "serve --token-file `"$scanTokDst`""
-    if ($Url) { $a += " --hopper $Url" }
-    $a
+    $arguments += @('--token-file', $scanTokDst)
+    if ($Url) { $arguments += @('--hopper', $Url) }
+    if ($env:BIND) { $arguments += @('--bind', $env:BIND) }
+    if ($env:ALLOW_CIDR) { $arguments += @('--allow-cidr', $env:ALLOW_CIDR) }
+    if ($env:IDLE) { $arguments += @('--idle-worker-slots', $env:IDLE) }
+}
+if ($env:WORKERS) { $arguments += @('--workers', $env:WORKERS) }
+if ($env:MAX_RSS_GB) { $arguments += @('--max-rss-gb', $env:MAX_RSS_GB) }
+$svcArgs = ($arguments | ForEach-Object { Quote-Argument $_ }) -join ' '
+$configuration = [ordered]@{}
+foreach ($key in @('BIND','ALLOW_CIDR','WORKERS','DATA_DIR','MAX_RSS_GB','IDLE','MEMORY_MAX','MEMORY_LOW','IDLE_MEMORY_MAX','NICE')) {
+    $value = [Environment]::GetEnvironmentVariable($key)
+    if ($null -ne $value) { $configuration[$key] = $value }
+}
+$configuration['LLM'] = [string]$Llm
+$configuration['LLM_MODEL'] = [string]$LlmModel
+$configuration[$(if ($Mode -eq 'serve') { 'HOPPER' } else { 'URL' })] = $(if ($Url) { $Url } else { 'none' })
+$configPath = Join-Path $StateHome "deploy-$Mode.json"
+$configText = $configuration | ConvertTo-Json
+if (-not (Test-Path $configPath) -or [IO.File]::ReadAllText($configPath) -ne $configText) { $changed = $true }
+if ($binaryChanged -or $changed) {
+    if ($svc -and $svc.Status -eq 'Running') { & $nssm stop $ServiceName | Out-Null; if ($LASTEXITCODE -ne 0) { Die 'could not stop service' } }
+    if ($binaryChanged) {
+        Copy-Item $binSrc "$BinDst.new" -Force
+        Move-Item "$BinDst.new" $BinDst -Force
+    }
+} elseif ($svc) {
+    Log 'No changes; leaving service running'
+    if ($svc.Status -ne 'Running') { & $nssm start $ServiceName | Out-Null }
+    $skipUpdate = $true
 }
 
 # --- Service ------------------------------------------------------------------
 
+if (-not $skipUpdate) {
 if (-not $svc) {
     Log "Creating service $ServiceName"
     & $nssm install $ServiceName $BinDst | Out-Null
@@ -167,24 +240,38 @@ if (-not $svc) {
 # `nssm set` is idempotent; the full configuration runs every deploy so a
 # changed setting applies without special-casing.
 & $nssm set $ServiceName Application $BinDst | Out-Null
+if ($LASTEXITCODE -ne 0) { Die "NSSM operation failed for $ServiceName" }
 & $nssm set $ServiceName AppParameters $svcArgs | Out-Null
+if ($LASTEXITCODE -ne 0) { Die "NSSM operation failed for $ServiceName" }
 & $nssm set $ServiceName AppDirectory $StateHome | Out-Null
+if ($LASTEXITCODE -ne 0) { Die "NSSM operation failed for $ServiceName" }
 & $nssm set $ServiceName DisplayName "Atomdrift postdoc ($Mode)" | Out-Null
+if ($LASTEXITCODE -ne 0) { Die "NSSM operation failed for $ServiceName" }
 & $nssm set $ServiceName Start SERVICE_AUTO_START | Out-Null
+if ($LASTEXITCODE -ne 0) { Die "NSSM operation failed for $ServiceName" }
 
 # Restart always, 10s back-off. The throttle stops a tight crash loop from
 # pegging the box - the same shape as systemd's Restart/RestartSec.
 & $nssm set $ServiceName AppExit Default Restart | Out-Null
+if ($LASTEXITCODE -ne 0) { Die "NSSM operation failed for $ServiceName" }
 & $nssm set $ServiceName AppRestartDelay 10000 | Out-Null
+if ($LASTEXITCODE -ne 0) { Die "NSSM operation failed for $ServiceName" }
 & $nssm set $ServiceName AppThrottle 10000 | Out-Null
+if ($LASTEXITCODE -ne 0) { Die "NSSM operation failed for $ServiceName" }
 # 30s to drain in-flight analyses, matching TimeoutStopSec elsewhere.
 & $nssm set $ServiceName AppStopMethodConsole 30000 | Out-Null
+if ($LASTEXITCODE -ne 0) { Die "NSSM operation failed for $ServiceName" }
 
 & $nssm set $ServiceName AppStdout (Join-Path $LogDir "$Mode.out.log") | Out-Null
+if ($LASTEXITCODE -ne 0) { Die "NSSM operation failed for $ServiceName" }
 & $nssm set $ServiceName AppStderr (Join-Path $LogDir "$Mode.err.log") | Out-Null
+if ($LASTEXITCODE -ne 0) { Die "NSSM operation failed for $ServiceName" }
 & $nssm set $ServiceName AppRotateFiles 1 | Out-Null
+if ($LASTEXITCODE -ne 0) { Die "NSSM operation failed for $ServiceName" }
 & $nssm set $ServiceName AppRotateOnline 1 | Out-Null
+if ($LASTEXITCODE -ne 0) { Die "NSSM operation failed for $ServiceName" }
 & $nssm set $ServiceName AppRotateBytes 52428800 | Out-Null
+if ($LASTEXITCODE -ne 0) { Die "NSSM operation failed for $ServiceName" }
 
 # HOME steers every ~/.tok lookup into the state directory. The tokens
 # themselves never enter the environment block, which any local user can read
@@ -199,9 +286,13 @@ $svcEnv = @(
 )
 if ($LlmModel) { $svcEnv += "SCAN_LLM_MODEL=$LlmModel" }
 & $nssm set $ServiceName AppEnvironmentExtra @svcEnv | Out-Null
+if ($LASTEXITCODE -ne 0) { Die "NSSM operation failed for $ServiceName" }
+
+[IO.File]::WriteAllText($configPath, $configText)
 
 Log "Starting $ServiceName"
 & $nssm start $ServiceName | Out-Null
+if ($LASTEXITCODE -ne 0) { Die "NSSM operation failed for $ServiceName" }
 
 # A service that starts and then dies still reports "started", so wait and look.
 Start-Sleep -Seconds 3
@@ -211,3 +302,20 @@ if ($svc.Status -ne 'Running') {
     Die "$ServiceName failed to start"
 }
 Log "$ServiceName is running"
+}
+
+if ($Mode -eq 'serve') {
+    $bind = if ($env:BIND) { $env:BIND } else { '127.0.0.1:49999' }
+    $bind = $bind -replace '^0\.0\.0\.0:', '127.0.0.1:' -replace '^\[::\]:', '[::1]:'
+    $deadline = [DateTime]::UtcNow.AddSeconds(300)
+    $ready = $false
+    while ([DateTime]::UtcNow -lt $deadline) {
+        try {
+            $reply = Invoke-RestMethod "http://$bind/_/health" -Headers @{Authorization=('Bearer ' + [IO.File]::ReadAllText($scanTokDst).Trim())} -TimeoutSec 5
+            if ($reply.status -in @('ok','saturated')) { $ready = $true; break }
+        } catch { }
+        Start-Sleep -Seconds 1
+    }
+    if (-not $ready) { Die 'API failed readiness check' }
+    Log 'API ready'
+}

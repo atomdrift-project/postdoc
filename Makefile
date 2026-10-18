@@ -22,6 +22,12 @@ LLM ?= http://10.9.8.149:8000/v1
 # Unset lets postdoc pick whatever the endpoint reports it serves.
 LLM_MODEL ?=
 
+# Match Scan's server deployment: reads prefer the replica, while the idle
+# worker claims from the final (primary) address. URL= remains an override for
+# deploy-server as well as the required address for standalone workers.
+HOPPER ?= https://hops-ro.isotope13.ai,https://hops.isotope13.ai
+SERVER_HOPPER = $(if $(strip $(URL)),$(URL),$(HOPPER))
+
 .PHONY: all build release quick install lint fix test install-precommit clean help
 
 all: build
@@ -30,7 +36,8 @@ build:
 	$(CARGO) build --locked
 
 release:
-	$(CARGO) build --locked --release
+	@if [ "$${POSTDOC_DEPLOY_BUILD:-}" = 1 ]; then . ./scripts/deploy-bootstrap.sh; fi; \
+	  $(CARGO) build --locked --release
 
 # Optimized but un-LTO'd, for targets that build then immediately run the
 # binary. See [profile.quick] in Cargo.toml.
@@ -74,7 +81,12 @@ install-precommit:
 # the allocator tuning FreeBSD needs in its unit because it uses libc's
 # jemalloc rather than the one linked into the binary.
 
-.PHONY: worker deploy-worker deploy-server rollout
+.PHONY: worker deploy-worker deploy-server check-server-hopper test-deploy rollout
+
+deploy-worker deploy-server: export POSTDOC_DEPLOY_BUILD := 1
+
+test-deploy:
+	python3 scripts/test-deploy-deps.py
 
 ## worker: run a worker in the foreground, as you, until Ctrl-C
 ##         No service, no state directory — it reads ~/.tok/hopper directly.
@@ -91,9 +103,15 @@ deploy-worker: release
 	@[ -n "$(URL)" ] || { echo "usage: make deploy-worker URL=<hopper url>"; exit 1; }
 	@$(MAKE) --no-print-directory _deploy MODE=worker URL="$(URL)"
 
-## deploy-server: install and start a server here (URL=<hopper url>, optional)
-deploy-server: release
-	@$(MAKE) --no-print-directory _deploy MODE=serve URL="$(URL)"
+## deploy-server: install and start a server here (HOPPER=<read,primary> or URL=)
+##                HOPPER=none explicitly disables uploads and idle work.
+deploy-server: check-server-hopper release
+	@$(MAKE) --no-print-directory _deploy MODE=serve URL="$(if $(filter none,$(SERVER_HOPPER)),,$(SERVER_HOPPER))"
+
+check-server-hopper:
+	@[ -n "$(strip $(SERVER_HOPPER))" ] || { \
+	  echo "error: no server Hopper URL; set HOPPER=<url> or HOPPER=none to disable uploads and idle work" >&2; \
+	  exit 1; }
 
 ## rollout: redeploy the fleet — hopper, then workers, then servers
 ##          DRY_RUN=1 prints the plan; HOSTS="a b" skips discovery
@@ -104,8 +122,7 @@ _deploy: export LLM := $(LLM)
 _deploy: export LLM_MODEL := $(LLM_MODEL)
 _deploy:
 	@case "$$(uname -s)" in \
-	  Linux)   install -m0755 target/release/$(BINARY) /usr/local/bin/$(BINARY); \
-	           ./scripts/deploy.sh "$(MODE)" "$(URL)" ;; \
+	  Linux)   ./scripts/deploy.sh "$(MODE)" "$(URL)" "target/release/$(BINARY)" ;; \
 	  FreeBSD) ./scripts/deploy-freebsd.sh "$(MODE)" "$(URL)" "target/release/$(BINARY)" ;; \
 	  MINGW*|MSYS*|CYGWIN*) \
 	           if command -v pwsh >/dev/null 2>&1; then ps=pwsh; else ps=powershell; fi; \
@@ -127,6 +144,7 @@ help:
 	@echo "  lint      rustfmt --check + clippy with warnings denied"
 	@echo "  fix       auto-fix clippy + rustfmt"
 	@echo "  test      run the test suite"
+	@echo "  test-deploy  check runtime prerequisite installation with mock package managers"
 	@echo "  install-precommit  gate commits on lint + test"
 	@echo "  worker         run a worker in the foreground (URL=<hopper url>)"
 	@echo "  deploy-worker  install + start a worker here (URL=<hopper url>)"

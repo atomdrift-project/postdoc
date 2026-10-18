@@ -132,13 +132,18 @@ fn worker_command(
     name: &str,
     cache_dir: &PathBuf,
     traits_dir: Option<&std::path::Path>,
+    slots: usize,
 ) -> std::io::Result<Command> {
     let mut cmd = Command::new(std::env::current_exe()?);
     cmd.arg("worker")
         .arg("--url")
         .arg(hopper)
         .arg("--name")
-        .arg(name);
+        .arg(name)
+        .arg("--workers")
+        .arg(slots.to_string())
+        .arg("--nice")
+        .arg("19");
     if let Some(dir) = traits_dir {
         cmd.arg("--traits-dir").arg(dir);
     }
@@ -175,6 +180,11 @@ fn worker_command(
         #[allow(unsafe_code)]
         unsafe {
             cmd.pre_exec(|| {
+                // Best effort: an idle child's disk requests should yield to
+                // foreground analysis and other services, just like its CPU.
+                // SAFETY: scalar ioprio_set syscall for the calling process;
+                // no allocation or shared memory is accessed after fork.
+                libc::syscall(libc::SYS_ioprio_set, 1, 0, 3 << 13);
                 let mut buf = [0u8; 8];
                 let text = {
                     use std::io::Write;
@@ -216,6 +226,7 @@ pub(super) struct Worker {
     hopper: String,
     name: String,
     cache: PathBuf,
+    slots: usize,
     /// `None` only between a worker exiting and its replacement starting.
     current: std::sync::RwLock<Option<Idle>>,
 }
@@ -271,8 +282,14 @@ impl Worker {
         drop(exited);
 
         let traits_dir = cleave::traits_repo::override_dir();
-        let spawned = worker_command(&self.hopper, &self.name, &self.cache, traits_dir.as_deref())
-            .and_then(Idle::spawn);
+        let spawned = worker_command(
+            &self.hopper,
+            &self.name,
+            &self.cache,
+            traits_dir.as_deref(),
+            self.slots,
+        )
+        .and_then(Idle::spawn);
         let started = match spawned {
             Ok(worker) => {
                 tracing::info!(pid = worker.pid(), worker = %self.name, "idle worker started");
@@ -333,6 +350,7 @@ impl Worker {
 pub(super) fn start(
     hopper: Option<&str>,
     name: &str,
+    slots: usize,
     busy: &Arc<Busy>,
     stop: watch::Receiver<bool>,
 ) -> Option<Arc<Worker>> {
@@ -361,6 +379,7 @@ pub(super) fn start(
         hopper: primary,
         name: format!("{name}-idle"),
         cache,
+        slots,
         current: std::sync::RwLock::new(None),
     });
     tracing::info!(
@@ -403,7 +422,7 @@ mod tests {
     fn the_command_passes_only_what_must_differ() {
         let dir = PathBuf::from("/tmp/scan-idle-test");
         let cmd =
-            worker_command("http://hopper.example", "host-idle", &dir, None).expect("command");
+            worker_command("http://hopper.example", "host-idle", &dir, None, 4).expect("command");
         let args: Vec<_> = cmd
             .get_args()
             .map(|a| a.to_string_lossy().to_string())
@@ -416,10 +435,14 @@ mod tests {
                 "http://hopper.example",
                 "--name",
                 "host-idle",
+                "--workers",
+                "4",
+                "--nice",
+                "19",
                 "--no-update",
                 "--no-validate"
             ],
-            "sizing and tuning belong to the worker's own defaults",
+            "the child must honor the configured idle slots and background priority",
         );
         let cache = cmd
             .get_envs()
@@ -437,7 +460,7 @@ mod tests {
     fn the_command_forwards_the_servers_traits_dir() {
         let dir = PathBuf::from("/tmp/scan-idle-test");
         let traits = PathBuf::from("/var/lib/atomdrift/scan/traits");
-        let cmd = worker_command("http://hopper.example", "host-idle", &dir, Some(&traits))
+        let cmd = worker_command("http://hopper.example", "host-idle", &dir, Some(&traits), 4)
             .expect("command");
         let args: Vec<_> = cmd
             .get_args()

@@ -25,7 +25,9 @@
 #   HOSTS         space-separated hosts, skipping discovery
 #   SKIP          space-separated hosts to leave alone
 #   PHASES        which of `hopper workers servers` to run    (default all)
-#   URL           hopper endpoint for a worker whose unit names none
+#   HOPPER_NODE   SSH host for Hopper (default 10.9.8.10)
+#   HOPPER_HEALTH Hopper health URL on that host (default http://127.0.0.1:8081/healthz)
+#   URL           explicit Hopper override; otherwise preserve installed settings
 #   DB            hopper database to read the roster from
 #   TIMEOUT       seconds before a wedged deploy is cut loose (default 1800)
 #   HEALTH_ADDR   where a server answers /_/health   (default 127.0.0.1:49999)
@@ -44,9 +46,11 @@ HOSTS="${HOSTS:-}"
 SKIP="${SKIP:-}"
 PHASES="${PHASES:-hopper workers servers}"
 URL="${URL:-}"
+HOPPER_NODE="${HOPPER_NODE:-10.9.8.10}"
+HOPPER_HEALTH="${HOPPER_HEALTH:-http://127.0.0.1:8081/healthz}"
 DB="${DB:-}"
 TIMEOUT="${TIMEOUT:-1800}"
-HEALTH_ADDR="${HEALTH_ADDR:-127.0.0.1:49999}"
+HEALTH_ADDR="${HEALTH_ADDR:-}"
 HEALTH_WAIT="${HEALTH_WAIT:-300}"
 HEALTH_UPTIME="${HEALTH_UPTIME:-600}"
 
@@ -118,6 +122,7 @@ for entry in $roster; do
     fi
 done
 
+note "Hopper SSH host: $HOPPER_NODE (phases: $PHASES)"
 log "Plan: $(echo "$workers" | wc -w | tr -d ' ') workers, $(echo "$servers" | wc -w | tr -d ' ') servers"
 [ -n "$workers" ] && note "workers:$workers"
 [ -n "$servers" ] && note "servers:$servers"
@@ -136,6 +141,24 @@ fi
 #
 # Exit codes: 90 no repo, 91 no postdoc service.
 remote_script() {
+    if [ "${1:-postdoc}" = hopper ]; then
+        cat <<'HOPPER_REMOTE'
+set -eu
+cd "$HOME/hopper" || exit 90
+git pull --ff-only
+make deploy
+# A fresh TCP request must work before any analysis host is redeployed.
+waited=0
+while [ "$waited" -lt 300 ]; do
+    if curl -fsS --max-time 5 "$ROLLOUT_HOPPER_HEALTH" >/dev/null; then exit 0; fi
+    sleep 2
+    waited=$((waited + 2))
+done
+echo "Hopper did not become ready" >&2
+exit 1
+HOPPER_REMOTE
+        return
+    fi
     cat <<'REMOTE'
 set -eu
 repo="$HOME/postdoc"
@@ -170,6 +193,9 @@ for f in /etc/systemd/system/postdoc.service \
          /usr/local/etc/rc.d/postdoc; do
     if unit_live "$f"; then server_unit="$f"; break; fi
 done
+if [ -z "$server_unit" ] && sc.exe query postdoc >/dev/null 2>&1; then
+    server_unit="service:postdoc"
+fi
 
 # Bring the checkout up to date. Deploy hosts are checkouts, not workspaces, so
 # what has to hold is "the tree is the upstream branch" -- and `git pull`
@@ -185,27 +211,45 @@ git fetch --prune
 git reset --hard "$upstream"
 
 if [ -n "$server_unit" ]; then
-    make deploy-server URL="${ROLLOUT_URL:-}"
+    config=/etc/postdoc/serve.json
+    [ "$(uname -s)" != FreeBSD ] || config=/usr/local/etc/postdoc/serve.json
+    saved=$(mktemp)
+    if [ "$server_unit" = service:postdoc ]; then
+        state_home=$(nssm get postdoc AppDirectory | tr -d '\000\r')
+        config="$state_home/deploy-serve.json"
+        fallback=$(mktemp)
+        nssm get postdoc AppParameters | tr -d '\000\r' > "$fallback"
+        python3 scripts/deploy-config.py export "$config" "$fallback" > "$saved"
+        rm -f "$fallback"
+    else
+        python3 scripts/deploy-config.py export "$config" "$server_unit" > "$saved"
+    fi
+    . "$saved"
+    rm -f "$saved"
+    if [ -n "${ROLLOUT_URL:-}" ]; then HOPPER=$ROLLOUT_URL; export HOPPER; fi
+    make deploy-server
 elif [ -n "$worker_unit" ]; then
-    # Re-read the hopper URL out of the unit rather than assuming the roster's:
-    # a worker pointed at a different queue must stay pointed at it.
-    case "$worker_unit" in
-    service:*)
-        # nssm answers in UTF-16, which every tool after this would read as one
-        # character followed by a NUL; drop those before tokenizing. Handles
-        # `--url X` and `--url=X` alike.
-        url=$(nssm get postdoc-worker AppParameters 2>/dev/null |
-            tr -d '\000\r' | tr -s ' \t"' '\n\n\n' |
-            awk '/^--url=/ { sub(/^--url=/, ""); print; exit }
-                 /^--url$/ { getline; print; exit }')
-        ;;
-    *)
-        url=$(grep -oE -- '--url[= ][^ "]+' "$worker_unit" | head -1 | sed 's/^--url[= ]//')
-        ;;
-    esac
-    [ -n "$url" ] || url="${ROLLOUT_URL:-}"
-    [ -n "$url" ] || { echo "no --url in $worker_unit and no URL given" >&2; exit 91; }
-    make deploy-worker URL="$url"
+    config=/etc/postdoc/worker.json
+    [ "$(uname -s)" != FreeBSD ] || config=/usr/local/etc/postdoc/worker.json
+    if [ "$worker_unit" = service:postdoc-worker ]; then
+        state_home=$(nssm get postdoc-worker AppDirectory | tr -d '\000\r')
+        config="$state_home/deploy-worker.json"
+        saved=$(mktemp)
+        fallback=$(mktemp)
+        nssm get postdoc-worker AppParameters | tr -d '\000\r' > "$fallback"
+        python3 scripts/deploy-config.py export "$config" "$fallback" > "$saved"
+        . "$saved"
+        rm -f "$saved" "$fallback"
+        URL=${ROLLOUT_URL:-${URL:-}}
+    else
+        saved=$(mktemp)
+        python3 scripts/deploy-config.py export "$config" "$worker_unit" > "$saved"
+        . "$saved"
+        rm -f "$saved"
+        URL=${ROLLOUT_URL:-${URL:-}}
+    fi
+    [ -n "${URL:-}" ] || { echo "no worker URL configured" >&2; exit 91; }
+    make deploy-worker URL="$URL"
 else
     exit 91
 fi
@@ -229,8 +273,13 @@ deploy_host() {
     logfile="$work/$host.log"
     started=$(date +%s)
 
-    ROLLOUT_URL="$URL" remote_script |
-        ssh $SSH_OPTS -- "$host" "ROLLOUT_URL='$URL' sh -s" >"$logfile" 2>&1 &
+    role=${2:-postdoc}
+    # Quote values as shell data in stdin rather than interpolating an ssh command.
+    {
+        printf "ROLLOUT_URL='%s'\n" "$(printf '%s' "$URL" | sed "s/'/'\\\\''/g")"
+        printf "ROLLOUT_HOPPER_HEALTH='%s'\n" "$(printf '%s' "$HOPPER_HEALTH" | sed "s/'/'\\\\''/g")"
+        remote_script "$role"
+    } | ssh $SSH_OPTS -- "$host" sh -s >"$logfile" 2>&1 &
     ssh_pid=$!
     # A wedged deploy must not hold the whole rollout. The killer races the
     # deploy and loses in the normal case.
@@ -267,8 +316,9 @@ await_health() {
     host="$1"
     waited=0
     while [ "$waited" -lt "$HEALTH_WAIT" ]; do
+        health_arg=$(printf '%s' "$HEALTH_ADDR" | sed "s/'/'\\\\''/g")
         body=$(ssh $SSH_OPTS -- "$host" \
-            "curl -sf --max-time 10 http://$HEALTH_ADDR/_/health" 2>/dev/null || true)
+            "cd postdoc && python3 scripts/deploy-config.py probe '$health_arg'" 2>/dev/null || true)
         status=$(printf '%s' "$body" | sed -n 's/.*"status":"\([a-z]*\)".*/\1/p')
         uptime=$(printf '%s' "$body" | sed -n 's/.*"uptime_secs":\([0-9]*\).*/\1/p')
         if [ "$status" = "ok" ]; then
@@ -293,17 +343,15 @@ await_health() {
 # --- Phase 0: hopper ---------------------------------------------------------
 
 case " $PHASES " in *" hopper "*)
-    hopper=""
-    [ -n "$URL" ] && hopper=$(printf '%s' "$URL" | sed -E 's#^[a-z]+://##; s#[:/].*$##')
-    if [ -n "$hopper" ] && [ "$hopper" != "$self" ]; then
+    hopper=$HOPPER_NODE
+    case "$hopper" in ''|-*|*[!A-Za-z0-9._-]*) die "unsafe HOPPER_NODE: $hopper";; esac
+    if [ "$hopper" != "$self" ]; then
         log "Hopper $hopper"
-        if connect "$hopper"; then
-            deploy_host "$hopper"
-            if [ "$(status_of "$hopper")" != "ok" ]; then
-                warn "the queue did not come back — halting before any worker or server"
-                workers=""
-                servers=""
-            fi
+        if connect "$hopper"; then deploy_host "$hopper" hopper; fi
+        if [ "$(status_of "$hopper")" != ok ]; then
+            warn "Hopper deployment/readiness failed; halting the rollout"
+            workers=""
+            servers=""
         fi
     fi
     ;;

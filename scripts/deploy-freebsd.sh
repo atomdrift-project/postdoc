@@ -1,8 +1,8 @@
 #!/bin/sh
 # Install postdoc as a FreeBSD rc.d service — `worker` or `serve`.
 #
-#   scripts/deploy-freebsd.sh worker https://hopper.example
-#   scripts/deploy-freebsd.sh serve  [https://hopper.example]
+#   scripts/deploy-freebsd.sh worker https://hopper.example [build-binary]
+#   scripts/deploy-freebsd.sh serve  [https://hopper.example] [build-binary]
 #
 # Same contract as the systemd path: the binary owns its defaults and this
 # passes the hopper URL and installs the separate API and hopper credentials.
@@ -15,11 +15,15 @@
 #   LLM_MODEL   SCAN_LLM_MODEL; unset lets postdoc pick
 #   HOPPER_TOKEN_FILE  hopper bearer token (default ~/.tok/hopper; TOKEN_FILE is a legacy alias)
 #   SCAN_TOKEN_FILE   API bearer token for Beamline (default ~/.tok/scan)
+#   LLM_TOKEN_FILE    LLM endpoint bearer token (default ~/.tok/llm)
 
 set -eu
+# pw, sysrc, and service live in sbin, which a deploying user's PATH may omit.
+PATH="/usr/local/sbin:/usr/sbin:/sbin:$PATH"
+export PATH
 
 MODE="${1:-}"
-BUILD_BIN="${3:-}"
+BUILD_BIN="${3:-target/release/postdoc}"
 case "$MODE" in
     worker)
         URL="${2:-}"
@@ -31,15 +35,16 @@ case "$MODE" in
         SERVICE_NAME=postdoc
         ;;
     *)
-        echo "usage: $0 worker <hopper-url> | serve [hopper-url]" >&2
+        echo "usage: $0 worker <hopper-url> [build-binary] | serve [hopper-url] [build-binary]" >&2
         exit 1
         ;;
 esac
 
 SERVICE_USER=postdoc
 BINARY=postdoc
-BIN_PATH=/usr/local/bin/${BINARY}
 STATE_HOME=/var/db/atomdrift/postdoc
+BIN_DIR=${STATE_HOME}/bin
+BIN_PATH=${BIN_DIR}/${BINARY}
 RC_FILE=/usr/local/etc/rc.d/${SERVICE_NAME}
 LOGFILE=/var/log/${SERVICE_NAME}.log
 
@@ -48,14 +53,13 @@ LLM="${LLM:-}"
 LLM_MODEL="${LLM_MODEL:-}"
 HOPPER_TOKEN_FILE="${HOPPER_TOKEN_FILE:-${TOKEN_FILE:-$HOME/.tok/hopper}}"
 SCAN_TOKEN_FILE="${SCAN_TOKEN_FILE:-$HOME/.tok/scan}"
+LLM_TOKEN_FILE="${LLM_TOKEN_FILE:-$HOME/.tok/llm}"
 
 die() { echo "error: $*" >&2; exit 1; }
 log() { printf '==> %s\n' "$*"; }
 
 [ "$(uname -s)" = FreeBSD ] || die "this is the FreeBSD path"
-# As root nothing is needed; otherwise prefer doas, which is in the FreeBSD
-# base system, and fall back to sudo. Testing `command -v "$SUDO"` with SUDO
-# empty reports "not found" and would pick sudo even when already root.
+# As root nothing is needed; otherwise prefer doas and fall back to sudo.
 SUDO=""
 if [ "$(id -u)" -ne 0 ]; then
     if command -v doas >/dev/null 2>&1; then
@@ -67,12 +71,20 @@ if [ "$(id -u)" -ne 0 ]; then
     fi
 fi
 
-if [ -n "$BUILD_BIN" ]; then
-    [ -x "$BUILD_BIN" ] || die "$BUILD_BIN is missing or not executable"
-    log "Installing $BIN_PATH"
-    $SUDO install -m0755 "$BUILD_BIN" "$BIN_PATH"
-fi
-[ -x "$BIN_PATH" ] || die "$BIN_PATH is missing or not executable"
+[ -x "$BUILD_BIN" ] || die "$BUILD_BIN is missing or not executable"
+
+ROOT_GROUP=wheel
+CONFIG_DIR=/usr/local/etc/postdoc
+account_home=$(getent passwd "$SERVICE_USER" | cut -d: -f6 || true)
+[ -z "$account_home" ] || STATE_HOME=$account_home
+BIN_PATH=$STATE_HOME/bin/$BINARY
+. "$(dirname "$0")/deploy-common.sh"
+prepare_credentials
+ensure_runtime_tools FreeBSD
+command -v python3 >/dev/null 2>&1 || die "python3 is required; use make deploy-server to bootstrap prerequisites"
+prepare_arguments
+# Escape the serialized argument string for rc.d's enclosing double quotes.
+RC_EXEC_ARGS=$(printf '%s' "$EXEC_ARGS" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\$/\\$/g; s/`/\\`/g')
 
 # --- Retire atomscan ---------------------------------------------------------
 #
@@ -87,19 +99,17 @@ fi
 # dangerous window; a short gap with nothing analyzing is not, because hopper
 # re-leases anything unfinished.
 #
-# Disabled as well as stopped, so a reboot between now and scan's uninstall does
-# not quietly restore the collision. The rc.d script itself is left alone:
-# removing it is uninstalling scan, which is a separate decision from standing
-# it down here. `ascan-worker` is scan-worker's pre-rename name, and a host
-# installed before that rename runs the same daemon under it.
+# Disable and stop before removing the rc.d scripts. Include the older worker
+# name, server aliases, and the separate idle companion.
 retired=""
-for svc in scan-worker scan ascan-worker; do
-    [ -f "/usr/local/etc/rc.d/${svc}" ] || continue
+for svc in scan-worker scan-server scan scan-idle ascan-worker; do
+    [ -f "/usr/local/etc/rc.d/${svc}" ] || [ -L "/usr/local/etc/rc.d/${svc}" ] || continue
     log "Retiring ${svc}; postdoc replaces it"
     # An rc.conf variable spells a hyphenated service with an underscore.
-    $SUDO sysrc "$(echo "$svc" | tr - _)_enable=NO" >/dev/null 2>&1 || true
-    $SUDO service "$svc" stop >/dev/null 2>&1 || true
-    retired=yes
+    $SUDO sysrc "$(echo "$svc" | tr - _)_enable=NO" >/dev/null
+    # Force the stop even when the service was already disabled in rc.conf.
+    $SUDO service "$svc" onestop >/dev/null 2>&1 || true
+    retired="$retired $svc"
 done
 
 # daemon(8)'s pidfile names the supervisor, not the atomscan child it forked, so
@@ -108,14 +118,21 @@ done
 # after a service was stood down, so a hand-run atomscan on a host with no scan
 # service installed is left alone. postdoc's binary is `postdoc`, so this can
 # never reach postdoc itself.
-if [ -n "$retired" ] && pgrep -x atomscan >/dev/null 2>&1; then
+if [ -n "$retired" ] && $SUDO pgrep -x atomscan >/dev/null 2>&1; then
     log "Reaping the atomscan process daemon(8) left behind"
     $SUDO pkill -9 -x atomscan >/dev/null 2>&1 || true
     sleep 1
-    if pgrep -x atomscan >/dev/null 2>&1; then
+    if $SUDO pgrep -x atomscan >/dev/null 2>&1; then
         die "atomscan is still running; refusing to start postdoc beside it"
     fi
 fi
+
+for svc in $retired; do
+    if $SUDO service "$svc" onestatus >/dev/null 2>&1; then
+        die "${svc} did not stop; refusing to start postdoc beside it"
+    fi
+    $SUDO rm -f "/usr/local/etc/rc.d/${svc}"
+done
 
 # --- Service account and state ----------------------------------------------
 
@@ -127,40 +144,11 @@ fi
 $SUDO install -d -m0750 -o "$SERVICE_USER" -g "$SERVICE_USER" "$STATE_HOME"
 $SUDO install -d -m0700 -o "$SERVICE_USER" -g "$SERVICE_USER" "$STATE_HOME/.tok"
 
-# Hopper rejects an unauthenticated claim with 401, so a worker without this
-# starts, looks healthy, and never gets a job. The token goes in the service
-# account's home, never in rc.conf, so rc.conf holds no secret.
-if [ -r "$HOPPER_TOKEN_FILE" ]; then
-    log "Installing hopper token from $HOPPER_TOKEN_FILE"
-    $SUDO install -m0600 -o "$SERVICE_USER" -g "$SERVICE_USER" \
-        "$HOPPER_TOKEN_FILE" "$STATE_HOME/.tok/hopper"
-elif [ "$MODE" = worker ] || { [ "$MODE" = serve ] && [ -n "$URL" ]; }; then
-    die "no hopper token at $HOPPER_TOKEN_FILE; hopper access needs one"
-fi
-
-if [ "$MODE" = serve ]; then
-    [ -r "$SCAN_TOKEN_FILE" ] || die "no API token at $SCAN_TOKEN_FILE; Beamline needs this credential"
-    log "Installing API token from $SCAN_TOKEN_FILE"
-    $SUDO install -m0600 -o "$SERVICE_USER" -g "$SERVICE_USER" \
-        "$SCAN_TOKEN_FILE" "$STATE_HOME/.tok/scan"
-fi
-
-# Only an operator's explicit pin is passed; unset lets postdoc choose the
-# model the endpoint reports.
+install_credentials
 LLM_MODEL_ENV=""
-[ -n "$LLM_MODEL" ] && LLM_MODEL_ENV="SCAN_LLM_MODEL=${LLM_MODEL}"
-
-if [ "$MODE" = worker ]; then
-    EXEC_ARGS="worker --url ${URL}"
-else
-    EXEC_ARGS="serve --token-file ${STATE_HOME}/.tok/scan"
-    [ -n "$URL" ] && EXEC_ARGS="${EXEC_ARGS} --hopper ${URL}"
-fi
-
-# --- rc.d script -------------------------------------------------------------
-
-TMP_RC="$(mktemp)"
-trap 'rm -f "$TMP_RC"' EXIT
+[ -z "$LLM_MODEL" ] || LLM_MODEL_ENV="SCAN_LLM_MODEL=$LLM_MODEL"
+TMP_RC=$DEPLOY_TMP/postdoc.rc
+install_binary
 
 cat > "$TMP_RC" <<RCEOF
 #!/bin/sh
@@ -215,8 +203,8 @@ malloc_conf="dirty_decay_ms:1000,muzzy_decay_ms:0,abort_conf:true,junk:false"
 # panic self-heals. RUST_BACKTRACE=1 so a panic names the frame that raised it;
 # the cost is paid only on a panic, which is already a lost job.
 command_args="-c -f -r -R 5 -P \${pidfile} -o \${${SERVICE_NAME}_logfile} -u ${SERVICE_USER} \\
-  /usr/bin/env MALLOC_CONF=\${malloc_conf} RUST_BACKTRACE=1 SCAN_LLM=\${${SERVICE_NAME}_llm} ${LLM_MODEL_ENV} \\
-  ${BIN_PATH} ${EXEC_ARGS}"
+  /usr/bin/env PATH=${SERVICE_PATH} MALLOC_CONF=\${malloc_conf} RUST_BACKTRACE=1 SCAN_LLM=\${${SERVICE_NAME}_llm} ${LLM_MODEL_ENV} \\
+  ${BIN_PATH} ${RC_EXEC_ARGS}"
 
 # daemon(8) -u switches user with setusercontext(3), which applies the login
 # class's priority capability — 0 for the default class — *after* rc's nice(1).
@@ -284,19 +272,21 @@ ${SERVICE_NAME}_stop()
 run_rc_command "\$1"
 RCEOF
 
-log "Installing ${RC_FILE}"
-$SUDO install -m0755 "$TMP_RC" "$RC_FILE"
+install_changed "$TMP_RC" "$RC_FILE" 0755 root wheel
+# Persist empty too: LLM= deliberately turns a previous endpoint off.
+old_llm=$($SUDO sysrc -n "${SERVICE_NAME}_llm" 2>/dev/null || true)
+[ "$old_llm" = "$LLM" ] || DEPLOY_CHANGED=1
+$SUDO sysrc "${SERVICE_NAME}_llm=${LLM}" >/dev/null
 $SUDO sysrc "${SERVICE_NAME}_enable=YES" >/dev/null
-[ -n "$LLM" ] && $SUDO sysrc "${SERVICE_NAME}_llm=${LLM}" >/dev/null
 $SUDO touch "$LOGFILE"
 $SUDO chown "${SERVICE_USER}:${SERVICE_USER}" "$LOGFILE"
-
-$SUDO service "$SERVICE_NAME" restart
-
-sleep 3
-if $SUDO service "$SERVICE_NAME" status >/dev/null 2>&1; then
-    log "${SERVICE_NAME} is running"
+save_configuration
+if [ "$DEPLOY_CHANGED" -eq 1 ]; then
+    $SUDO service "$SERVICE_NAME" restart
 else
-    $SUDO tail -n 40 "$LOGFILE" 2>/dev/null || true
-    die "${SERVICE_NAME} failed to start"
+    log "No changes; leaving service running"
+    $SUDO service "$SERVICE_NAME" status >/dev/null 2>&1 || $SUDO service "$SERVICE_NAME" start
 fi
+$SUDO service "$SERVICE_NAME" status >/dev/null || die "$SERVICE_NAME failed to start"
+wait_ready
+log "$SERVICE_NAME is running"

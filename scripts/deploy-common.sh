@@ -1,0 +1,97 @@
+#!/bin/sh
+# Sourced by the Unix installers after MODE, URL, STATE_HOME and SUDO are set.
+
+DEPLOY_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+. "$DEPLOY_DIR/deploy-deps.sh"
+DEPLOY_CHANGED=0
+DEPLOY_TMP=$(mktemp -d)
+TMP_BIN=""
+cleanup() {
+    rm -rf "$DEPLOY_TMP"
+    [ -z "$TMP_BIN" ] || $SUDO rm -f "$TMP_BIN"
+}
+trap cleanup EXIT
+
+token_present() { [ -r "$1" ] && grep -q '[^[:space:]]' "$1"; }
+check_token() {
+    # A supplied blank credential is an error, never a request to remove auth.
+    if [ -e "$1" ]; then
+        token_present "$1" || die "credential $1 is empty, whitespace-only, or unreadable"
+    elif [ "$3" = required ]; then
+        $SUDO grep -q '[^[:space:]]' "$2" 2>/dev/null || die "no usable credential at $1 or $2"
+    fi
+}
+install_changed() {
+    if ! $SUDO cmp -s "$1" "$2"; then
+        $SUDO install -m "$3" -o "$4" -g "$5" "$1" "$2"
+        DEPLOY_CHANGED=1
+    fi
+}
+install_token() {
+    if token_present "$1"; then
+        install_changed "$1" "$STATE_HOME/.tok/$2" 0600 "$SERVICE_USER" "$SERVICE_USER"
+    fi
+}
+
+prepare_credentials() {
+    HOPPER_TOKEN_FILE=${HOPPER_TOKEN_FILE:-${TOKEN_FILE:-$HOME/.tok/hopper}}
+    SCAN_TOKEN_FILE=${SCAN_TOKEN_FILE:-$HOME/.tok/scan}
+    LLM_TOKEN_FILE=${LLM_TOKEN_FILE:-$HOME/.tok/llm}
+    OPENROUTER_TOKEN_FILE=${OPENROUTER_TOKEN_FILE:-$HOME/.tok/openrouter}
+    requirement=optional
+    if [ "$MODE" = worker ] || [ -n "$URL" ]; then requirement=required; fi
+    check_token "$HOPPER_TOKEN_FILE" "$STATE_HOME/.tok/hopper" "$requirement"
+    if [ "$MODE" = serve ]; then check_token "$SCAN_TOKEN_FILE" "$STATE_HOME/.tok/scan" required; fi
+    or_count=0
+    endpoint_count=0
+    saved_ifs=$IFS
+    IFS=,
+    for endpoint in ${LLM:-}; do
+        endpoint=$(printf '%s' "$endpoint" | tr -d '[:space:]')
+        [ -n "$endpoint" ] || continue
+        endpoint_count=$((endpoint_count + 1))
+        case "$endpoint" in openrouter|https://openrouter.ai/*|http://openrouter.ai/*) or_count=$((or_count + 1));; esac
+    done
+    IFS=$saved_ifs
+    if [ -n "${SCAN_LLM_KEY:-}" ]; then
+        (umask 077; printf '%s\n' "$SCAN_LLM_KEY" > "$DEPLOY_TMP/llm-key")
+        if [ "$or_count" -gt 0 ]; then OPENROUTER_TOKEN_FILE=$DEPLOY_TMP/llm-key
+        else LLM_TOKEN_FILE=$DEPLOY_TMP/llm-key; fi
+    fi
+    check_token "$LLM_TOKEN_FILE" "$STATE_HOME/.tok/llm" optional
+    requirement=optional
+    if [ "$or_count" -gt 0 ] && [ "$or_count" -eq "$endpoint_count" ]; then requirement=required; fi
+    check_token "$OPENROUTER_TOKEN_FILE" "$STATE_HOME/.tok/openrouter" "$requirement"
+}
+install_credentials() {
+    install_token "$HOPPER_TOKEN_FILE" hopper
+    if [ "$MODE" = serve ]; then install_token "$SCAN_TOKEN_FILE" scan; fi
+    install_token "$LLM_TOKEN_FILE" llm
+    install_token "$OPENROUTER_TOKEN_FILE" openrouter
+}
+prepare_arguments() {
+    # Keep absent settings absent; only explicit deployment overrides become flags.
+    EXEC_ARGS=$(python3 "$DEPLOY_DIR/deploy-config.py" args "$MODE" "$URL" "$STATE_HOME") || die "invalid deployment arguments"
+}
+install_binary() {
+    $SUDO install -d -m0755 -o root -g "$ROOT_GROUP" "$STATE_HOME/bin"
+    if ! $SUDO cmp -s "$BUILD_BIN" "$BIN_PATH"; then
+        TMP_BIN=$($SUDO mktemp "$STATE_HOME/bin/.postdoc.XXXXXX")
+        $SUDO install -m0755 -o root -g "$ROOT_GROUP" "$BUILD_BIN" "$TMP_BIN"
+        $SUDO mv -f "$TMP_BIN" "$BIN_PATH"
+        TMP_BIN=""
+        DEPLOY_CHANGED=1
+    fi
+}
+save_configuration() {
+    python3 "$DEPLOY_DIR/deploy-config.py" save "$MODE" "$URL" > "$DEPLOY_TMP/config.json"
+    $SUDO install -d -m0755 -o root -g "$ROOT_GROUP" "$CONFIG_DIR"
+    install_changed "$DEPLOY_TMP/config.json" "$CONFIG_DIR/$MODE.json" 0644 root "$ROOT_GROUP"
+}
+wait_ready() {
+    if [ "$MODE" = serve ]; then
+        expect_idle=0
+        if [ -n "$URL" ] && [ "${IDLE:-1}" != 0 ] && [ "${WORKERS:-2}" -ge 2 ]; then expect_idle=1; fi
+        $SUDO python3 "$DEPLOY_DIR/deploy-config.py" health "$STATE_HOME/.tok/scan" "${BIND:-127.0.0.1:49999}" "${HEALTH_WAIT:-300}" "$expect_idle"
+    fi
+}

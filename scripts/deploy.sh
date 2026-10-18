@@ -1,8 +1,10 @@
 #!/bin/sh
 # Install postdoc as a systemd service — `worker` or `serve`.
 #
-#   scripts/deploy.sh worker https://hopper.example
-#   scripts/deploy.sh serve  [https://hopper.example]
+#   scripts/deploy.sh worker https://hopper.example [build-binary]
+#   scripts/deploy.sh serve  [https://hopper.example] [build-binary]
+#
+# Run as the deploying user; privileged steps prefer doas, then sudo.
 #
 # The binary owns its defaults. This script passes the hopper URL and installs
 # the API and hopper credentials from their separate source files.
@@ -21,10 +23,12 @@
 #   LLM_MODEL    SCAN_LLM_MODEL; unset lets postdoc pick
 #   HOPPER_TOKEN_FILE  hopper bearer token (default ~/.tok/hopper; TOKEN_FILE is a legacy alias)
 #   SCAN_TOKEN_FILE   API bearer token for Beamline (default ~/.tok/scan)
+#   LLM_TOKEN_FILE    LLM endpoint bearer token (default ~/.tok/llm)
 
 set -eu
 
 MODE="${1:-}"
+BUILD_BIN="${3:-target/release/postdoc}"
 case "$MODE" in
     worker)
         URL="${2:-}"
@@ -36,33 +40,59 @@ case "$MODE" in
         SERVICE_NAME=postdoc
         ;;
     *)
-        echo "usage: $0 worker <hopper-url> | serve [hopper-url]" >&2
+        echo "usage: $0 worker <hopper-url> [build-binary] | serve [hopper-url] [build-binary]" >&2
         exit 1
         ;;
 esac
 
 SERVICE_USER=postdoc
 BINARY=postdoc
-BIN_PATH=/usr/local/bin/${BINARY}
 STATE_HOME=/var/lib/atomdrift/postdoc
+BIN_DIR=${STATE_HOME}/bin
+BIN_PATH=${BIN_DIR}/${BINARY}
 UNIT_FILE=/etc/systemd/system/${SERVICE_NAME}.service
 
-MEMORY_MAX="${MEMORY_MAX:-80%}"
-MEMORY_LOW="${MEMORY_LOW:-50%}"
 NICE="${NICE:--20}"
 LLM="${LLM:-}"
 LLM_MODEL="${LLM_MODEL:-}"
 HOPPER_TOKEN_FILE="${HOPPER_TOKEN_FILE:-${TOKEN_FILE:-$HOME/.tok/hopper}}"
 SCAN_TOKEN_FILE="${SCAN_TOKEN_FILE:-$HOME/.tok/scan}"
+LLM_TOKEN_FILE="${LLM_TOKEN_FILE:-$HOME/.tok/llm}"
 
 die() { echo "error: $*" >&2; exit 1; }
 log() { printf '==> %s\n' "$*"; }
 
 command -v systemctl >/dev/null 2>&1 || die "systemd not found"
-[ -x "$BIN_PATH" ] || die "$BIN_PATH is missing or not executable"
+[ -x "$BUILD_BIN" ] || die "$BUILD_BIN is missing or not executable"
 
 SUDO=""
-[ "$(id -u)" -eq 0 ] || SUDO=sudo
+if [ "$(id -u)" -ne 0 ]; then
+    if command -v doas >/dev/null 2>&1; then
+        SUDO=doas
+    elif command -v sudo >/dev/null 2>&1; then
+        SUDO=sudo
+    else
+        die "need doas or sudo for privileged steps"
+    fi
+fi
+
+ROOT_GROUP=root
+CONFIG_DIR=/etc/postdoc
+# Respect an existing account's home and resolve relocated state storage.
+account_home=$(getent passwd "$SERVICE_USER" | cut -d: -f6 || true)
+[ -z "$account_home" ] || STATE_HOME=$account_home
+STATE_HOME=$($SUDO readlink -m -- "$STATE_HOME")
+BIN_PATH=$STATE_HOME/bin/$BINARY
+. "$(dirname "$0")/deploy-common.sh"
+prepare_credentials
+ensure_runtime_tools Linux
+command -v python3 >/dev/null 2>&1 || die "python3 is required (run make deploy-server to bootstrap build prerequisites)"
+# Resolve byte limits once, and persist explicit overrides separately below.
+memory_settings=$(python3 "$DEPLOY_DIR/deploy-config.py" memory "$MODE") || die "invalid memory policy"
+eval "$memory_settings"
+prepare_arguments
+EXEC_ARGS=$(printf '%s' "$EXEC_ARGS" | sed 's/%/%%/g')
+UNIT_ENV=$(python3 "$DEPLOY_DIR/deploy-config.py" unit-env "$STATE_HOME" "$SERVICE_PATH" "$IDLE_MEMORY_MAX")
 
 # --- Retire atomscan ---------------------------------------------------------
 #
@@ -77,15 +107,14 @@ SUDO=""
 # dangerous window; a short gap with nothing analyzing is not, because hopper
 # re-leases anything unfinished.
 #
-# Disabled as well as stopped, so a reboot between now and scan's uninstall does
-# not quietly restore the collision. The unit file itself is left alone:
-# removing it is uninstalling scan, which is a separate decision from standing
-# it down here.
-for unit in scan-worker.service scan.service; do
-    # `is-enabled` catches a unit that is installed but currently stopped;
-    # `is-active` catches one still running from a unit file already removed.
-    if $SUDO systemctl is-enabled "$unit" >/dev/null 2>&1 ||
-       $SUDO systemctl is-active "$unit" >/dev/null 2>&1
+# Retire disabled/static units too, plus the old server name and the separate
+# idle companion installed by scan's server deploy. Remove local unit files
+# after stopping; vendor units remain installed but disabled.
+for unit in scan-worker.service scan-server.service scan.service scan-idle.service ascan-worker.service; do
+    load_state=$(systemctl show "$unit" -p LoadState --value 2>/dev/null || true)
+    if { [ -n "$load_state" ] && [ "$load_state" != not-found ]; } ||
+       $SUDO systemctl is-active --quiet "$unit" ||
+       [ -e "/etc/systemd/system/$unit" ] || [ -L "/etc/systemd/system/$unit" ]
     then
         log "Retiring ${unit}; postdoc replaces it"
         # Two verbs rather than `disable --now`: that form fails outright when
@@ -98,6 +127,13 @@ for unit in scan-worker.service scan.service; do
         if $SUDO systemctl is-active --quiet "$unit"; then
             die "${unit} did not stop; refusing to start postdoc beside it"
         fi
+        enabled_state=$($SUDO systemctl is-enabled "$unit" 2>/dev/null || true)
+        case "$enabled_state" in
+            enabled|enabled-runtime)
+                die "${unit} is still enabled; refusing to leave it alongside postdoc"
+                ;;
+        esac
+        $SUDO rm -f "/etc/systemd/system/$unit"
     fi
 done
 
@@ -105,39 +141,16 @@ done
 
 if ! getent passwd "$SERVICE_USER" >/dev/null; then
     log "Creating service user '$SERVICE_USER'"
-    $SUDO useradd --system --home-dir "$STATE_HOME" --shell /usr/sbin/nologin \
+    # doas may preserve a caller PATH without /usr/sbin.
+    $SUDO env PATH="/usr/local/sbin:/usr/sbin:/sbin:$PATH" \
+        useradd --system --user-group --no-create-home \
+        --home-dir "$STATE_HOME" --shell /usr/sbin/nologin \
         --comment "Atomdrift postdoc" "$SERVICE_USER"
 fi
 $SUDO install -d -m0750 -o "$SERVICE_USER" -g "$SERVICE_USER" "$STATE_HOME"
 $SUDO install -d -m0700 -o "$SERVICE_USER" -g "$SERVICE_USER" "$STATE_HOME/.tok"
 
-# Hopper rejects an unauthenticated claim with 401, so a worker without this
-# starts, looks healthy, and never gets a job.
-if [ -r "$HOPPER_TOKEN_FILE" ]; then
-    log "Installing hopper token from $HOPPER_TOKEN_FILE"
-    $SUDO install -m0600 -o "$SERVICE_USER" -g "$SERVICE_USER" \
-        "$HOPPER_TOKEN_FILE" "$STATE_HOME/.tok/hopper"
-elif [ "$MODE" = worker ] || { [ "$MODE" = serve ] && [ -n "$URL" ]; }; then
-    die "no hopper token at $HOPPER_TOKEN_FILE; hopper access needs one"
-fi
-
-if [ "$MODE" = serve ]; then
-    [ -r "$SCAN_TOKEN_FILE" ] || die "no API token at $SCAN_TOKEN_FILE; Beamline needs this credential"
-    log "Installing API token from $SCAN_TOKEN_FILE"
-    $SUDO install -m0600 -o "$SERVICE_USER" -g "$SERVICE_USER" \
-        "$SCAN_TOKEN_FILE" "$STATE_HOME/.tok/scan"
-fi
-
-# --- Arguments ---------------------------------------------------------------
-#
-# The whole list. Anything absent here is postdoc's own default, which is the
-# point: one place decides, and `postdoc <mode> --help` states it.
-if [ "$MODE" = worker ]; then
-    EXEC_ARGS="worker --url $URL"
-else
-    EXEC_ARGS="serve --token-file $STATE_HOME/.tok/scan"
-    [ -n "$URL" ] && EXEC_ARGS="$EXEC_ARGS --hopper $URL"
-fi
+install_credentials
 
 # ProtectControlGroups=true blocks the cgroup delegation `serve` needs to
 # freeze its companion worker, and systemd < 252 has no private variant.
@@ -156,8 +169,8 @@ LLM_MODEL_LINE=""
 
 # --- Unit --------------------------------------------------------------------
 
-TMP_UNIT="$(mktemp)"
-trap 'rm -f "$TMP_UNIT"' EXIT
+TMP_UNIT=$DEPLOY_TMP/postdoc.service
+install_binary
 
 cat > "$TMP_UNIT" <<EOF
 [Unit]
@@ -177,9 +190,7 @@ Restart=always
 RestartSec=10s
 TimeoutStopSec=30s
 
-Environment=HOME=${STATE_HOME}
-Environment=SCAN_LLM=${LLM}
-${LLM_MODEL_LINE}
+${UNIT_ENV}
 
 Delegate=yes
 
@@ -189,6 +200,7 @@ Delegate=yes
 MemoryMax=${MEMORY_MAX}
 MemoryLow=${MEMORY_LOW}
 TasksMax=8192
+LimitNOFILE=1048576
 
 # Analysis is what this host is for. Shed a shell before shedding the service,
 # and never let the kernel pick it first.
@@ -239,17 +251,19 @@ StandardError=journal
 WantedBy=multi-user.target
 EOF
 
-log "Installing ${UNIT_FILE}"
-$SUDO install -m0644 "$TMP_UNIT" "$UNIT_FILE"
-$SUDO systemctl daemon-reload
+install_changed "$TMP_UNIT" "$UNIT_FILE" 0644 root root
+save_configuration
 $SUDO systemctl enable "$SERVICE_NAME"
-$SUDO systemctl restart "$SERVICE_NAME"
-
-# A unit that starts and then dies still reports "started", so wait and look.
-sleep 3
-if $SUDO systemctl is-active --quiet "$SERVICE_NAME"; then
-    log "${SERVICE_NAME} is running"
+if [ "$DEPLOY_CHANGED" -eq 1 ]; then
+    $SUDO systemctl daemon-reload
+    $SUDO systemctl restart "$SERVICE_NAME"
 else
-    $SUDO journalctl -u "$SERVICE_NAME" -n 40 --no-pager || true
-    die "${SERVICE_NAME} failed to start"
+    log "No changes; leaving service running"
+    $SUDO systemctl start "$SERVICE_NAME"
 fi
+if ! $SUDO systemctl is-active --quiet "$SERVICE_NAME"; then
+    $SUDO journalctl -u "$SERVICE_NAME" -n 40 --no-pager || true
+    die "$SERVICE_NAME failed to start"
+fi
+wait_ready
+log "$SERVICE_NAME is running"

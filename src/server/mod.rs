@@ -1219,6 +1219,7 @@ fn assemble(config: ServerConfig) -> anyhow::Result<(Router, Arc<AppState>)> {
         idle::start(
             config.hopper(),
             &scan::upload::default_worker_name(),
+            config.idle_worker_slots,
             &busy,
             shutdown.subscribe(),
         )

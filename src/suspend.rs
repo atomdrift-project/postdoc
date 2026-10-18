@@ -117,6 +117,7 @@ mod imp {
     use std::os::unix::process::CommandExt;
     use std::path::PathBuf;
     use std::process::Command;
+    use std::sync::OnceLock;
 
     /// The cgroup the worker lives in: a child of the server's own.
     #[derive(Debug)]
@@ -127,17 +128,32 @@ mod imp {
     /// Create the worker's cgroup and arrange for the child to join it before
     /// exec.
     ///
-    /// Only core interface files are used — `cgroup.freeze`, `cgroup.kill`,
-    /// `cgroup.procs` — and no controller is enabled in the subtree. That is
-    /// deliberate: enabling a controller would make the server's own cgroup an
-    /// inner node, and cgroup v2 forbids an inner node from holding processes,
-    /// so the server would have to migrate itself into a leaf first. Sticking
-    /// to core files avoids the whole question. Memory is bounded elsewhere —
-    /// by the server's `MemoryMax` (which already covers both processes) plus
-    /// a high `oom_score_adj` on the child, so the kernel picks the worker as
-    /// its victim and never the server.
+    /// Deployment supplies an idle memory budget. In that case the server
+    /// moves into a foreground leaf before enabling controllers, satisfying
+    /// cgroup v2's no-internal-process constraint. The idle leaf gets its own
+    /// memory ceiling and low CPU/IO weights while retaining kernel freezing.
     pub(super) fn prepare(cmd: &mut Command) -> io::Result<Control> {
-        let dir = own_cgroup()?.join(cgroup_name());
+        let current = own_cgroup()?;
+        let budget = std::env::var("POSTDOC_IDLE_MEMORY_MAX")
+            .ok()
+            .map(|value| value.parse::<u64>())
+            .transpose()
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+        let parent = if budget.is_some() {
+            static DELEGATED: OnceLock<PathBuf> = OnceLock::new();
+            DELEGATED.get_or_init(|| current.clone()).clone()
+        } else {
+            current
+        };
+        if budget.is_some() {
+            let foreground = parent.join("foreground");
+            fs::create_dir_all(&foreground)?;
+            fs::write(foreground.join("cgroup.procs"), b"0")?;
+            fs::write(parent.join("cgroup.subtree_control"), b"+cpu +io +memory")?;
+            fs::write(foreground.join("cpu.weight"), b"10000")?;
+            fs::write(foreground.join("io.weight"), b"default 10000")?;
+        }
+        let dir = parent.join(cgroup_name());
         match fs::create_dir(&dir) {
             Ok(()) => {}
             // A previous worker's cgroup, left by a server that did not exit
@@ -145,6 +161,10 @@ mod imp {
             // we are about to replace.
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
             Err(e) => return Err(e),
+        }
+
+        if let Some(bytes) = budget {
+            configure_limits(&dir, bytes)?;
         }
 
         // Opened here, in the parent, and written by the child between fork and
@@ -170,6 +190,45 @@ mod imp {
             });
         }
         Ok(Control { dir })
+    }
+
+    fn configure_limits(dir: &std::path::Path, bytes: u64) -> io::Result<()> {
+        // Respect tighter ancestor caps, including host-specific systemd drop-ins.
+        let parent_limit = fs::read_to_string(dir.parent().unwrap_or(dir).join("memory.max"))?
+            .trim()
+            .parse::<u64>()
+            .ok();
+        let maximum = parent_limit.map_or(bytes, |limit| bytes.min(limit / 2));
+        fs::write(dir.join("memory.max"), maximum.to_string())?;
+        fs::write(dir.join("memory.low"), b"0")?;
+        fs::write(dir.join("memory.oom.group"), b"1")?;
+        fs::write(dir.join("cpu.weight"), b"1")?;
+        fs::write(dir.join("io.weight"), b"default 1")?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    mod limit_tests {
+        #[test]
+        fn idle_budget_respects_a_tighter_unit_limit() {
+            let tree = tempfile::tempdir().unwrap();
+            let idle = tree.path().join("idle");
+            std::fs::create_dir(&idle).unwrap();
+            std::fs::write(tree.path().join("memory.max"), "1000\n").unwrap();
+            super::configure_limits(&idle, 800).unwrap();
+            assert_eq!(
+                std::fs::read_to_string(idle.join("memory.max")).unwrap(),
+                "500"
+            );
+            assert_eq!(
+                std::fs::read_to_string(idle.join("cpu.weight")).unwrap(),
+                "1"
+            );
+            assert_eq!(
+                std::fs::read_to_string(idle.join("memory.low")).unwrap(),
+                "0"
+            );
+        }
     }
 
     pub(super) fn freeze(control: &Control, _pid: u32) -> io::Result<()> {
