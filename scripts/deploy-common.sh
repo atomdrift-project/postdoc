@@ -82,6 +82,17 @@ install_binary() {
         TMP_BIN=""
         DEPLOY_CHANGED=1
     fi
+
+    # SELinux's default label for executables under /var/lib is var_lib_t,
+    # which prevents systemd services from executing the binary (203/EXEC).
+    # Persist the executable label and reapply it after every atomic install.
+    if command -v getenforce >/dev/null 2>&1 && [ "$(getenforce)" != Disabled ]; then
+        command -v semanage >/dev/null 2>&1 || die "semanage is required to label the service binary under SELinux"
+        if ! $SUDO semanage fcontext -a -t bin_t "$BIN_PATH" 2>/dev/null; then
+            $SUDO semanage fcontext -m -t bin_t "$BIN_PATH" || die "could not configure SELinux executable label for $BIN_PATH"
+        fi
+        $SUDO restorecon -F "$BIN_PATH" || die "could not apply SELinux executable label to $BIN_PATH"
+    fi
 }
 save_configuration() {
     python3 "$DEPLOY_DIR/deploy-config.py" save "$MODE" "$URL" > "$DEPLOY_TMP/config.json"
