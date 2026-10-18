@@ -152,6 +152,10 @@ mod imp {
             fs::write(parent.join("cgroup.subtree_control"), b"+cpu +io +memory")?;
             fs::write(foreground.join("cpu.weight"), b"10000")?;
             fs::write(foreground.join("io.weight"), b"default 10000")?;
+            fs::write(
+                foreground.join("memory.low"),
+                fs::read(parent.join("memory.low"))?,
+            )?;
         }
         let dir = parent.join(cgroup_name());
         match fs::create_dir(&dir) {
@@ -205,30 +209,6 @@ mod imp {
         fs::write(dir.join("cpu.weight"), b"1")?;
         fs::write(dir.join("io.weight"), b"default 1")?;
         Ok(())
-    }
-
-    #[cfg(test)]
-    mod limit_tests {
-        #[test]
-        fn idle_budget_respects_a_tighter_unit_limit() {
-            let tree = tempfile::tempdir().unwrap();
-            let idle = tree.path().join("idle");
-            std::fs::create_dir(&idle).unwrap();
-            std::fs::write(tree.path().join("memory.max"), "1000\n").unwrap();
-            super::configure_limits(&idle, 800).unwrap();
-            assert_eq!(
-                std::fs::read_to_string(idle.join("memory.max")).unwrap(),
-                "500"
-            );
-            assert_eq!(
-                std::fs::read_to_string(idle.join("cpu.weight")).unwrap(),
-                "1"
-            );
-            assert_eq!(
-                std::fs::read_to_string(idle.join("memory.low")).unwrap(),
-                "0"
-            );
-        }
     }
 
     pub(super) fn freeze(control: &Control, _pid: u32) -> io::Result<()> {
@@ -325,6 +305,29 @@ mod imp {
         // so it is joined by concatenation rather than by `Path::join`, which
         // would discard the mount point.
         Ok(PathBuf::from(format!("{MOUNT}{}", relative.trim())))
+    }
+    #[cfg(test)]
+    mod limit_tests {
+        #[test]
+        fn idle_budget_respects_a_tighter_unit_limit() {
+            let tree = tempfile::tempdir().unwrap();
+            let idle = tree.path().join("idle");
+            std::fs::create_dir(&idle).unwrap();
+            std::fs::write(tree.path().join("memory.max"), "1000\n").unwrap();
+            super::configure_limits(&idle, 800).unwrap();
+            assert_eq!(
+                std::fs::read_to_string(idle.join("memory.max")).unwrap(),
+                "500"
+            );
+            assert_eq!(
+                std::fs::read_to_string(idle.join("cpu.weight")).unwrap(),
+                "1"
+            );
+            assert_eq!(
+                std::fs::read_to_string(idle.join("memory.low")).unwrap(),
+                "0"
+            );
+        }
     }
 }
 

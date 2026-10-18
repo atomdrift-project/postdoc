@@ -84,7 +84,7 @@ ensure_runtime_tools FreeBSD
 command -v python3 >/dev/null 2>&1 || die "python3 is required; use make deploy-server to bootstrap prerequisites"
 prepare_arguments
 # Escape the serialized argument string for rc.d's enclosing double quotes.
-RC_EXEC_ARGS=$(printf '%s' "$EXEC_ARGS" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\$/\\$/g; s/`/\\`/g')
+RC_EXEC_ARGS=$(python3 "$DEPLOY_DIR/deploy-config.py" args-rc "$MODE" "$URL" "$STATE_HOME" "$BIN_PATH")
 
 # --- Retire atomscan ---------------------------------------------------------
 #
@@ -145,8 +145,8 @@ $SUDO install -d -m0750 -o "$SERVICE_USER" -g "$SERVICE_USER" "$STATE_HOME"
 $SUDO install -d -m0700 -o "$SERVICE_USER" -g "$SERVICE_USER" "$STATE_HOME/.tok"
 
 install_credentials
-LLM_MODEL_ENV=""
-[ -z "$LLM_MODEL" ] || LLM_MODEL_ENV="SCAN_LLM_MODEL=$LLM_MODEL"
+LLM_MODEL_ENV=$(python3 "$DEPLOY_DIR/deploy-config.py" rc-model)
+RC_LLM_DEFAULT=$(python3 "$DEPLOY_DIR/deploy-config.py" shell-value "$LLM")
 TMP_RC=$DEPLOY_TMP/postdoc.rc
 install_binary
 
@@ -165,7 +165,7 @@ load_rc_config \$name
 
 : \${${SERVICE_NAME}_enable:="NO"}
 : \${${SERVICE_NAME}_nice:="${NICE}"}
-: \${${SERVICE_NAME}_llm:="${LLM}"}
+: \${${SERVICE_NAME}_llm:=${RC_LLM_DEFAULT}}
 : \${${SERVICE_NAME}_logfile:="${LOGFILE}"}
 # Seconds a graceful stop waits for in-flight analyses to drain before the
 # whole daemon(8) tree is SIGKILLed. Hopper re-leases anything unfinished.
@@ -198,13 +198,14 @@ command="/usr/sbin/daemon"
 # profile. Measured over four large nested archives: 284.7s stock, 227.7s with
 # junk:false, identical result hashes. Peak RSS 16.0 GiB -> 14.0 GiB.
 malloc_conf="dirty_decay_ms:1000,muzzy_decay_ms:0,abort_conf:true,junk:false"
+llm_arg=\$(printf '%s' "\${${SERVICE_NAME}_llm}" | sed "s/'/'\\\\\\\\''/g")
 
 # -r -R 5 supervises and restarts forever after any exit, so an OOM kill or a
 # panic self-heals. RUST_BACKTRACE=1 so a panic names the frame that raised it;
 # the cost is paid only on a panic, which is already a lost job.
 command_args="-c -f -r -R 5 -P \${pidfile} -o \${${SERVICE_NAME}_logfile} -u ${SERVICE_USER} \\
-  /usr/bin/env PATH=${SERVICE_PATH} MALLOC_CONF=\${malloc_conf} RUST_BACKTRACE=1 SCAN_LLM=\${${SERVICE_NAME}_llm} ${LLM_MODEL_ENV} \\
-  ${BIN_PATH} ${RC_EXEC_ARGS}"
+  /usr/bin/env PATH=${SERVICE_PATH} MALLOC_CONF=\${malloc_conf} RUST_BACKTRACE=1 SCAN_LLM='\${llm_arg}' ${LLM_MODEL_ENV} \\
+  ${RC_EXEC_ARGS}"
 
 # daemon(8) -u switches user with setusercontext(3), which applies the login
 # class's priority capability — 0 for the default class — *after* rc's nice(1).

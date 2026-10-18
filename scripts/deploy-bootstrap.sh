@@ -33,6 +33,7 @@ case "$(uname -s)" in
                 dnf:c++|yum:c++|zypper:c++) build_package=gcc-c++ ;;
                 xbps:c++) build_package=gcc ;;
                 pacman:cc|pacman:c++) build_package=base-devel ;;
+                pacman:python3) build_package=python ;;
                 *:pkg-config) build_package=pkgconf ;;
                 *) build_package=$build_tool ;;
             esac
@@ -41,13 +42,23 @@ case "$(uname -s)" in
         done
         # Build scripts use TLS both for artifacts and for the Rust bootstrap.
         if [ ! -f /etc/ssl/cert.pem ] && [ ! -f /etc/ssl/certs/ca-certificates.crt ]; then
-            install_runtime_package ca-certificates || die "install a system CA certificate bundle"
+            ca_package=ca-certificates
+            [ "$RUNTIME_PKG" != pkg ] || ca_package=ca-root-nss
+            install_runtime_package "$ca_package" || die "install a system CA certificate bundle"
         fi
-        if ! command -v cargo >/dev/null 2>&1; then
-            rust_installer=$(mktemp)
-            curl --proto '=https' --tlsv1.2 -fsS https://sh.rustup.rs -o "$rust_installer"
-            sh "$rust_installer" -y --profile minimal --no-modify-path
-            rm -f "$rust_installer"
+        if ! command -v cargo >/dev/null 2>&1 || ! python3 -c 'import subprocess,re; from pathlib import Path; required=tuple(map(int,re.search(r"rust-version = \"([0-9.]+)\"",Path("Cargo.toml").read_text())[1].split("."))); actual=tuple(map(int,subprocess.check_output(["rustc","--version"],text=True).split()[1].split("-")[0].split("."))); raise SystemExit(actual < required)'; then
+            if command -v rustup >/dev/null 2>&1; then
+                rustup toolchain install stable --profile minimal
+            else
+                rust_installer=$(mktemp)
+                curl --proto '=https' --tlsv1.2 -fsS https://sh.rustup.rs -o "$rust_installer"
+                sh "$rust_installer" -y --profile minimal --no-modify-path
+                rm -f "$rust_installer"
+            fi
+            # Select the updated toolchain for this build without changing an
+            # existing rustup default or another project's pinned toolchain.
+            RUSTUP_TOOLCHAIN=stable
+            export RUSTUP_TOOLCHAIN
         fi
         python3 -c 'import subprocess; from pathlib import Path; import re; required=tuple(map(int,re.search(r"rust-version = \"([0-9.]+)\"",Path("Cargo.toml").read_text())[1].split("."))); actual=tuple(map(int,subprocess.check_output(["rustc","--version"],text=True).split()[1].split("-")[0].split("."))); assert actual >= required, f"Rust {required} required; update Rust with rustup update stable"'
         if [ "$(uname -s)" = FreeBSD ]; then ulimit -d "$(ulimit -Hd)" 2>/dev/null || true; fi

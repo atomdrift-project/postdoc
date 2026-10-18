@@ -87,6 +87,9 @@ deploy-worker deploy-server: export POSTDOC_DEPLOY_BUILD := 1
 
 test-deploy:
 	python3 scripts/test-deploy-deps.py
+	python3 scripts/test-deploy.py
+	python3 scripts/test-rollout.py
+	@if command -v pwsh >/dev/null 2>&1; then pwsh -NoLogo -NoProfile -File scripts/test-deploy-windows.ps1; fi
 
 ## worker: run a worker in the foreground, as you, until Ctrl-C
 ##         No service, no state directory — it reads ~/.tok/hopper directly.

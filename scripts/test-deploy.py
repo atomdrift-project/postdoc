@@ -35,6 +35,15 @@ if cmd == 'pw':
 if cmd == 'useradd': s['user'] = True; done()
 if cmd == 'readlink': print(os.path.realpath(args[-1])); done()
 if cmd == 'grep': done(subprocess.run(['/usr/bin/grep', *args]).returncode)
+if cmd == 'pacman':
+    package=args[-1]
+    names={'base-devel':['cc','c++'],'pkgconf':['pkg-config']}.get(package,[package])
+    for name in names:
+        binary=root/'bin'/name; binary.write_text('#!/bin/sh\nexit 0\n'); binary.chmod(0o755)
+    done()
+if cmd == 'rustup':
+    binary=root/'bin/rustc'; binary.write_text("#!/bin/sh\necho 'rustc 1.99.1 (updated)'\n"); binary.chmod(0o755)
+    done()
 if cmd == 'cmp': done(0 if pathlib.Path(args[-1]).exists() and filecmp.cmp(args[-2], args[-1], shallow=False) else 1)
 if cmd == 'install':
     paths=[]; mode=0o755; i=0
@@ -194,10 +203,11 @@ class DeployTests(unittest.TestCase):
         saved = json.loads((host.config / "serve.json").read_text())
         self.assertEqual(saved["BIND"], "0.0.0.0:50123")
         self.assertNotIn("SCAN_LLM_KEY", saved)
+        self.assertIn("WorkingDirectory=" + str(host.home) + "\n", unit)
 
     def test_worker_paths_with_spaces_and_freebsd_llm_clear(self):
         host = self.host(platform="FreeBSD", existing=True)
-        result = host.run("worker", DATA_DIR="/samples/data dir", WORKERS="2", LLM="")
+        result = host.run("worker", DATA_DIR="/samples/data dir", WORKERS="2", LLM="", LLM_MODEL="a model with spaces")
         self.assertEqual(result.returncode, 0, result.stderr)
         script = (host.units / "postdoc_worker").read_text()
         # Execute the generated rc.d shell with a stub rc.subr to inspect argv.
@@ -208,6 +218,7 @@ class DeployTests(unittest.TestCase):
         parsed = subprocess.run(["/bin/sh", str(fixture), "start"], capture_output=True, text=True)
         self.assertEqual(parsed.returncode, 0, parsed.stderr)
         self.assertIn("/samples/data dir", shlex.split(parsed.stdout))
+        self.assertIn("SCAN_LLM_MODEL=a model with spaces", shlex.split(parsed.stdout))
         self.assertEqual(host.state()["rcconf"]["postdoc_worker_llm"], "")
 
     def test_openrouter_key_is_installed_without_argv_disclosure(self):
@@ -217,10 +228,71 @@ class DeployTests(unittest.TestCase):
         self.assertEqual((host.home / ".tok/openrouter").read_text(), "secret-test-key\n")
         self.assertNotIn("secret-test-key", json.dumps(host.state()))
 
+    def test_freebsd_endpoint_chain_is_one_literal_argument(self):
+        host = self.host(platform="FreeBSD")
+        endpoint = "https://llm.example/o'neil/v1, openrouter"
+        result = host.run(LLM=endpoint)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        stub = host.root / "rc.subr"
+        stub.write_text('load_rc_config() { :; }\nrun_rc_command() { printf "%s" "$command_args"; }\n')
+        fixture = host.root / "generated.rc"
+        fixture.write_text((host.units / "postdoc").read_text().replace("/etc/rc.subr", str(stub)))
+        parsed = subprocess.run(["/bin/sh", str(fixture), "start"], capture_output=True, text=True)
+        self.assertEqual(parsed.returncode, 0, parsed.stderr)
+        self.assertIn("SCAN_LLM=" + endpoint, shlex.split(parsed.stdout))
+
     def test_readiness_failure_fails_deploy(self):
         host = self.host()
         result = host.run(MOCK_HEALTH_FAIL="1")
         self.assertNotEqual(result.returncode, 0)
+
+    def test_bootstrap_installs_missing_build_tools(self):
+        host = self.host()
+        (host.root / "Cargo.toml").write_text('rust-version = "1.97"\n')
+        for name, body in (("cargo", "exit 0"), ("rustc", "echo 'rustc 1.99.1 (test)'")):
+            path = host.bin / name
+            path.write_text("#!/bin/sh\n" + body + "\n")
+            path.chmod(0o755)
+        (host.bin / "pacman").write_text(MOCK)
+        (host.bin / "pacman").chmod(0o755)
+        script = host.scripts / "deploy-bootstrap.sh"
+        script.write_text(script.read_text().replace('PATH="$HOME/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"', 'PATH="$PATH"'))
+        result = subprocess.run(["/bin/sh", "-c", '. ./scripts/deploy-bootstrap.sh; command -v cc; command -v pkg-config'],
+                                cwd=host.root, env=host.env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue((host.bin / "cc").exists())
+        self.assertTrue((host.bin / "c++").exists())
+        self.assertTrue((host.bin / "pkg-config").exists())
+
+    def test_existing_home_with_spaces_is_used(self):
+        host = self.host(existing=True)
+        custom = host.root / "custom home"
+        state = host.state()
+        state["home"] = str(custom)
+        (host.root / "state.json").write_text(json.dumps(state))
+        result = host.run()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue((custom / "bin/postdoc").exists())
+        self.assertIn("WorkingDirectory=" + str(custom) + "\n", (host.units / "postdoc.service").read_text())
+
+    def test_bootstrap_updates_an_old_toolchain_for_this_build(self):
+        host = self.host()
+        (host.root / "Cargo.toml").write_text('rust-version = "1.97"\n')
+        for name in ("cargo", "cc", "c++", "pkg-config", "git", "curl"):
+            path = host.bin / name
+            path.write_text("#!/bin/sh\nexit 0\n")
+            path.chmod(0o755)
+        (host.bin / "rustc").write_text("#!/bin/sh\necho 'rustc 1.20.0 (old)'\n")
+        (host.bin / "rustc").chmod(0o755)
+        (host.bin / "rustup").write_text(MOCK)
+        (host.bin / "rustup").chmod(0o755)
+        script = host.scripts / "deploy-bootstrap.sh"
+        script.write_text(script.read_text().replace('PATH="$HOME/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"', 'PATH="$PATH"'))
+        result = subprocess.run(["/bin/sh", "-c", '. ./scripts/deploy-bootstrap.sh; printf "%s" "$RUSTUP_TOOLCHAIN"'],
+                                cwd=host.root, env=host.env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(result.stdout.endswith("stable"))
+        self.assertIn(["rustup", ["toolchain", "install", "stable", "--profile", "minimal"]], host.state()["calls"])
 
 
 if __name__ == "__main__":

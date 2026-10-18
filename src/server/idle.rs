@@ -8,11 +8,9 @@
 //! Two consequences are worth stating, because they are why this is simpler
 //! than running the worker inside the server:
 //!
-//!   - **No sizing of its own.** A standalone worker already sizes itself
-//!     across every host in the fleet — slots at three per physical core, the
-//!     rayon pool at the core count, the RSS ceiling auto-resolved from the
-//!     cgroup or sysctl basis. It gets the whole box, because freezing returns
-//!     the whole box instantly; a standing reserve would buy nothing.
+//!   - **Shared sizing policy.** The child uses the server's idle slot budget;
+//!     the worker owns its remaining tuning defaults. Linux deployment gives
+//!     it a low-priority cgroup and a separate memory ceiling.
 //!   - **No configuration of its own.** The child inherits the server's
 //!     environment, which is where the hopper token, the LLM endpoint and the
 //!     traits directory already live. Only what must differ is passed.
@@ -389,6 +387,10 @@ pub(super) fn start(
         "idle worker: filling spare capacity with hopper queue work, frozen \
          whenever a request is in flight",
     );
+    // Establish controller delegation before resource loading can fork helper
+    // processes into the server's original cgroup. Otherwise enabling the
+    // controllers races those children and can initially fail with EBUSY.
+    worker.ensure_running(busy);
     Arc::clone(&worker).supervise(Arc::clone(busy), stop);
     Some(worker)
 }

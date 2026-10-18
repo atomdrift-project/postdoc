@@ -93,6 +93,9 @@ eval "$memory_settings"
 prepare_arguments
 EXEC_ARGS=$(printf '%s' "$EXEC_ARGS" | sed 's/%/%%/g')
 UNIT_ENV=$(python3 "$DEPLOY_DIR/deploy-config.py" unit-env "$STATE_HOME" "$SERVICE_PATH" "$IDLE_MEMORY_MAX")
+UNIT_HOME=$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1].replace("%", "%%")))' "$STATE_HOME")
+UNIT_BIN=$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1].replace("%", "%%")))' "$BIN_PATH")
+UNIT_WORKDIR=$(printf '%s' "$STATE_HOME" | sed 's/%/%%/g')
 
 # --- Retire atomscan ---------------------------------------------------------
 #
@@ -183,9 +186,10 @@ Type=simple
 User=${SERVICE_USER}
 Group=${SERVICE_USER}
 
-ReadWritePaths=${STATE_HOME}
-WorkingDirectory=${STATE_HOME}
-ExecStart=${BIN_PATH} ${EXEC_ARGS}
+ReadWritePaths=${UNIT_HOME}
+BindPaths=${UNIT_HOME}
+WorkingDirectory=${UNIT_WORKDIR}
+ExecStart=${UNIT_BIN} ${EXEC_ARGS}
 Restart=always
 RestartSec=10s
 TimeoutStopSec=30s
@@ -220,7 +224,7 @@ IOSchedulingClass=best-effort
 IOSchedulingPriority=0
 
 ProtectSystem=strict
-ProtectHome=true
+ProtectHome=tmpfs
 PrivateTmp=true
 PrivateDevices=true
 PrivateMounts=true

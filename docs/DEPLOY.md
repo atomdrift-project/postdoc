@@ -61,45 +61,59 @@ home do not satisfy this check. Restart after installing tools on a running
 host: tool availability is cached by the analysis engines.
 
 Run `make test-deploy` to exercise the Unix prerequisite installer with mock
-package managers. These tests do not install software or change services.
+package managers. These tests do not install software or change host services.
 
-## Deployment parity audit (2026-10-18)
+## Deployment parity fixes
 
-Compared the current worker and server deployment scripts with the sibling
-Scan checkout's Linux, FreeBSD, and Windows deployment paths. Runtime tool
-installation/validation is addressed above. The following differences remain;
-they are findings, not changes made as part of the prerequisite fix.
+The 2026-10-18 audit findings are now covered by the deploy paths and tests:
 
-| Priority | Finding | Effect |
-| --- | --- | --- |
-| High | Rollout's Hopper phase calls the Postdoc deployment routine. | With `URL` set, it looks for `$HOME/postdoc` and a Postdoc service on the queue host instead of deploying Hopper from `$HOME/hopper`. Without `URL`, the phase is skipped. It does not provide the documented Hopper-first deployment. |
-| High | Several Scan deployment overrides are not forwarded. | `IDLE=0`, `BIND`, `ALLOW_CIDR`, `WORKERS`, `DATA_DIR`, and `MAX_RSS_GB` do not configure the generated Postdoc services. In particular, `IDLE=0` does not disable the idle worker. Explicit command-line or environment support in the binary does not make these make-time settings reach the service. |
-| High | LLM settings and credential handling are incomplete. | Windows defaults its script parameters to empty strings instead of reading the Makefile's exported `LLM` and `LLM_MODEL`, and does not copy the LLM token. Unix copies `.tok/llm` but does not carry over Scan's OpenRouter key installation or `SCAN_LLM_KEY` provisioning. FreeBSD only writes a nonempty LLM setting to rc.conf, so `LLM=` cannot clear a previously configured endpoint. |
-| High | Server and idle-worker resource policies changed. | Scan caps the server's default memory allowance at 128 GiB and runs Linux idle work in its own unit with a smaller allowance and low CPU/IO weights. Postdoc uses an uncapped 80% host allowance and a 50% host reclaim-protected floor; its companion shares the server's cgroup and CPU/IO weights. Freezing on interactive requests is retained, but memory and competition with other services differ. These need an explicit policy decision. |
-| Medium | Blank token files pass deployment preflight. | Readability alone does not establish a usable credential. A blank Hopper token can produce a running worker whose requests are rejected; a blank API token fails after deployment has already replaced files. Scan checked Hopper tokens for non-whitespace content. |
-| Medium | Redeployment always replaces files and restarts. | Scan compares binary, unit, and credential contents and leaves an unchanged service running. Postdoc interrupts in-flight work even on a no-op deployment. |
-| Medium | Fresh-host build setup is absent. | `make deploy-*` invokes Cargo before its deployment script. It cannot bootstrap Rust, the compiler/linker, and required development libraries as Scan's host scripts did. The runtime installer assumes the release binary can already be built. |
-| Medium | Storage and existing-home migration handling is reduced. | Linux does not resolve a symlinked state directory before placing it in `ReadWritePaths`, as Scan did. FreeBSD hard-codes `/var/db/atomdrift/postdoc` instead of consulting an existing account's home; a differently configured account may resolve credentials and model directories elsewhere. |
-| Medium | Rollout does not preserve a server's installed Hopper selection. | Workers recover `--url` from their service; servers receive `ROLLOUT_URL` or the Makefile's site default instead of their existing `--hopper` list. An ordinary rollout can replace a custom Hopper pair or an intentional opt-out. |
+- Linux and FreeBSD bootstrap missing runtime and build tools before Cargo
+  runs. Rustup installs a missing Rust toolchain in the invoking user's home;
+  older compilers are updated through Rustup, selecting stable for this build
+  without changing an existing default toolchain.
+- Explicit `BIND`, `ALLOW_CIDR`, `WORKERS`, `DATA_DIR` (workers),
+  `MAX_RSS_GB`, and `IDLE` settings reach the service. `IDLE=0` disables
+  background claims. Omitted values retain the binary's defaults.
+- Credentials are checked for non-whitespace content before stopping services.
+  Missing source files reuse valid installed credentials; an explicit blank
+  rotation fails. Unix and Windows install LLM and OpenRouter keys from
+  `LLM_TOKEN_FILE`, `OPENROUTER_TOKEN_FILE`, or their default `.tok` files.
+  `SCAN_LLM_KEY` provisions the OpenRouter key when that endpoint appears in
+  the chain, otherwise the LLM endpoint key. Secrets stay out of service argv,
+  configuration manifests, and service environment blocks.
+- Windows reads exported `LLM`/`LLM_MODEL`; FreeBSD persists an explicit
+  `LLM=` so a previous endpoint can be turned off.
+- Binary, unit/rc.d script, credential, and saved configuration contents are
+  compared before restarting. An unchanged deployment leaves a running
+  service alone, while a credential rotation restarts it.
+- Direct server deployment waits for authenticated API readiness and, on Unix
+  when enabled, a running idle worker. `HEALTH_WAIT` sets the timeout (default
+  300 seconds). A running process alone does not count as a successful deploy.
+- Existing Unix account homes are honored. Linux resolves relocated state
+  storage and binds that home into the service sandbox, including homes
+  beneath `/home`. Other users' home directories remain hidden.
+- Linux explicitly sets `LimitNOFILE=1048576` and `RUST_BACKTRACE=1`.
 
-The Linux unit also omits Scan's explicit `LimitNOFILE=1048576` and worker
-`RUST_BACKTRACE=1`. The shared `scan::runtime::install()` still raises the
-process's soft open-file limit to its inherited hard limit, so the missing
-unit setting does not by itself leave the running process at 1024. The live
-unit's configured hard limit was 524288 during this audit.
+Nonsecret deployment settings are stored as `/etc/postdoc/serve.json` or
+`worker.json` on Linux, `/usr/local/etc/postdoc/` on FreeBSD, and
+`deploy-serve.json` or `deploy-worker.json` in the Windows service state
+home. Rollout reads these settings before redeploying. For older installs
+without a manifest, it recovers literal flags from the installed service.
+A server without `--hopper` is preserved as `HOPPER=none`; an explicit
+rollout `URL=` overrides the saved Hopper selection.
 
-One retained limitation also matters: direct deployment checks process
-liveness rather than API readiness. Three seconds of `systemctl is-active`
-or rc.d `status` can succeed while resources are still loading. Scan's direct
-scripts also used service status; this is not a new parity regression. The
-fleet rollout has a separate API health check.
+Rollout's Hopper phase now connects to `HOPPER_NODE` (default `10.9.8.10`),
+updates `$HOME/hopper`, runs `make deploy`, and checks
+`HOPPER_HEALTH` (default `http://127.0.0.1:8081/healthz` on that host).
+Failure to connect, deploy, or become ready blocks all analysis hosts.
+`PHASES="workers servers"` explicitly skips queue deployment. No remote fleet
+rollout is performed by the regression tests.
 
-Source locations: `scripts/deploy.sh`, `scripts/deploy-freebsd.sh`,
-`scripts/deploy-windows.ps1`, and `scripts/rollout.sh`; compared with Scan's
-`scripts/server/server-linux.sh`, `scripts/server/server-freebsd.sh`,
-`scripts/worker/worker-linux.sh`, `scripts/worker/worker-freebsd.sh`, and
-`scripts/worker/worker-windows.ps1`. Removed platforms, separate tunnel
-deployment, and CLI-owned behavioral defaults are documented design choices.
+`make test-deploy` runs prerequisite, Unix deployment, and fake-SSH rollout
+regressions. When `pwsh` is installed it also runs mocked Windows deployments.
+The tests verify unchanged redeploys, token rotation, empty-token rejection,
+configuration preservation, paths with spaces, and the failed-Hopper gate.
+Native FreeBSD/Windows service-manager validation still requires those hosts.
 
 ## The binary owns its defaults
 
@@ -235,8 +249,10 @@ there is no way to install postdoc on a host and leave scan running beside it.
 ## Memory
 
 postdoc resolves its own ceiling, `min(50% RAM, 32 GiB)`, and sheds work when
-it reaches it. The unit sets `MemoryMax=80%` as a hard backstop. The two are
-layered on purpose: a soft gate that refuses new work first, a kernel kill
+it reaches it. The Linux server unit sets `MemoryMax=min(80% RAM, 128 GiB)`
+as a hard backstop and `MemoryLow` to half that allowance. Explicit
+`MEMORY_MAX`/`MEMORY_LOW` overrides are supported. Standalone workers default
+to 80% RAM without a reclaim-protected floor. The two are layered on purpose: a soft gate that refuses new work first, a kernel kill
 well above it that a `Restart=always` recovers from.
 
 **One consequence worth a decision.** Scan passed `--max-rss-gb -1` under
@@ -245,20 +261,32 @@ throttling "would only turn a leak into a paused worker instead of a restart".
 That is real: a genuine leak now parks postdoc at 50% rather than growing to
 80% and being restarted, and nothing here notices a parked worker. If that
 trade is wrong, `--max-rss-gb -1` restores scan's behaviour — but it should be
-set in `scripts/deploy.sh`, in one place, not per platform.
+set explicitly with `MAX_RSS_GB=-1 make deploy-server`.
 
 ## The unit
 
-`scripts/deploy.sh` owns the systemd unit, and that is where the measured
-settings live: `MemoryMax`/`MemoryLow`, `OOMScoreAdjust=-900` with
+`scripts/deploy.sh` owns the systemd unit, including `MemoryMax`/`MemoryLow`,
+`OOMScoreAdjust=-900` with
 `ManagedOOMPreference=avoid`, `Nice=-20` applied before the privilege drop so
 analysis children inherit it, `CPUWeight`/`IOWeight` at maximum but
 deliberately *not* realtime — a CPU-bound analysis at realtime priority can
 starve sshd and lock the box out. Plus the sandbox: an empty capability
 bounding set, `SystemCallFilter=@system-service`, `ProtectSystem=strict`.
 
-`Delegate=yes` and the `ProtectControlGroups` dance are for `serve` only,
-which needs a freezable cgroup subtree for its companion idle worker.
+The Linux companion keeps its kernel freeze/thaw behavior. With the deployed
+resource policy, the server moves into a foreground leaf and enables delegated
+CPU, IO, and memory controllers. The idle leaf gets CPU/IO weights of 1,
+nice 19, idle IO scheduling, no memory protection, and its own `memory.max`.
+The idle ceiling defaults to half the unit allowance; `IDLE_MEMORY_MAX` may
+lower it. A tighter systemd drop-in also lowers that ceiling. An idle OOM
+kills the idle group and the server supervisor restarts it.
+
+Both leaves remain inside the unit's total memory budget. This deliberately
+retains Postdoc's supervised companion and immediate freezing rather than
+reintroducing Scan's independent idle service. `IDLE` also controls the child
+worker's actual concurrency. Delegation is needed for server idle work;
+`ProtectControlGroups` allows that delegated subtree while protecting the rest
+of the hierarchy.
 
 ## What the process itself carries
 
@@ -318,8 +346,7 @@ log tail. It does not self-elevate: `Start-Process -Verb RunAs` needs an
 interactive desktop and would hang an ssh session waiting for a consent dialog
 nobody can see.
 
-A worker's hopper URL is re-read out of its own unit rather than taken from the
-roster, so a worker pointed at a different queue stays pointed at it. On
+Saved settings preserve each host's Hopper URLs, LLM configuration, and explicit runtime overrides. Older installs recover Hopper URLs from their service rather than from the roster. On
 Windows that means `nssm get postdoc-worker AppParameters`, whose answer is
 UTF-16 and has its NULs stripped before anything tries to tokenize it.
 

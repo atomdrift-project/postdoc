@@ -62,7 +62,7 @@ def local_base(bind):
 
 def health(token_file, bind, timeout, expect_idle="0"):
     base = local_base(bind)
-    token = Path(token_file).read_text().strip()
+    token = next(line.strip() for line in Path(token_file).read_text().splitlines() if line.strip())
     deadline = time.monotonic() + int(timeout)
     last = "no response"
     while time.monotonic() < deadline:
@@ -100,11 +100,22 @@ def main():
     if command == "args":
         # Double quotes work for both ExecStart and rc.d's command_args value.
         print(" ".join(json.dumps(word, ensure_ascii=False) for word in arguments(*args)))
+    elif command == "args-rc":
+        mode, url, home, binary = args
+        text = shlex.join([binary, *arguments(mode, url, home)])
+        print(text.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$").replace("`", "\\`"))
+    elif command == "rc-model":
+        text = shlex.quote("SCAN_LLM_MODEL=" + os.environ["LLM_MODEL"]) if os.environ.get("LLM_MODEL") else ""
+        print(text.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$").replace("`", "\\`"))
+    elif command == "shell-value":
+        print(shlex.quote(args[0]))
     elif command == "unit-env":
         home, service_path, idle = args
         for name, value in (("HOME", home), ("PATH", service_path), ("SCAN_LLM", os.environ.get("LLM", "")),
                             ("SCAN_LLM_MODEL", os.environ.get("LLM_MODEL", "")), ("POSTDOC_IDLE_MEMORY_MAX", idle),
                             ("RUST_BACKTRACE", "1")):
+            if name == "SCAN_LLM_MODEL" and not value:
+                continue
             print("Environment=" + json.dumps(name + "=" + value.replace("%", "%%"), ensure_ascii=False))
     elif command == "save":
         mode, url = args
@@ -135,6 +146,8 @@ def main():
         if not args or args[0] == "serve":
             default = min(default, 128 * 1024 ** 3)
         maximum = memory_bytes(os.environ.get("MEMORY_MAX") or str(default), total)
+        if maximum <= 0:
+            raise ValueError("MEMORY_MAX must be positive")
         low = memory_bytes(os.environ.get("MEMORY_LOW") or str(maximum // 2 if not args or args[0] == "serve" else 0), total)
         idle = memory_bytes(os.environ.get("IDLE_MEMORY_MAX") or str(maximum // 2), total)
         print(f"MEMORY_MAX={maximum}\nMEMORY_LOW={min(low, maximum)}\nIDLE_MEMORY_MAX={min(idle, maximum // 2)}")
