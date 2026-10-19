@@ -13,6 +13,10 @@ name = "postdoc-bench-hopper"
 path = "scripts/bench-hopper.rs"
 required-features = ["bench-hopper"]
 
+[[example]]
+name = "provenance-memory"
+required-features = ["bench-hopper"]
+
 [features]
 default = ["cleave-breadcrumbs", "jemalloc-prof"]
 bench-hopper = ["dep:zstd"]

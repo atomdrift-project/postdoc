@@ -1640,7 +1640,7 @@ enum PrefetchData {
     /// The file exists under `--data`; analyze it in place, nothing staged.
     Local,
     /// Downloaded into memory (small files); counted against the RAM buffer.
-    Memory(bytes::Bytes),
+    Memory(BufferedInput),
     /// Streamed to a spool file on disk (files too big for the RAM buffer);
     /// counted against the disk spool budget until the payload drops.
     Spooled(SpooledPayload),
@@ -1649,11 +1649,89 @@ enum PrefetchData {
 impl PrefetchData {
     /// Bytes this payload holds in RAM while staged (spooled and local payloads
     /// cost no buffer memory).
+    #[cfg(test)]
     fn staged_mem_bytes(&self) -> usize {
         match self {
-            Self::Memory(b) => b.len(),
+            Self::Memory(b) => b.bytes.len(),
             Self::Local | Self::Spooled(_) => 0,
         }
+    }
+}
+
+/// The staging budget follows an input through downloads and gate waits. It
+/// transfers to analysis accounting only when the blocking analysis starts.
+#[derive(Debug)]
+struct InputBudget {
+    limit: usize,
+    used: AtomicUsize,
+    room: Notify,
+}
+
+impl InputBudget {
+    fn new(limit: usize) -> Arc<Self> {
+        Arc::new(Self {
+            limit,
+            used: AtomicUsize::new(0),
+            room: Notify::new(),
+        })
+    }
+
+    async fn reserve(self: &Arc<Self>, bytes: usize) -> Result<InputReservation> {
+        anyhow::ensure!(bytes <= self.limit, "input exceeds staging budget");
+        loop {
+            // Register before checking room so a concurrent release cannot be
+            // missed. Wake every waiter: a smaller request may fit first.
+            let notified = self.room.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self
+                .used
+                .try_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+                    used.checked_add(bytes).filter(|&total| total <= self.limit)
+                })
+                .is_ok()
+            {
+                return Ok(InputReservation {
+                    budget: Arc::clone(self),
+                    bytes,
+                });
+            }
+            notified.await;
+        }
+    }
+}
+
+#[derive(Debug)]
+struct InputReservation {
+    budget: Arc<InputBudget>,
+    bytes: usize,
+}
+
+impl InputReservation {
+    fn shrink(&mut self, bytes: usize) {
+        let released = self.bytes.saturating_sub(bytes);
+        self.bytes -= released;
+        self.budget.used.fetch_sub(released, Ordering::Release);
+        self.budget.room.notify_waiters();
+    }
+}
+
+impl Drop for InputReservation {
+    fn drop(&mut self) {
+        self.shrink(0);
+    }
+}
+
+#[derive(Debug)]
+struct BufferedInput {
+    bytes: bytes::Bytes,
+    reservation: Option<InputReservation>,
+}
+
+impl BufferedInput {
+    fn into_analysis(self) -> bytes::Bytes {
+        drop(self.reservation);
+        self.bytes
     }
 }
 
@@ -2220,8 +2298,8 @@ struct WorkerShared {
     local_index: OnceLock<LocalFileIndex>,
     /// Staged plus in-flight jobs the prefetcher keeps ahead of the slots.
     target_depth: usize,
-    /// Cap on staged payload bytes held in RAM.
-    max_buffer_bytes: usize,
+    /// Downloaded inputs awaiting analysis, including downloads in progress.
+    input_budget: Arc<InputBudget>,
     spool: Arc<SpoolState>,
     admission: Arc<MemoryAdmission>,
     cleave_gate: CleaveGate,
@@ -2230,8 +2308,6 @@ struct WorkerShared {
     /// Second opinions allowed to wait for the LLM endpoint (see
     /// [`second_opinion`]).
     llm_queue: Arc<Semaphore>,
-    /// Staged payload bytes held in RAM.
-    queued_bytes: AtomicUsize,
     /// Staged plus in-flight jobs; bounds the prefetch depth.
     outstanding: AtomicUsize,
     /// Woken whenever a slot takes a staged job, so a prefetcher waiting for
@@ -2270,7 +2346,7 @@ enum Gauge {
 
 impl WorkerShared {
     /// Size every gate and buffer from `config` and the host, and log how.
-    fn new(config: &WorkerConfig, hopper: Hopper) -> Self {
+    fn new(config: &WorkerConfig, mut hopper: Hopper) -> Self {
         let tuning = config.tuning.clone();
         let slots = config.workers.get();
         let pool = rayon::current_num_threads();
@@ -2294,6 +2370,8 @@ impl WorkerShared {
                 .saturating_mul(4)
         });
         let max_buffer_bytes = staged_buffer_bytes();
+        let input_budget = InputBudget::new(max_buffer_bytes);
+        hopper.input_budget = Some(Arc::clone(&input_budget));
         #[expect(
             clippy::cast_precision_loss,
             clippy::cast_possible_truncation,
@@ -2382,7 +2460,7 @@ impl WorkerShared {
             data_root: config.data_dir.clone(),
             local_index: OnceLock::new(),
             target_depth,
-            max_buffer_bytes,
+            input_budget,
             spool: Arc::new(spool),
             // Slot count bounds concurrency but not memory: a slot analysing a
             // huge archive holds it (plus expanded members) resident while a
@@ -2394,7 +2472,6 @@ impl WorkerShared {
             cleave_gate: CleaveGate::new(cleave_slots, small_lane, tuning.small_job_bytes),
             tails: Arc::new(Semaphore::new(tail_cap)),
             llm_queue: Arc::new(Semaphore::new(llm_backlog)),
-            queued_bytes: AtomicUsize::new(0),
             outstanding: AtomicUsize::new(0),
             room: Notify::new(),
             analyzing: AtomicUsize::new(0),
@@ -2419,11 +2496,9 @@ impl WorkerShared {
         }
     }
 
-    /// A slot took `pj` off the staging queue: give back its depth and buffer
-    /// bytes, and wake the prefetcher if it was waiting for room.
-    fn unstage(&self, pj: &PrefetchedJob) {
-        let bytes = pj.data.as_ref().map_or(0, PrefetchData::staged_mem_bytes);
-        self.queued_bytes.fetch_sub(bytes, Ordering::Release);
+    /// Give back queue depth on dispatch. Input bytes remain reserved until
+    /// analysis begins, or cancellation drops the input.
+    fn unstage(&self) {
         self.outstanding.fetch_sub(1, Ordering::Release);
         self.room.notify_one();
     }
@@ -2720,7 +2795,7 @@ async fn next_dispatch(
         () = shared.stop.raised() => return None,
         pj = jobs.recv() => pj?,
     };
-    shared.unstage(&pj);
+    shared.unstage();
     Some((pj, permit))
 }
 
@@ -3095,7 +3170,8 @@ impl SummaryTicker {
             regex_raw_budget_mb = regex_raw.2 as u64 / MIB,
             regex_raw_evictions = regex_raw.3,
             queued_prefetch_jobs = shared.outstanding.load(Ordering::Relaxed),
-            prefetch_buffer_mb = shared.queued_bytes.load(Ordering::Relaxed) as u64 / MIB,
+            prefetch_buffer_mb = shared.input_budget.used.load(Ordering::Relaxed) as u64 / MIB,
+            prefetch_buffer_budget_mb = shared.input_budget.limit as u64 / MIB,
             active_slots = progress.active_slots,
             available_slots = shared.slots.saturating_sub(progress.active_slots),
             in_progress = shared.analyzing.load(Ordering::Relaxed),
@@ -3519,16 +3595,15 @@ async fn prefetch_loop(shared: Arc<WorkerShared>, tx: mpsc::UnboundedSender<Pref
     let mut last_productive = Instant::now();
     let mut dry_warned_at: Option<Instant> = None;
     while !shared.stop.is_raised() {
-        // Hold at the target depth and don't stage more bytes than the budget
-        // allows. Either "buffer full" state waits for a slot to take a job.
+        // Bound claimed jobs here; each download separately reserves bytes
+        // before allocating, rather than allowing a whole batch to overshoot.
         let room = shared
             .target_depth
             .saturating_sub(shared.outstanding.load(Ordering::Acquire));
         // Published every iteration: 0 is the heartbeat's signal that the
         // worker is saturated and deliberately not polling.
         shared.poll_state.buffer_room.store(room, Ordering::Release);
-        let over_budget = shared.queued_bytes.load(Ordering::Acquire) >= shared.max_buffer_bytes;
-        if room == 0 || over_budget {
+        if room == 0 {
             // Full buffer: this worker is saturated, not starved.
             last_productive = Instant::now();
             dry_warned_at = None;
@@ -3655,8 +3730,6 @@ async fn stage_claimed(
     while let Some(res) = downloads.join_next().await {
         match res {
             Ok(mut pj) => {
-                let bytes = pj.data.as_ref().map_or(0, PrefetchData::staged_mem_bytes);
-                shared.queued_bytes.fetch_add(bytes, Ordering::Release);
                 // Enters the local queue now; tracked until its tail finishes.
                 pj.queue_id = shared.metrics.enqueue();
                 if tx.send(pj).is_err() {
@@ -3756,7 +3829,12 @@ async fn fetch_payload(
         // a body that outgrows RAM reroutes to the spool (which caps at
         // MAX_JOB_BYTES) instead of buffering unboundedly.
         match hopper
-            .download_bytes_with_limit(&job.sha256, &job.path, spool.mem_threshold_bytes as u64)
+            .download_input(
+                &job.sha256,
+                &job.path,
+                spool.mem_threshold_bytes as u64,
+                job.size(),
+            )
             .await
         {
             Ok(bytes) => return Ok(PrefetchData::Memory(bytes)),
@@ -3902,7 +3980,7 @@ async fn run_job(
     };
 
     let input_size = match &payload {
-        Some(PrefetchData::Memory(bytes)) => bytes.len() as u64,
+        Some(PrefetchData::Memory(input)) => input.bytes.len() as u64,
         Some(PrefetchData::Spooled(spooled)) => spooled.size,
         Some(PrefetchData::Local) | None => job.size().unwrap_or(0),
     };
@@ -4034,7 +4112,9 @@ async fn run_job(
                 ..scan::analysis::Analysis::new(&label, &resources, shared.slow_rule_ms)
             };
             let result = match (payload, local.as_ref()) {
-                (Some(PrefetchData::Memory(data)), _) => classify_bytes(data, analysis),
+                (Some(PrefetchData::Memory(data)), _) => {
+                    classify_bytes(data.into_analysis(), analysis)
+                }
                 (Some(PrefetchData::Spooled(spooled)), _) => classify_file(&spooled.path, analysis),
                 (_, Some(path)) => classify_file(path, analysis),
                 (None | Some(PrefetchData::Local), None) => Err(anyhow::anyhow!(
@@ -4181,7 +4261,7 @@ async fn sniff(payload: Option<&PrefetchData>, local: Option<&Path>) -> Option<V
     let n = crate::admission::SNIFF_BYTES;
     let path = match (payload, local) {
         (Some(PrefetchData::Memory(bytes)), _) => {
-            return Some(bytes[..bytes.len().min(n)].to_vec());
+            return Some(bytes.bytes[..bytes.bytes.len().min(n)].to_vec());
         }
         (Some(PrefetchData::Spooled(spooled)), _) => spooled.path.to_path_buf(),
         (_, Some(path)) => path.to_path_buf(),
@@ -4341,6 +4421,7 @@ struct Hopper {
     /// Bearer token; hopper requires it on all of `/api/*` and `/data/`, and
     /// does not exempt loopback. See [`scan::upload::hopper_token`].
     token: Option<&'static str>,
+    input_budget: Option<Arc<InputBudget>>,
 }
 
 impl Hopper {
@@ -4364,6 +4445,7 @@ impl Hopper {
             worker: worker.to_owned(),
             tools: scan::tools::available_names().join(","),
             token: hopper_token(),
+            input_budget: None,
         })
     }
 
@@ -4706,14 +4788,51 @@ impl Hopper {
         path: &str,
         max_bytes: u64,
     ) -> Result<bytes::Bytes> {
+        self.download_input(sha256, path, max_bytes, None)
+            .await
+            .map(BufferedInput::into_analysis)
+    }
+
+    async fn download_input(
+        &self,
+        sha256: &str,
+        path: &str,
+        max_bytes: u64,
+        size_hint: Option<u64>,
+    ) -> Result<BufferedInput> {
         let start = Instant::now();
-        let (mut resp, route) = self.download_response(sha256, path).await?;
+        let reserve_bytes = usize::try_from(size_hint.unwrap_or(max_bytes).min(max_bytes))?;
+        let mut reservation = match &self.input_budget {
+            Some(budget) => Some(budget.reserve(reserve_bytes).await?),
+            None => None,
+        };
+        let (mut resp, mut route) = self.download_response(sha256, path).await?;
+        // Hopper's size is a hint, not a trusted allocation bound. If the
+        // headers need more room, release the response before waiting and
+        // retry with a full reservation. Waiting with a live response would
+        // consume its HTTP timeout while no download was actually running.
+        let required = resp.content_length().unwrap_or(max_bytes).min(max_bytes);
+        if reservation
+            .as_ref()
+            .is_some_and(|r| (r.bytes as u64) < required)
+        {
+            drop(resp);
+            drop(reservation.take());
+            if let Some(budget) = &self.input_budget {
+                reservation = Some(budget.reserve(usize::try_from(required)?).await?);
+            }
+            (resp, route) = self.download_response(sha256, path).await?;
+        }
+        // If the second response changed size again, use the existing spool
+        // fallback; never expand an already-held reservation and deadlock a
+        // batch of downloads all waiting for additional room.
+        let body_limit = reservation.as_ref().map_or(max_bytes, |r| r.bytes as u64);
         let url = resp.url().to_string();
         if let Some(claimed) = resp.content_length()
-            && claimed > max_bytes
+            && claimed > body_limit
         {
             anyhow::bail!(
-                "{DOWNLOAD_LIMIT_EXCEEDED}: Content-Length {claimed} exceeds {max_bytes} bytes: path={path} sha256={sha256} url={url}",
+                "{DOWNLOAD_LIMIT_EXCEEDED}: Content-Length {claimed} exceeds {body_limit} bytes: path={path} sha256={sha256} url={url}",
             );
         }
         // Most hopper responses know their length. Allocate it once instead
@@ -4727,22 +4846,34 @@ impl Hopper {
         while let Some(chunk) = resp.chunk().await.with_context(|| {
             format!("download body failed: path={path} sha256={sha256} url={url}")
         })? {
-            if buf.len() as u64 + chunk.len() as u64 > max_bytes {
+            if buf.len() as u64 + chunk.len() as u64 > body_limit {
                 anyhow::bail!(
-                    "{DOWNLOAD_LIMIT_EXCEEDED}: body exceeds {max_bytes} bytes: path={path} sha256={sha256} url={url}",
+                    "{DOWNLOAD_LIMIT_EXCEEDED}: body exceeds {body_limit} bytes: path={path} sha256={sha256} url={url}",
                 );
+            }
+            // Vec's geometric growth can exceed the reservation near the
+            // limit, even when the body fits. Bound capacity as well as length.
+            let needed = buf.len() + chunk.len();
+            if needed > buf.capacity() {
+                let capacity = needed.next_power_of_two().min(usize::try_from(body_limit)?);
+                buf.reserve_exact(capacity - buf.len());
             }
             buf.extend_from_slice(&chunk);
         }
         // Unknown/chunked lengths still grow geometrically; release their
         // unused capacity before handing ownership to the long-lived queue.
         buf.shrink_to_fit();
+        if let Some(reservation) = &mut reservation {
+            reservation.shrink(buf.len());
+        }
         let bytes = bytes::Bytes::from(buf);
         // Up to half the staging buffer — gigabytes — so hashed off the async
         // threads.
-        let digest: [u8; 32] = {
+        let (digest, reservation): ([u8; 32], _) = {
             let bytes = bytes.clone();
-            tokio::task::spawn_blocking(move || Sha256::digest(&bytes).into())
+            // Cancellation cannot release the budget while the blocking hash
+            // still owns a clone of the input.
+            tokio::task::spawn_blocking(move || (Sha256::digest(&bytes).into(), reservation))
                 .await
                 .context("hashing the download")?
         };
@@ -4754,7 +4885,7 @@ impl Hopper {
             elapsed_ms = scan::duration_ms(start.elapsed()),
             "download complete via {route}",
         );
-        Ok(bytes)
+        Ok(BufferedInput { bytes, reservation })
     }
 
     /// Stream a payload to a new spool file instead of buffering it in RAM, so
@@ -5790,7 +5921,8 @@ mod tests {
         let shared = test_shared(&config, |shared| {
             shared.spool = test_spool(1 << 20);
             shared.target_depth = 8;
-            shared.max_buffer_bytes = 1 << 30;
+            shared.input_budget = InputBudget::new(1 << 30);
+            shared.hopper.input_budget = Some(Arc::clone(&shared.input_budget));
         });
         let handle = tokio::spawn(prefetch_loop(Arc::clone(&shared), tx));
 
@@ -5978,13 +6110,17 @@ mod tests {
             respond(&mut stream, "200 OK", PAYLOAD).await;
         });
         let expected = sha256_hex(b"expected bytes");
-        let err = test_hopper(&format!("http://{addr}"))
-            .download_bytes(&expected, "incoming/sample.bin")
+        let budget = InputBudget::new(100);
+        let mut hopper = test_hopper(&format!("http://{addr}"));
+        hopper.input_budget = Some(Arc::clone(&budget));
+        let err = hopper
+            .download_input(&expected, "incoming/sample.bin", 100, None)
             .await
             .expect_err("mismatched bytes must fail")
             .to_string();
         assert!(err.contains("sha256 mismatch"), "{err}");
         assert!(err.contains(&sha256_hex(PAYLOAD)), "{err}");
+        assert_eq!(budget.used.load(Ordering::Acquire), 0);
         server.await.unwrap();
     }
 
@@ -6018,6 +6154,122 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn input_budget_follows_downloads_until_analysis() {
+        let payload = vec![b'x'; 32 * 1024 + 1];
+        // Exercise exact, understated, and unknown response lengths. The
+        // budget is smaller than the batch, just as on a busy live worker.
+        for (chunked, hint) in [(false, payload.len()), (false, 1), (true, 1)] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let body = payload.clone();
+            let server = tokio::spawn(async move {
+                loop {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    let body = body.clone();
+                    tokio::spawn(async move {
+                        let _ = read_target(&mut stream).await;
+                        if chunked {
+                            respond_chunked(&mut stream, &body).await;
+                        } else {
+                            respond(&mut stream, "200 OK", &body).await;
+                        }
+                    });
+                }
+            });
+            let budget = InputBudget::new(2 * payload.len());
+            let mut hopper = test_hopper(&format!("http://{addr}"));
+            hopper.input_budget = Some(Arc::clone(&budget));
+            let hopper = Arc::new(hopper);
+            let mut downloads = JoinSet::new();
+            for _ in 0..6 {
+                let hopper = Arc::clone(&hopper);
+                let digest = sha256_hex(&payload);
+                let limit = 2 * payload.len() as u64;
+                downloads.spawn(async move {
+                    hopper
+                        .download_input(&digest, "sample.bin", limit, Some(hint as u64))
+                        .await
+                });
+            }
+            let first = tokio::time::timeout(Duration::from_secs(5), downloads.join_next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            // Full reservations for unknown bodies can serialize downloads;
+            // starting analysis must always let the next one proceed.
+            assert_eq!(first.bytes.as_ref(), payload);
+            assert!(budget.used.load(Ordering::Acquire) <= budget.limit);
+            let bytes_in_analysis = first.into_analysis();
+            let second = tokio::time::timeout(Duration::from_secs(5), downloads.join_next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert_eq!(second.bytes.as_ref(), payload);
+            assert!(budget.used.load(Ordering::Acquire) <= budget.limit);
+            if !chunked {
+                let third = tokio::time::timeout(Duration::from_secs(5), downloads.join_next())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(budget.used.load(Ordering::Acquire), budget.limit);
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(30), downloads.join_next())
+                        .await
+                        .is_err()
+                );
+                drop(third);
+            }
+            downloads.abort_all();
+            while downloads.join_next().await.is_some() {}
+            drop(second);
+            assert_eq!(budget.used.load(Ordering::Acquire), 0);
+            assert_eq!(bytes_in_analysis.as_ref(), payload);
+            server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_partial_download_releases_input_budget() {
+        use tokio::io::AsyncWriteExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (sent, received) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let _ = read_target(&mut stream).await;
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nx")
+                .await
+                .unwrap();
+            sent.send(()).unwrap();
+            std::future::pending::<()>().await;
+        });
+        let budget = InputBudget::new(100);
+        let mut hopper = test_hopper(&format!("http://{addr}"));
+        hopper.input_budget = Some(Arc::clone(&budget));
+        let download = tokio::spawn(async move {
+            hopper
+                .download_input(&"0".repeat(64), "sample.bin", 100, Some(100))
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(5), received)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(budget.used.load(Ordering::Acquire), 100);
+        download.abort();
+        assert!(download.await.unwrap_err().is_cancelled());
+        assert_eq!(budget.used.load(Ordering::Acquire), 0);
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn saturated_tails_leave_payloads_in_the_counted_queue() {
         let shared = test_shared(&test_config("http://127.0.0.1:1"), |s| {
             s.tails = Arc::new(Semaphore::new(1));
@@ -6026,10 +6278,13 @@ mod tests {
         let (tx, rx) = mpsc::unbounded_channel();
         let jobs = JobSource::new(rx, DispatchOrder::Fifo, Duration::ZERO);
         shared.outstanding.store(1, Ordering::Release);
-        shared.queued_bytes.store(7, Ordering::Release);
+        let reservation = shared.input_budget.reserve(7).await.unwrap();
         tx.send(PrefetchedJob {
             job: claim_job(&sha256_hex(b"payload"), "sample.bin", 7),
-            data: Ok(PrefetchData::Memory(bytes::Bytes::from_static(b"payload"))),
+            data: Ok(PrefetchData::Memory(BufferedInput {
+                bytes: bytes::Bytes::from_static(b"payload"),
+                reservation: Some(reservation),
+            })),
             queue_id: 0,
         })
         .unwrap_or_else(|_| panic!("queue closed"));
@@ -6044,13 +6299,15 @@ mod tests {
             assert_eq!(shared.dispatching.load(Ordering::Acquire), 1);
         }
         assert_eq!(shared.dispatching.load(Ordering::Acquire), 0);
-        assert_eq!(shared.queued_bytes.load(Ordering::Acquire), 7);
+        assert_eq!(shared.input_budget.used.load(Ordering::Acquire), 7);
         assert_eq!(shared.outstanding.load(Ordering::Acquire), 1);
         assert_eq!(jobs.state.lock().await.rx.len(), 1);
         drop(occupied);
         let (pj, permit) = next_dispatch(&shared, &jobs).await.unwrap();
         assert_eq!(pj.data.as_ref().unwrap().staged_mem_bytes(), 7);
-        assert_eq!(shared.queued_bytes.load(Ordering::Acquire), 0);
+        assert_eq!(shared.input_budget.used.load(Ordering::Acquire), 7);
+        drop(pj);
+        assert_eq!(shared.input_budget.used.load(Ordering::Acquire), 0);
         assert_eq!(shared.outstanding.load(Ordering::Acquire), 0);
         drop(permit);
         {
@@ -6133,15 +6390,12 @@ mod tests {
                 });
             }
         });
-        for claimed in [4i64, -1] {
+        for claimed in [4i64, 1, -1] {
             let job = claim_job(&sha256_hex(PAYLOAD), "samples/big.bin", claimed);
-            let pj = prefetch_one(
-                &test_hopper(&format!("http://127.0.0.1:{port}")),
-                None,
-                &test_spool(4),
-                job,
-            )
-            .await;
+            let budget = InputBudget::new(8);
+            let mut hopper = test_hopper(&format!("http://127.0.0.1:{port}"));
+            hopper.input_budget = Some(Arc::clone(&budget));
+            let pj = prefetch_one(&hopper, None, &test_spool(4), job).await;
             let data = pj
                 .data
                 .unwrap_or_else(|e| panic!("claimed={claimed}: oversize body must spool, got {e}"));
@@ -6149,6 +6403,7 @@ mod tests {
                 panic!("claimed={claimed}: over-threshold body must not stage in memory");
             };
             assert_eq!(std::fs::read(&payload.path).unwrap(), PAYLOAD);
+            assert_eq!(budget.used.load(Ordering::Acquire), 0);
         }
     }
 
@@ -6249,7 +6504,8 @@ mod tests {
         let shared = test_shared(&config, |shared| {
             shared.spool = test_spool(1 << 20);
             shared.target_depth = target_depth;
-            shared.max_buffer_bytes = 1 << 30;
+            shared.input_budget = InputBudget::new(1 << 30);
+            shared.hopper.input_budget = Some(Arc::clone(&shared.input_budget));
         });
         let handle = tokio::spawn(prefetch_loop(Arc::clone(&shared), tx));
 
@@ -6275,9 +6531,11 @@ mod tests {
         //    refills back to target, polling the hopper again.
         for _ in 0..slots {
             let pj = rx.recv().await.unwrap();
-            shared.unstage(&pj);
+            shared.unstage();
             match pj.data.unwrap() {
-                PrefetchData::Memory(bytes) => assert_eq!(&bytes[..], PAYLOAD, "payload mismatch"),
+                PrefetchData::Memory(input) => {
+                    assert_eq!(&input.bytes[..], PAYLOAD, "payload mismatch")
+                }
                 PrefetchData::Local | PrefetchData::Spooled(_) => {
                     panic!("small payload should stage in memory")
                 }

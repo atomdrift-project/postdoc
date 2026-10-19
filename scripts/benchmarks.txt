@@ -35,6 +35,73 @@ This is a heap/queue benchmark, not proof of a whole-service memory ceiling or
 tmpfs performance. For production, also inspect the service's memory.current,
 memory.stat (anon and shmem), memory.events, and /tmp occupancy.
 
+A worker replay can also include helpers, tmpfs, and file-cache charges by
+running it as the sole initial process in a dedicated cgroup. For example:
+
+  doas systemd-run --unit=postdoc-bench-before \
+    -p User=t -p WorkingDirectory="$PWD" -p MemoryMax=64G -p MemorySwapMax=0 \
+    -p RemainAfterExit=yes -p TemporaryFileSystem=/tmp:rw,mode=1777,size=16G \
+    --setenv=SCAN_MODELS_DIR="$PWD/out/bench-assets/models" \
+    --setenv=CLEAVE_TRAITS_DIR="$PWD/out/bench-assets/traits" \
+    --setenv=XDG_CACHE_HOME="$PWD/out/bench-cache" \
+    python3 scripts/bench-worker.py CORPUS out/replay-before \
+      --binary BEFORE_BINARY --workers 96 --max-rss-gb 54 --fetch all \
+      --allocator-config retain:true,muzzy_decay_ms:0 \
+      --scratch-root /tmp --measure-cgroup
+
+Choose a new unit/output name for each run and the same resource settings for
+both binaries. The private tmpfs keeps benchmark extraction separate from
+other users of /tmp while retaining the production filesystem size. MemoryMax above reproduces the existing production idle-worker
+cgroup; it is a benchmark setting, not a proposed new production cap. Poll
+systemctl show UNIT -p SubState -p ExecMainStatus; systemd-run returns before
+the benchmark finishes. Stop the transient unit after collecting its results.
+
+--measure-cgroup refuses a shared cgroup at startup. memory.jsonl records
+whole-cgroup current/peak memory, anon, shmem, file cache, kernel, and OOM
+counters. summary.json retains these along with worker RSS. Per-type sampled
+peaks can occur at different times, so do not add them together. Disk output
+and input page-cache charges are included in file; shmem is a subset of file.
+--scratch-root creates a private directory and removes it after stopping all
+benchmark processes. A failed/timed-out run writes failure.json with partial
+progress; it is never represented as a completed benchmark.
+
+fingerprint-content.json hashes the full raw report (traits, evidence, facts,
+member order) and ML output separately, excluding only ML analyzed_at. Compare
+it as well as fingerprint.json's level decisions. Live registry responses can
+change between fetch-enabled runs, so investigate differences before blaming
+or accepting a code change. --fetch none gives a stable local-input comparison.
+
+For a whole-service observation, including its foreground and idle child
+cgroups, run (with doas when the service's cgroup is not readable):
+
+  doas python3 scripts/monitor-memory.py out/service-memory.jsonl \
+    --duration 1200 --interval 15
+
+The output path must be new. Cgroup counters include helpers and tmpfs;
+per-process RSS is additional attribution, not an additive accounting of
+shared pages. Preserve both memory.stat and memory.events when diagnosing
+OOMs. The inode identifies cgroup recreation across service restarts.
+
+Worker prefetch_buffer_mb now measures reserved input space during download,
+queueing, and admission waits. It is released when blocking analysis starts,
+or when a cancelled/failed input is dropped. prefetch_buffer_budget_mb reports
+the existing staging budget. Unknown HTTP lengths reserve their maximum until
+the actual size is known, so reserved bytes can exceed current buffer length.
+Analysis allocations remain governed by the separate admission mechanism.
+
+Registry retention benchmark (Linux): put zstd-compressed raw registry JSON
+documents in a fixture directory, then run the same fixtures/repetitions
+against each dependency build:
+
+  _RJEM_MALLOC_CONF=prof:false,retain:true,dirty_decay_ms:0,muzzy_decay_ms:0 \
+    cargo run --release --features bench-hopper --example provenance-memory \
+    -- out/registry-fixtures 4
+
+This holds the generated provenance documents while measuring process RSS,
+then encodes their capped upload sidecars. Compare upload_sha256 and document
+counts as well as time and RSS. Keep fixture hashes and compiler/allocator
+settings fixed. It measures this stage, not end-to-end service throughput.
+
 Use worker-heap-benchmark with a distinct output directory to collect sampled
 heap profiles. Sampling changes timing: never compare a profiled run's wall
 time against an unprofiled run. Profiles are stored under output/heap, on disk.

@@ -3,17 +3,20 @@
 
 from __future__ import annotations
 
+import argparse
+import hashlib
 import json
 import pathlib
 import sys
 
 
 def main() -> int:
-    if len(sys.argv) != 2:
-        print(f"usage: {sys.argv[0]} RESPONSE_DIR", file=sys.stderr)
-        return 2
-
-    response_dir = pathlib.Path(sys.argv[1])
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("response_dir", type=pathlib.Path)
+    parser.add_argument("--content", action="store_true",
+                        help="also hash complete raw findings and ML output, excluding only ML analyzed_at")
+    args = parser.parse_args()
+    response_dir = args.response_dir
     fingerprint = []
     for path in sorted(response_dir.glob("*.json")):
         text = path.read_text(encoding="utf-8")
@@ -36,9 +39,18 @@ def main() -> int:
                 {"file": path.name.removesuffix(".json"), "error": error}
             )
             continue
+        content = {}
+        if args.content:
+            raw = response.get("raw")
+            if not isinstance(raw, dict):
+                raise ValueError(f"{path}: --content requires a raw report")
+            for name, value in (("raw", raw), ("ml", {k: v for k, v in ml.items() if k != "analyzed_at"})):
+                encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+                content[name + "_sha256"] = hashlib.sha256(encoded).hexdigest()
         fingerprint.append(
             {
                 "file": path.name.removesuffix(".json"),
+                **content,
                 "lvl": ml.get("lvl"),
                 "files": [
                     {

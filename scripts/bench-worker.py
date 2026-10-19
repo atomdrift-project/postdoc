@@ -14,6 +14,7 @@ from pathlib import Path
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 
 
@@ -32,6 +33,15 @@ def stop(process):
         process.wait()
 
 
+def cgroup_sample(group):
+    stats = dict(line.split() for line in (group / "memory.stat").read_text().splitlines())
+    events = dict(line.split() for line in (group / "memory.events").read_text().splitlines())
+    return {"current_bytes": int((group / "memory.current").read_text()),
+            "peak_bytes": int((group / "memory.peak").read_text()),
+            **{name + "_bytes": int(stats.get(name, 0)) for name in ("anon", "shmem", "file", "kernel")},
+            "events": {name: int(value) for name, value in events.items()}}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("dataset", type=Path)
@@ -46,12 +56,24 @@ def main():
     parser.add_argument("--allocator-config", default="",
                         help="jemalloc options for allocator tuning experiments")
     parser.add_argument("--heap", action="store_true")
+    parser.add_argument("--measure-cgroup", action="store_true",
+                        help="measure a dedicated enclosing cgroup, including helpers, tmpfs, and file cache")
+    parser.add_argument("--scratch-root", type=Path,
+                        help="create and clean private scratch under this directory (e.g. /tmp); default: output/scratch")
     args = parser.parse_args()
     if not args.dataset.is_dir() or args.workers < 1:
         parser.error("dataset must be a directory and workers must be positive")
     for path in (args.binary, args.hopper):
         if not path.is_file() or not os.access(path, os.X_OK):
             parser.error(f"not executable: {path}")
+    group = None
+    if args.measure_cgroup:
+        membership = next(line[3:] for line in Path("/proc/self/cgroup").read_text().splitlines()
+                          if line.startswith("0::"))
+        group = Path("/sys/fs/cgroup") / membership.lstrip("/")
+        members = {int(pid) for pid in (group / "cgroup.procs").read_text().split()}
+        if members != {os.getpid()}:
+            parser.error("--measure-cgroup requires a dedicated cgroup containing only this harness at startup")
     output = args.output.resolve()
     if output == args.dataset.resolve() or args.dataset.resolve() in output.parents:
         parser.error("output must be outside the input dataset")
@@ -78,10 +100,14 @@ def main():
     if args.heap:
         (output / "heap").mkdir()
         env["_RJEM_MALLOC_CONF"] = allocator_prefix + f"prof:true,prof_active:true,lg_prof_sample:21,lg_prof_interval:34,prof_final:true,prof_prefix:{output}/heap/jeprof"
-    # Keep benchmark extraction separate from the live service's /tmp. Both
-    # A/B runs must use this same filesystem; this measures heap, not tmpfs.
-    scratch = output / "scratch"
-    scratch.mkdir()
+    # Default to disk-backed scratch for heap-only comparisons. A dedicated
+    # cgroup replay can opt into /tmp to include tmpfs charges as in production.
+    # Both A/B runs must use the same scratch filesystem.
+    scratch_cleanup = (tempfile.TemporaryDirectory(prefix="postdoc-bench-", dir=args.scratch_root)
+                       if args.scratch_root else None)
+    scratch = Path(scratch_cleanup.name).resolve() if scratch_cleanup else output / "scratch"
+    if scratch_cleanup is None:
+        scratch.mkdir()
     env.update(TMPDIR=str(scratch), TMP=str(scratch), TEMP=str(scratch))
     (output / "config.json").write_text(json.dumps({
         "binary": str(args.binary.resolve()), "workers": args.workers,
@@ -90,9 +116,19 @@ def main():
         "fetch": args.fetch, "heap_sampling": args.heap, "scratch": str(scratch),
         "binary_sha256": hashlib.sha256(args.binary.read_bytes()).hexdigest(),
         "models_dir": env.get("SCAN_MODELS_DIR"), "traits_dir": env.get("CLEAVE_TRAITS_DIR"),
-        "cache_dir": env.get("XDG_CACHE_HOME"),
+        "cache_dir": env.get("XDG_CACHE_HOME"), "cgroup": str(group) if group else None,
+        "tuning_env": {name: env[name] for name in (
+            "SCAN_CLEAVE_CONCURRENCY", "SCAN_SMALL_LANE", "SCAN_SMALL_JOB_MB",
+            "SCAN_TAILS", "SCAN_PREFETCH_DEPTH", "SCAN_SJF", "SCAN_SJF_MAX_WAIT_SECS",
+            "CLEAVE_MEMBER_WINDOW_MB", "CLEAVE_MEMBER_WINDOW_COUNT",
+            "CLEAVE_PIPELINE_MEMBER_WINDOWS", "CLEAVE_RAYON_THREADS", "RAYON_NUM_THREADS",
+        ) if name in env},
     }, indent=2) + "\n")
     hopper = worker = None
+    started = time.monotonic()
+    peak_kib = peak_mappings = 0
+    group_start = cgroup_sample(group) if group else None
+    group_peak = {}
     try:
         with (output / "hopper.log").open("w") as log, (output / "hopper.err").open("w") as err:
             hopper = subprocess.Popen([str(args.hopper.resolve()), "--dataset", str(args.dataset.resolve()),
@@ -128,6 +164,11 @@ def main():
                         rss = int(status.get("VmRSS", "0 kB").split()[0])
                         peak_kib = max(peak_kib, int(status.get("VmHWM", "0 kB").split()[0]))
                         sample = {"elapsed_s": elapsed, "rss_kib": rss, "peak_kib": peak_kib}
+                        if group:
+                            sample["cgroup"] = cgroup_sample(group)
+                            for name in ("anon", "shmem", "file", "kernel"):
+                                key = name + "_bytes"
+                                group_peak[key] = max(group_peak.get(key, 0), sample["cgroup"][key])
                         if elapsed - last_mapping_check >= 10:
                             with Path(f"/proc/{worker.pid}/maps").open() as mappings:
                                 count = sum(1 for _ in mappings)
@@ -146,15 +187,39 @@ def main():
                 raise RuntimeError(f"incomplete run: {summary['done']} of {len(manifest)}")
             with (output / "fingerprint.json").open("w") as fp:
                 subprocess.run([sys.executable, str(Path(__file__).with_name("detect-fingerprint.py")), str(output / "responses")], stdout=fp, check=True)
+            with (output / "fingerprint-content.json").open("w") as fp:
+                subprocess.run([sys.executable, str(Path(__file__).with_name("detect-fingerprint.py")),
+                                str(output / "responses"), "--content"], stdout=fp, check=True)
             fingerprint = json.loads((output / "fingerprint.json").read_text())
             summary.update(process_wall_s=time.monotonic() - started, peak_rss_mib=peak_kib / 1024,
                            peak_sampled_mappings=peak_mappings, heap_sampling=args.heap,
                            analysis_errors=sum("error" in entry for entry in fingerprint))
+            if group:
+                summary["cgroup"] = {"start": group_start, "final": cgroup_sample(group),
+                                     "sampled_peak_by_type": group_peak}
             (output / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
             print(json.dumps(summary, indent=2))
+    except BaseException as error:
+        failure = {"outcome": "failed", "error_type": type(error).__name__,
+                   "error": str(error), "process_wall_s": time.monotonic() - started,
+                   "peak_rss_mib": peak_kib / 1024, "peak_sampled_mappings": peak_mappings,
+                   "heap_sampling": args.heap, "expected_jobs": len(manifest)}
+        if group:
+            failure["cgroup"] = {"start": group_start, "final": cgroup_sample(group),
+                                 "sampled_peak_by_type": group_peak}
+        progress = output / "hopper-summary.json"
+        if progress.exists():
+            try:
+                failure["progress"] = json.loads(progress.read_text())
+            except (OSError, ValueError):
+                pass
+        (output / "failure.json").write_text(json.dumps(failure, indent=2) + "\n")
+        raise
     finally:
         stop(worker)
         stop(hopper)
+        if scratch_cleanup:
+            scratch_cleanup.cleanup()
 
 
 if __name__ == "__main__":
