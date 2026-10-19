@@ -1710,14 +1710,31 @@ impl std::fmt::Display for PrefetchError {
 /// A payload streamed to disk. Dropping it deletes the spool file and releases
 /// its reservation from the spool budget.
 struct SpooledPayload {
-    /// Deletes the file on drop. Declared before `spool` so the file is gone
+    /// Deletes the file on drop. Declared before `_reservation` so the file is gone
     /// before the budget reopens.
     path: tempfile::TempPath,
+    size: u64,
+    _reservation: SpoolReservation,
+}
+
+/// Own the reservation across download awaits as well as analysis. Cancelling
+/// an in-progress download must release its budget just like an ordinary error.
+struct SpoolReservation {
     size: u64,
     spool: Arc<SpoolState>,
 }
 
-impl Drop for SpooledPayload {
+impl SpoolReservation {
+    fn new(spool: &Arc<SpoolState>, size: u64) -> Result<Self> {
+        spool.try_reserve(size)?;
+        Ok(Self {
+            size,
+            spool: Arc::clone(spool),
+        })
+    }
+}
+
+impl Drop for SpoolReservation {
     fn drop(&mut self) {
         self.spool.release(self.size);
     }
@@ -3725,44 +3742,30 @@ async fn fetch_payload(
             Ok(bytes) => return Ok(PrefetchData::Memory(bytes)),
             Err(e) if e.to_string().contains(DOWNLOAD_LIMIT_EXCEEDED) => {
                 let reserve = size.max(spool.mem_threshold_bytes as u64 + 1);
-                spool
-                    .try_reserve(reserve)
+                let reservation = SpoolReservation::new(spool, reserve)
                     .with_context(|| format!("cannot spool oversize payload for {}", job.sha256))?;
-                return match hopper
+                let path = hopper
                     .download_to_spool(spool, &job.sha256, &job.path)
-                    .await
-                {
-                    Ok(path) => Ok(PrefetchData::Spooled(SpooledPayload {
-                        path,
-                        size: reserve,
-                        spool: Arc::clone(spool),
-                    })),
-                    Err(e) => {
-                        spool.release(reserve);
-                        Err(e)
-                    }
-                };
+                    .await?;
+                return Ok(PrefetchData::Spooled(SpooledPayload {
+                    path,
+                    size: reserve,
+                    _reservation: reservation,
+                }));
             }
             Err(e) => return Err(e),
         }
     }
-    spool
-        .try_reserve(size)
+    let reservation = SpoolReservation::new(spool, size)
         .with_context(|| format!("cannot spool {size}-byte payload for {}", job.sha256))?;
-    match hopper
+    let path = hopper
         .download_to_spool(spool, &job.sha256, &job.path)
-        .await
-    {
-        Ok(path) => Ok(PrefetchData::Spooled(SpooledPayload {
-            path,
-            size,
-            spool: Arc::clone(spool),
-        })),
-        Err(e) => {
-            spool.release(size);
-            Err(e)
-        }
-    }
+        .await?;
+    Ok(PrefetchData::Spooled(SpooledPayload {
+        path,
+        size,
+        _reservation: reservation,
+    }))
 }
 
 /// Why a job produced no verdict. `Display` is the text posted to hopper,
@@ -5627,6 +5630,68 @@ mod tests {
         drop(payload);
         assert!(!spool_path.exists());
         assert_eq!(spool.used.load(Ordering::Acquire), 0);
+    }
+
+    #[tokio::test]
+    async fn cancelled_download_removes_partial_spool_and_releases_budget() {
+        use tokio::io::AsyncWriteExt as _;
+
+        // Cover both a known large payload and the unknown-size fallback from
+        // the bounded memory download to disk.
+        for claimed_size in [64, -1] {
+            let parent = tempfile::tempdir().unwrap();
+            let spool = Arc::new(SpoolState {
+                dir: parent.path().to_path_buf(),
+                budget_bytes: 128,
+                used: AtomicU64::new(0),
+                mem_threshold_bytes: 4,
+                disk_headroom_bytes: 0,
+            });
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let mut streams = Vec::new();
+                loop {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    read_target(&mut stream).await.unwrap();
+                    stream
+                        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 64\r\n\r\npartial!")
+                        .await
+                        .unwrap();
+                    // Hold the connection open with an unfinished body.
+                    streams.push(stream);
+                }
+            });
+            let download_spool = Arc::clone(&spool);
+            let download = tokio::spawn(async move {
+                fetch_payload(
+                    &test_hopper(&format!("http://{addr}")),
+                    &download_spool,
+                    &claim_job(&sha256_hex(&[0; 64]), "samples/partial.bin", claimed_size),
+                )
+                .await
+            });
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let partial_exists = std::fs::read_dir(parent.path())
+                        .unwrap()
+                        .any(|entry| entry.unwrap().metadata().unwrap().len() > 0);
+                    if partial_exists {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("download should create a partial spool file");
+            assert!(spool.used.load(Ordering::Acquire) > 0);
+            download.abort();
+            assert!(download.await.err().unwrap().is_cancelled());
+            assert_eq!(std::fs::read_dir(parent.path()).unwrap().count(), 0);
+            assert_eq!(spool.used.load(Ordering::Acquire), 0);
+            server.abort();
+            let _ = server.await;
+        }
     }
 
     /// A writer that collects formatted log output so a test can assert on what
