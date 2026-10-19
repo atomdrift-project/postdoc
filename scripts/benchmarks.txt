@@ -69,7 +69,17 @@ fingerprint-content.json hashes the full raw report (traits, evidence, facts,
 member order) and ML output separately, excluding only ML analyzed_at. Compare
 it as well as fingerprint.json's level decisions. Live registry responses can
 change between fetch-enabled runs, so investigate differences before blaming
-or accepting a code change. --fetch none gives a stable local-input comparison.
+or accepting a code change. --fetch none fixes the local inputs, but evaluation
+deadlines, helper timeouts, and nondeterministic evidence selection can still
+change reports. Repeat the baseline and inspect changed fields; matching ML
+decisions alone does not establish that all evidence was preserved. Do not
+remove these fields from the content fingerprint to make a comparison pass.
+
+A worker abort is not necessarily an OOM: preserve failure.json, worker.log,
+and the service's memory.events, and inspect the assertion/signal before
+interpreting its peak as a completed workload measurement. Keep a crashing
+input as a separate reproducer while repairing the comparison; an incomplete
+run cannot establish end-to-end throughput.
 
 For a whole-service observation, including its foreground and idle child
 cgroups, run (with doas when the service's cgroup is not readable):
