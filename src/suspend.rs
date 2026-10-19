@@ -47,6 +47,9 @@ use std::process::{Child, Command};
 pub(crate) struct Idle {
     child: Child,
     control: imp::Control,
+    /// Parent-owned: SIGKILL cannot bypass cleanup when the worker is retired.
+    /// Fields drop after our Drop kills and reaps the process tree.
+    _scratch: crate::temp_space::Scratch,
 }
 
 impl Idle {
@@ -55,9 +58,15 @@ impl Idle {
     /// The containment is established *before* exec, so there is no window in
     /// which the child could fork a grandchild outside it.
     pub(crate) fn spawn(mut cmd: Command) -> io::Result<Self> {
+        let scratch = crate::temp_space::Scratch::new()?;
+        scratch.configure(&mut cmd);
         let control = imp::prepare(&mut cmd)?;
         match cmd.spawn() {
-            Ok(child) => Ok(Self { child, control }),
+            Ok(child) => Ok(Self {
+                child,
+                control,
+                _scratch: scratch,
+            }),
             Err(e) => {
                 imp::release(&control);
                 Err(e)
@@ -653,6 +662,36 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    #[test]
+    fn killed_worker_scratch_is_removed_when_retired() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ready = dir.path().join("ready");
+        let mut cmd = Command::new("/bin/sh");
+        cmd.args([
+            "-c",
+            "mkdir -p \"$TMPDIR/dependency\"; printf scratch >\"$TMPDIR/dependency/member\"; printf %s \"$TMPDIR\" >\"$READY\"; exec sleep 300",
+        ])
+        .env("READY", &ready);
+        let Some(mut idle) = spawn_or_skip(cmd) else {
+            return;
+        };
+        let start = Instant::now();
+        while !ready.exists() {
+            assert!(start.elapsed() < Duration::from_secs(10));
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let scratch = std::fs::read_to_string(ready).expect("scratch path");
+        idle.kill().expect("kill");
+        idle.child.wait().expect("reap");
+        assert!(
+            std::path::Path::new(&scratch)
+                .join("dependency/member")
+                .exists()
+        );
+        drop(idle);
+        assert!(!std::path::Path::new(&scratch).exists());
     }
 
     #[test]

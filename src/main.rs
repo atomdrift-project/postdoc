@@ -102,6 +102,7 @@ mod inflight;
 mod server;
 #[allow(unsafe_code)]
 mod suspend;
+mod temp_space;
 mod worker;
 
 /// Operational error. A worker that cannot start says why and stops, rather
@@ -328,12 +329,24 @@ fn main() -> ExitCode {
     // SAFETY: as above — still before any thread or environment read.
     unsafe { scan::runtime::install() };
 
+    // Still single-threaded: every dependency and helper inherits this root.
+    // Keep it alive until run returns; a later startup reaps it after a crash.
+    let _scratch = match unsafe { temp_space::Scratch::install() } {
+        Ok(scratch) => scratch,
+        Err(error) => {
+            eprintln!("postdoc: cannot prepare temporary storage: {error}");
+            return ExitCode::from(EXIT_ERROR);
+        }
+    };
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("postdoc=info,scan=info")),
         )
         .init();
+
+    _scratch.cleanup_abandoned();
 
     // Crash and thread dumps: a wedged worker has to be diagnosable in place,
     // and this must follow the signal mask `runtime::install` set.
