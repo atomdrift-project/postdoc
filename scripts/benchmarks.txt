@@ -1,0 +1,57 @@
+Postdoc memory and throughput benchmarks
+
+Build the production binary with `make release`. The default build includes
+jemalloc profiling support; allocation sampling remains off unless enabled
+with _RJEM_MALLOC_CONF at process startup. No extra debug tools are needed on
+galadriel: jeprof and gdb are already installed.
+
+Worker benchmark (includes HTTP download, staging, analysis, and result post):
+
+  make worker-benchmark WORKER_BENCH_PATH=/var/tmp/triage \
+    WORKER_BENCH_OUT=out/triage-before BENCH_BINARY=/path/to/baseline
+
+  make worker-benchmark WORKER_BENCH_PATH=/var/tmp/triage \
+    WORKER_BENCH_OUT=out/triage-after BENCH_BINARY=target/release/postdoc
+
+Use SCAN_MODELS_DIR and CLEAVE_TRAITS_DIR to pin the model/rules inputs to the
+same snapshots. XDG_CACHE_HOME selects the download/rule cache. The harness
+disables persisted analysis results. It uses a loopback mock hopper adapted
+from scan's benchmark, with no --data-dir shortcut, so staging allocations are
+measured. It does not run an LLM. WORKER_BENCH_FETCH=all enables dependency
+fetching and can contact external registries; the default, none, isolates the
+top-level workload. Both runs must use the same fetch policy and worker count.
+
+Each output directory must be new. It contains the input SHA-256 manifest,
+binary hash and configuration, complete responses, verdict fingerprint,
+worker RSS samples, and the mock hopper's per-size latency/throughput summary.
+Compare fingerprint.json before accepting any timing/memory result. Analysis
+errors are outcomes, not successful verdicts; inspect them even when the
+worker exits successfully. Repeat A/B runs when shared-host load is variable.
+
+Memory scope: peak_rss_mib is the worker process's VmHWM, sampled while it
+runs. It excludes helper processes and filesystem memory. Benchmark extraction
+uses output/scratch on disk to avoid competing with the production /tmp cap.
+This is a heap/queue benchmark, not proof of a whole-service memory ceiling or
+tmpfs performance. For production, also inspect the service's memory.current,
+memory.stat (anon and shmem), memory.events, and /tmp occupancy.
+
+Use worker-heap-benchmark with a distinct output directory to collect sampled
+heap profiles. Sampling changes timing: never compare a profiled run's wall
+time against an unprofiled run. Profiles are stored under output/heap, on disk.
+
+HTTP server benchmarks are also available as server-benchmark and
+server-heap-benchmark, configured with SERVER_BENCH_PATH, SERVER_BENCH_OUT,
+SERVER_BENCH_WORKERS, SERVER_BENCH_PORT, and BENCH_BINARY. They use the v1 raw
+upload protocol and accept its NDJSON progress stream. They do not exercise
+the worker's hopper download/prefetch path.
+
+Production profile symbolization
+
+The executable must be the exact build captured in the profile. Keep its hash
+and a copy before rebuilding. If production's mapped executable path differs
+from the local binary, rewrite only that path in a COPY of the heap profile
+before passing it to jeprof. Unresolved addresses do not identify callers.
+jeprof's C++ name shortening also collapses many Rust methods into the same
+name; retaining full demangled names avoids false attribution. Allocator
+backtrace frames are common ancestors of sampled allocations, not evidence
+that the profiler itself owns all the attributed memory.

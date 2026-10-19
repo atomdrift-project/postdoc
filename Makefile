@@ -44,6 +44,47 @@ release:
 quick:
 	$(CARGO) build --locked --profile quick
 
+# Same cache policy and verdict checks as scan's server benchmark. Profiling
+# and timing are separate runs: allocator sampling has a measurable cost.
+SERVER_BENCH_PATH ?= $(HOME)/data/benchmark/realworld-small
+SERVER_BENCH_OUT ?= out/server-bench
+SERVER_BENCH_PORT ?= 49997
+SERVER_BENCH_WORKERS ?= 20
+BENCH_BINARY ?= target/release/postdoc
+BENCH_FETCH ?= all
+
+.PHONY: server-benchmark server-heap-benchmark
+server-benchmark:
+	SCAN_NO_ANALYSIS_CACHE=1 SCAN_FETCH="$(BENCH_FETCH)" SCAN_NO_UPDATE_CHECK=1 \
+	  sh scripts/bench-serve.sh "$(BENCH_BINARY)" "$(SERVER_BENCH_PATH)" \
+	  "$(SERVER_BENCH_OUT)" "$(SERVER_BENCH_PORT)" "$(SERVER_BENCH_WORKERS)"
+
+server-heap-benchmark:
+	BENCH_HEAP=1 $(MAKE) --no-print-directory server-benchmark
+
+# The mock hopper exercises downloads too; --data-dir would bypass the buffers
+# whose residency matters to production. Results include a hashed manifest,
+# verdict fingerprint, RSS samples, and per-size-class latency/throughput.
+WORKER_BENCH_PATH ?= $(SERVER_BENCH_PATH)
+WORKER_BENCH_OUT ?= out/worker-bench
+WORKER_BENCH_WORKERS ?= 16
+WORKER_BENCH_FETCH ?= none
+WORKER_BENCH_MAX_RSS_GB ?= -1
+
+.PHONY: bench-hopper worker-benchmark worker-heap-benchmark
+bench-hopper:
+	$(CARGO) build --locked --release --features bench-hopper --bin postdoc-bench-hopper
+
+worker-benchmark: bench-hopper
+	python3 scripts/bench-worker.py "$(WORKER_BENCH_PATH)" "$(WORKER_BENCH_OUT)" \
+	  --binary "$(BENCH_BINARY)" --workers "$(WORKER_BENCH_WORKERS)" --fetch "$(WORKER_BENCH_FETCH)" \
+	  --max-rss-gb "$(WORKER_BENCH_MAX_RSS_GB)"
+
+worker-heap-benchmark: bench-hopper
+	python3 scripts/bench-worker.py "$(WORKER_BENCH_PATH)" "$(WORKER_BENCH_OUT)" \
+	  --binary "$(BENCH_BINARY)" --workers "$(WORKER_BENCH_WORKERS)" --fetch "$(WORKER_BENCH_FETCH)" \
+	  --max-rss-gb "$(WORKER_BENCH_MAX_RSS_GB)" --heap
+
 install: release
 	$(CARGO) install --path .
 
@@ -150,6 +191,8 @@ help:
 	@echo "  test-deploy  check runtime prerequisite installation with mock package managers"
 	@echo "  install-precommit  gate commits on lint + test"
 	@echo "  worker         run a worker in the foreground (URL=<hopper url>)"
+	@echo "  server-benchmark / server-heap-benchmark   HTTP corpus benchmark (SERVER_BENCH_PATH=)"
+	@echo "  worker-benchmark / worker-heap-benchmark   local hopper benchmark (WORKER_BENCH_PATH=)"
 	@echo "  deploy-worker  install + start a worker here (URL=<hopper url>)"
 	@echo "  deploy-server  install + start a server here"
 	@echo "  rollout        redeploy the fleet (DRY_RUN=1 to preview)"

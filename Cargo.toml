@@ -2,15 +2,25 @@
 name = "postdoc"
 version = "0.2.0"
 edition = "2024"
+default-run = "postdoc"
 rust-version = "1.97"
 license = "Apache-2.0"
 description = "Worker and server coordination for the Atomdrift analysis fleet"
 repository = "https://github.com/atomdrift-project/postdoc"
 
+[[bin]]
+name = "postdoc-bench-hopper"
+path = "scripts/bench-hopper.rs"
+required-features = ["bench-hopper"]
+
 [features]
-default = ["cleave-breadcrumbs"]
+default = ["cleave-breadcrumbs", "jemalloc-prof"]
+bench-hopper = ["dep:zstd"]
 crt-heap = []
 cleave-breadcrumbs = []
+# Production includes the profiler; sampling is off until enabled at startup
+# with _RJEM_MALLOC_CONF=prof:true,prof_active:true.
+jemalloc-prof = ["atomdrift-scan/jemalloc-prof", "tikv-jemallocator/profiling"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -54,6 +64,8 @@ dashmap = "6"
 dirs = "6"
 rayon = "1"
 tempfile = "3"
+# Standalone benchmark fixture; absent from normal builds.
+zstd = { version = "0.13", optional = true }
 burton = { git = "https://github.com/atomdrift-project/burton.git" }
 fletch = { git = "https://github.com/atomdrift-project/fletch.git" }
 

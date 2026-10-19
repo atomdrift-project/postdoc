@@ -2675,24 +2675,14 @@ async fn slot_loop(
             shared.stop.raise(Exit::Finished);
             break;
         }
-        let pj = tokio::select! {
-            biased;
-            () = shared.stop.raised() => break,
-            pj = jobs.recv() => pj,
-        };
-        // The prefetcher is gone and nothing is staged.
-        let Some(pj) = pj else {
+        let Some((pj, permit)) = next_dispatch(&shared, &jobs).await else {
             break;
         };
-        shared.unstage(&pj);
         let analyzing = Held::enter(&shared, Gauge::Analyzing);
         let _dispatching = Held::enter(&shared, Gauge::Dispatching);
         // Taken now, so a renewal mid-analysis cannot change the rules a job
         // started with. A poisoned lock still holds a whole `Arc`.
         let resources = Arc::clone(&*resources.read().unwrap_or_else(PoisonError::into_inner));
-        let Ok(permit) = Arc::clone(&shared.tails).acquire_owned().await else {
-            break;
-        };
         tails.spawn(finish_job(
             Arc::clone(&shared),
             resources,
@@ -2705,6 +2695,33 @@ async fn slot_loop(
     while let Some(done) = tails.join_next().await {
         report_tail(done, slot);
     }
+}
+
+/// Keep queued payloads accounted for until a tail can actually own them.
+async fn next_dispatch(
+    shared: &Arc<WorkerShared>,
+    jobs: &JobSource,
+) -> Option<(PrefetchedJob, OwnedSemaphorePermit)> {
+    // Taking the payload first let every slot hold an uncounted download while
+    // waiting for a tail, and allowed the prefetcher to refill behind them.
+    let permit = {
+        // A slot blocked behind occupied tails is still busy for telemetry
+        // and the stall watchdog, even though its payload stays in the queue.
+        // Drop this gauge before waiting on an empty queue: that wait is idle.
+        let _dispatching = Held::enter(shared, Gauge::Dispatching);
+        tokio::select! {
+            biased;
+            () = shared.stop.raised() => return None,
+            permit = Arc::clone(&shared.tails).acquire_owned() => permit.ok()?,
+        }
+    };
+    let pj = tokio::select! {
+        biased;
+        () = shared.stop.raised() => return None,
+        pj = jobs.recv() => pj?,
+    };
+    shared.unstage(&pj);
+    Some((pj, permit))
 }
 
 /// A tail ended; say so if it panicked, which loses that job's post.
@@ -3040,6 +3057,7 @@ impl SummaryTicker {
             deps_analyzed: scan::fetch::payloads_analyzed_total(),
             active_slots: shared.dispatching.load(Ordering::Relaxed),
         };
+        let mappings = crate::allocator::mappings();
         // FreeBSD reads libc jemalloc via mallctl; everywhere else the bundled
         // tikv-jemalloc answers through cleave's ctl wrapper.
         let heap = scan::heap_profile::stats()
@@ -3065,6 +3083,8 @@ impl SummaryTicker {
             jemalloc_active_mb = heap.map(|stats| stats.1 / MIB),
             jemalloc_resident_mb = heap.map(|stats| stats.2 / MIB),
             jemalloc_retained_mb = heap.map(|stats| stats.3 / MIB),
+            vm_mappings = mappings.map(|(count, _)| count),
+            vm_mapping_limit = mappings.map(|(_, limit)| limit),
             regex_scratch_mb = regex_scratch_bytes as u64 / MIB,
             regex_scratch_budget_mb = regex_scratch_budget_bytes as u64 / MIB,
             regex_str_mb = regex_str.1 as u64 / MIB,
@@ -4696,7 +4716,14 @@ impl Hopper {
                 "{DOWNLOAD_LIMIT_EXCEEDED}: Content-Length {claimed} exceeds {max_bytes} bytes: path={path} sha256={sha256} url={url}",
             );
         }
-        let mut buf = Vec::new();
+        // Most hopper responses know their length. Allocate it once instead
+        // of retaining the geometric growth slack for the entire queue wait
+        // and analysis. The checked limit above bounds this allocation too.
+        let capacity = resp
+            .content_length()
+            .and_then(|len| usize::try_from(len).ok())
+            .unwrap_or(0);
+        let mut buf = Vec::with_capacity(capacity);
         while let Some(chunk) = resp.chunk().await.with_context(|| {
             format!("download body failed: path={path} sha256={sha256} url={url}")
         })? {
@@ -4707,6 +4734,9 @@ impl Hopper {
             }
             buf.extend_from_slice(&chunk);
         }
+        // Unknown/chunked lengths still grow geometrically; release their
+        // unused capacity before handing ownership to the long-lived queue.
+        buf.shrink_to_fit();
         let bytes = bytes::Bytes::from(buf);
         // Up to half the staging buffer — gigabytes — so hashed off the async
         // threads.
@@ -5956,6 +5986,95 @@ mod tests {
         assert!(err.contains("sha256 mismatch"), "{err}");
         assert!(err.contains(&sha256_hex(PAYLOAD)), "{err}");
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn downloaded_buffers_do_not_retain_growth_slack() {
+        // Deliberately not a power of two: geometric growth used to retain
+        // almost twice this payload's bytes through staging and analysis.
+        let payload = vec![b'x'; 32 * 1024 + 1];
+        for chunked in [false, true] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let body = payload.clone();
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let _ = read_target(&mut stream).await;
+                if chunked {
+                    respond_chunked(&mut stream, &body).await;
+                } else {
+                    respond(&mut stream, "200 OK", &body).await;
+                }
+            });
+            let bytes = test_hopper(&format!("http://{addr}"))
+                .download_bytes_with_limit(&sha256_hex(&payload), "sample.bin", 1 << 20)
+                .await
+                .unwrap();
+            assert_eq!(bytes.as_ref(), payload);
+            let owned = bytes.try_into_mut().unwrap();
+            assert_eq!(owned.capacity(), payload.len(), "chunked={chunked}");
+            server.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn saturated_tails_leave_payloads_in_the_counted_queue() {
+        let shared = test_shared(&test_config("http://127.0.0.1:1"), |s| {
+            s.tails = Arc::new(Semaphore::new(1));
+        });
+        let occupied = Arc::clone(&shared.tails).acquire_owned().await.unwrap();
+        let (tx, rx) = mpsc::unbounded_channel();
+        let jobs = JobSource::new(rx, DispatchOrder::Fifo, Duration::ZERO);
+        shared.outstanding.store(1, Ordering::Release);
+        shared.queued_bytes.store(7, Ordering::Release);
+        tx.send(PrefetchedJob {
+            job: claim_job(&sha256_hex(b"payload"), "sample.bin", 7),
+            data: Ok(PrefetchData::Memory(bytes::Bytes::from_static(b"payload"))),
+            queue_id: 0,
+        })
+        .unwrap_or_else(|_| panic!("queue closed"));
+        {
+            let next = next_dispatch(&shared, &jobs);
+            tokio::pin!(next);
+            assert!(
+                tokio::time::timeout(Duration::from_millis(20), next.as_mut())
+                    .await
+                    .is_err()
+            );
+            assert_eq!(shared.dispatching.load(Ordering::Acquire), 1);
+        }
+        assert_eq!(shared.dispatching.load(Ordering::Acquire), 0);
+        assert_eq!(shared.queued_bytes.load(Ordering::Acquire), 7);
+        assert_eq!(shared.outstanding.load(Ordering::Acquire), 1);
+        assert_eq!(jobs.state.lock().await.rx.len(), 1);
+        drop(occupied);
+        let (pj, permit) = next_dispatch(&shared, &jobs).await.unwrap();
+        assert_eq!(pj.data.as_ref().unwrap().staged_mem_bytes(), 7);
+        assert_eq!(shared.queued_bytes.load(Ordering::Acquire), 0);
+        assert_eq!(shared.outstanding.load(Ordering::Acquire), 0);
+        drop(permit);
+        {
+            let next = next_dispatch(&shared, &jobs);
+            tokio::pin!(next);
+            assert!(
+                tokio::time::timeout(Duration::from_millis(20), next.as_mut())
+                    .await
+                    .is_err()
+            );
+            assert_eq!(
+                shared.dispatching.load(Ordering::Acquire),
+                0,
+                "empty queue is idle"
+            );
+        }
+        assert_eq!(
+            shared.tails.available_permits(),
+            1,
+            "cancel releases the permit"
+        );
+        drop(tx);
+        assert!(next_dispatch(&shared, &jobs).await.is_none());
+        assert_eq!(shared.tails.available_permits(), 1);
     }
 
     /// Regression (prior-2 vs prior-7): the spool route caps the streamed

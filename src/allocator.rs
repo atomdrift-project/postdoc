@@ -60,6 +60,36 @@ pub(crate) fn trim() {
 #[cfg(not(all(windows, not(feature = "crt-heap"))))]
 pub(crate) fn trim() {}
 
+/// Linux VM mappings and their per-process ceiling. Exhausting this resource
+/// produces ENOMEM even with RAM available and no cgroup OOM event. Stream
+/// the maps file: a busy worker can have hundreds of thousands of entries.
+#[cfg(target_os = "linux")]
+pub(crate) fn mappings() -> Option<(usize, usize)> {
+    use std::io::Read as _;
+
+    let mut file = std::fs::File::open("/proc/self/maps").ok()?;
+    let mut buffer = [0_u8; 16 * 1024];
+    let mut count = 0;
+    loop {
+        let read = file.read(&mut buffer).ok()?;
+        if read == 0 {
+            break;
+        }
+        count += buffer[..read].iter().filter(|&&b| b == b'\n').count();
+    }
+    let limit = std::fs::read_to_string("/proc/sys/vm/max_map_count")
+        .ok()?
+        .trim()
+        .parse()
+        .ok()?;
+    Some((count, limit))
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn mappings() -> Option<(usize, usize)> {
+    None
+}
+
 #[cfg(test)]
 mod tests {
     /// The `#[global_allocator]` this crate ships lives in `src/main.rs`, so it
