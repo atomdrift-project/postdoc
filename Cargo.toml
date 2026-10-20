@@ -117,16 +117,10 @@ tree-sitter = "0.28"
 # `links = "tree-sitter-language"` permits exactly one copy in the graph.
 # Keep in lockstep with the siblings; remove when a release lands.
 [patch.crates-io]
-tree-sitter-bash = { path = "vendor/tree-sitter-bash" }
+# Unicode-safe brace-range scanner; shared across consumers by update-deps.
+tree-sitter-bash = { git = "https://github.com/tstromberg/tree-sitter-bash" }
 tree-sitter = { git = "https://github.com/tstromberg/tree-sitter", branch = "master" }
 tree-sitter-language = { git = "https://github.com/tstromberg/tree-sitter", branch = "master" }
-# NetBSD and Solaris arms for wasmtime's signal trap handler, pulled in via
-# cleave -> yara-x. Upstream 45.0.3 has neither, so those builds stop at
-# compile_error!("unsupported platform"). Must match cleave's patch. The
-# branch name carries the version: when yara-x moves wasmtime, rebase the
-# branch onto the new tag or this patch silently stops applying (cargo only
-# warns).
-wasmtime = { git = "https://github.com/tstromberg/wasmtime.git", branch = "netbsd-solaris-45.0.3" }
 
 # DEVELOPMENT OVERRIDE — must be commented out before committing.
 #

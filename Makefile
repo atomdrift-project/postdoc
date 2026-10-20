@@ -107,11 +107,12 @@ fix:
 test: test-bash-scanner
 	$(CARGO) test --locked --quiet
 
-# The vendored tree-sitter-bash scanner is C, and this exercises the Unicode
-# lookahead that segfaulted the production worker before the local patch.
+# Exercise the scanner Cargo actually resolves, including its Unicode fix.
 test-bash-scanner:
 	@set -e; tmp=$$(mktemp); trap 'rm -f "$$tmp"' EXIT; \
-	  $${CC:-cc} -O2 -Ivendor/tree-sitter-bash/src \
+	  $(CARGO) metadata --locked --format-version 1 > "$$tmp"; \
+	  scanner_src=$$(python3 -c 'import json, pathlib, sys; p = next(p for p in json.load(sys.stdin)["packages"] if p["name"] == "tree-sitter-bash"); print(pathlib.Path(p["manifest_path"]).parent / "src")' < "$$tmp"); \
+	  $${CC:-cc} -O2 -I"$$scanner_src" \
 	    tests/fixtures/bash-scanner-repro.c -o "$$tmp"; "$$tmp"
 
 # Install the pre-commit gate (no path overrides + make test + make lint).
