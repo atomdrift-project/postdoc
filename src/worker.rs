@@ -1658,8 +1658,8 @@ impl PrefetchData {
     }
 }
 
-/// The staging budget follows an input through downloads and gate waits. It
-/// transfers to analysis accounting only when the blocking analysis starts.
+/// Downloaded input bytes share one budget through queue waits and analysis.
+/// The reservation follows the byte owner, including every clone or slice.
 #[derive(Debug)]
 struct InputBudget {
     limit: usize,
@@ -1730,8 +1730,18 @@ struct BufferedInput {
 
 impl BufferedInput {
     fn into_analysis(self) -> bytes::Bytes {
-        drop(self.reservation);
-        self.bytes
+        if self.reservation.is_none() {
+            return self.bytes;
+        }
+        // No payload copy: the byte owner's last clone releases both the
+        // input allocation and its reservation, including on cancellation.
+        bytes::Bytes::from_owner(self)
+    }
+}
+
+impl AsRef<[u8]> for BufferedInput {
+    fn as_ref(&self) -> &[u8] {
+        &self.bytes
     }
 }
 
@@ -1906,10 +1916,11 @@ impl SpoolState {
             .with_context(|| format!("cannot create spool dir {}", self.dir.display()))
     }
 
-    /// Create the spool directory and clear leftovers from crashed runs.
-    /// Best-effort: only files older than a day are removed, so concurrent
-    /// worker processes on the same host cannot delete each other's live
-    /// spools.
+    /// Create the spool directory and clear old regular files when an
+    /// operator supplies a shared path. A process-owned `SCAN_SPOOL_ROOT` is
+    /// reclaimed immediately on the next startup by `Scratch` instead.
+    /// Best-effort: only files older than a day are removed here, so
+    /// concurrent workers cannot delete each other's live spools or sockets.
     fn prepare(&self) {
         if let Err(e) = self.ensure_dir() {
             tracing::warn!(dir = %self.dir.display(), error = %format!("{e:#}"), "cannot create spool dir");
@@ -1920,12 +1931,13 @@ impl SpoolState {
         };
         let cutoff = Duration::from_secs(24 * 60 * 60);
         for entry in entries.flatten() {
-            let stale = entry
-                .metadata()
-                .and_then(|m| m.modified())
-                .ok()
-                .and_then(|t| t.elapsed().ok())
-                .is_some_and(|age| age > cutoff);
+            let stale = entry.file_type().is_ok_and(|kind| kind.is_file())
+                && entry
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|t| t.elapsed().ok())
+                    .is_some_and(|age| age > cutoff);
             if stale && std::fs::remove_file(entry.path()).is_ok() {
                 tracing::info!(path = %entry.path().display(), "removed stale spool file");
             }
@@ -2372,6 +2384,13 @@ impl WorkerShared {
         let max_buffer_bytes = staged_buffer_bytes();
         let input_budget = InputBudget::new(max_buffer_bytes);
         hopper.input_budget = Some(Arc::clone(&input_budget));
+        let spool_mem_threshold = std::env::var("SCAN_SPOOL_THRESHOLD_MB")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|&mb| mb > 0)
+            .map(|mb| mb.saturating_mul(MIB).clamp(MIB, max_buffer_bytes as u64))
+            .and_then(|bytes| usize::try_from(bytes).ok())
+            .unwrap_or(max_buffer_bytes / 2);
         #[expect(
             clippy::cast_precision_loss,
             clippy::cast_possible_truncation,
@@ -2382,7 +2401,7 @@ impl WorkerShared {
         let spool = SpoolState::new(
             tuning.spool_dir.clone(),
             tuning.spool_budget_bytes,
-            max_buffer_bytes / 2,
+            spool_mem_threshold,
         );
 
         tracing::info!(
@@ -2447,7 +2466,7 @@ impl WorkerShared {
             spool_budget_gb = spool.budget_bytes / GIB,
             mem_threshold_mb = spool.mem_threshold_bytes as u64 / MIB,
             max_job_gb = MAX_JOB_BYTES / GIB,
-            "large payloads spool to disk (SCAN_SPOOL_DIR / SCAN_SPOOL_BUDGET_GB)",
+            "large payloads spool to disk (SCAN_SPOOL_DIR / SCAN_SPOOL_BUDGET_GB / SCAN_SPOOL_THRESHOLD_MB)",
         );
 
         Self {
@@ -2531,10 +2550,17 @@ impl Drop for Held {
 /// Staged-payload budget: 1/16 of RAM, 512 MiB..=8 GiB. It bounds what the
 /// prefetcher holds ahead of the slots, and the slot count scales with cores
 /// (3x), so a fixed 1 GiB starved a large box while 1/16 of a 16 GB one is
-/// the 1 GiB it always had.
+/// the 1 GiB it always had. An explicit `SCAN_STAGED_BUFFER_MB` can lower the
+/// budget on a memory-constrained worker without changing its download count.
 fn staged_buffer_bytes() -> usize {
     let total = cleave::memory_tracker::total_memory().unwrap_or(16 * GIB);
-    usize::try_from((total / 16).clamp(512 * MIB, 8 * GIB)).unwrap_or(usize::MAX)
+    let default = (total / 16).clamp(512 * MIB, 8 * GIB);
+    let requested = std::env::var("SCAN_STAGED_BUFFER_MB")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|&mb| mb > 0)
+        .map(|mb| mb.saturating_mul(MIB).clamp(512 * MIB, 8 * GIB));
+    usize::try_from(requested.unwrap_or(default)).unwrap_or(usize::MAX)
 }
 
 /// Run the worker until it is told to stop, then drain.
@@ -6154,7 +6180,75 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn input_budget_follows_downloads_until_analysis() {
+    async fn running_analysis_keeps_its_input_bytes_reserved() {
+        let budget = InputBudget::new(100);
+        let input = BufferedInput {
+            bytes: bytes::Bytes::from(vec![7u8; 100]),
+            reservation: Some(budget.reserve(100).await.unwrap()),
+        }
+        .into_analysis();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let analysis = tokio::task::spawn_blocking(move || {
+            started_tx.send(()).unwrap();
+            release_rx.blocking_recv().unwrap();
+            assert!(input.iter().all(|byte| *byte == 7));
+            input.len()
+        });
+        started_rx.await.unwrap();
+        assert_eq!(budget.used.load(Ordering::Acquire), 100);
+        let mut next = Box::pin(budget.reserve(1));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), &mut next)
+                .await
+                .is_err()
+        );
+        // Aborting a running blocking task must not free its still-live bytes.
+        analysis.abort();
+        assert_eq!(budget.used.load(Ordering::Acquire), 100);
+        release_tx.send(()).unwrap();
+        assert_eq!(analysis.await.unwrap(), 100);
+        let reservation = tokio::time::timeout(Duration::from_secs(5), next)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(budget.used.load(Ordering::Acquire), 1);
+        drop(reservation);
+        assert_eq!(budget.used.load(Ordering::Acquire), 0);
+    }
+
+    #[tokio::test]
+    async fn analysis_input_reservation_follows_last_slice() {
+        let budget = InputBudget::new(100);
+        let input = BufferedInput {
+            bytes: bytes::Bytes::from(vec![7u8; 100]),
+            reservation: Some(budget.reserve(100).await.unwrap()),
+        }
+        .into_analysis();
+        let slice = input.slice(20..40);
+        let clone = input.clone();
+        drop(input);
+        drop(clone);
+        assert_eq!(budget.used.load(Ordering::Acquire), 100);
+        let mut next = Box::pin(budget.reserve(1));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), &mut next)
+                .await
+                .is_err()
+        );
+        assert_eq!(slice.as_ref(), &[7u8; 20]);
+        drop(slice);
+        let reservation = tokio::time::timeout(Duration::from_secs(5), next)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(budget.used.load(Ordering::Acquire), 1);
+        drop(reservation);
+        assert_eq!(budget.used.load(Ordering::Acquire), 0);
+    }
+
+    #[tokio::test]
+    async fn input_budget_follows_downloads_through_analysis() {
         let payload = vec![b'x'; 32 * 1024 + 1];
         // Exercise exact, understated, and unknown response lengths. The
         // budget is smaller than the batch, just as on a busy live worker.
@@ -6198,10 +6292,19 @@ mod tests {
                 .unwrap()
                 .unwrap();
             // Full reservations for unknown bodies can serialize downloads;
-            // starting analysis must always let the next one proceed.
+            // releasing the previous input must let the next one proceed.
             assert_eq!(first.bytes.as_ref(), payload);
             assert!(budget.used.load(Ordering::Acquire) <= budget.limit);
+            let original_pointer = first.bytes.as_ptr();
             let bytes_in_analysis = first.into_analysis();
+            assert_eq!(bytes_in_analysis.as_ptr(), original_pointer);
+            assert_eq!(bytes_in_analysis.as_ref(), payload);
+            assert!(budget.used.load(Ordering::Acquire) >= payload.len());
+            let slice = bytes_in_analysis.slice(1..);
+            drop(bytes_in_analysis);
+            assert!(budget.used.load(Ordering::Acquire) >= payload.len());
+            assert_eq!(slice.as_ref(), &payload[1..]);
+            drop(slice);
             let second = tokio::time::timeout(Duration::from_secs(5), downloads.join_next())
                 .await
                 .unwrap()
@@ -6229,7 +6332,6 @@ mod tests {
             while downloads.join_next().await.is_some() {}
             drop(second);
             assert_eq!(budget.used.load(Ordering::Acquire), 0);
-            assert_eq!(bytes_in_analysis.as_ref(), payload);
             server.abort();
         }
     }

@@ -1,0 +1,31 @@
+defaults:
+  for: [zip, javascript]
+  platforms: [unix, windows]
+  crit: notable
+  conf: 1.0
+traits:
+  - id: command
+    desc: Command marker
+    if: {type: raw, substr: command}
+  - id: startup
+    desc: Startup marker
+    if: {type: raw, substr: startup}
+  - id: bulk
+    desc: Retained member evidence
+    if: {type: raw, substr: unused-fixture-marker}
+  - id: absent
+    desc: Unavailable commanded package
+    if: {type: metrics, field: references.unavailable_command_count, min: 1}
+composite_rules:
+  - id: local
+    desc: Command references an unavailable package
+    scope: file
+    all: [{id: command}, {id: absent}]
+  - id: archive
+    desc: Startup and unavailable command in one archive
+    scope: archive
+    all: [{id: local}, {id: startup}]
+  - id: archive-chain
+    desc: A later container iteration consumes a derived finding
+    scope: archive
+    all: [{id: archive}, {id: startup}]

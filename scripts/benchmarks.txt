@@ -65,6 +65,12 @@ and input page-cache charges are included in file; shmem is a subset of file.
 benchmark processes. A failed/timed-out run writes failure.json with partial
 progress; it is never represented as a completed benchmark.
 
+Worker process_wall_s and the final cgroup snapshot are recorded before
+fingerprint validation. harness_wall_s includes that later validation work.
+An OOM event in the measured cgroup fails the run even if the worker exits 0.
+Older artifacts without harness_wall_s included fingerprinting in their
+process_wall_s; use their saved last-completion wall_ms for workload timing.
+
 fingerprint-content.json hashes the full raw report (traits, evidence, facts,
 member order) and ML output separately, excluding only ML analyzed_at. Compare
 it as well as fingerprint.json's level decisions. Live registry responses can
@@ -122,6 +128,23 @@ SERVER_BENCH_WORKERS, SERVER_BENCH_PORT, and BENCH_BINARY. They use the v1 raw
 upload protocol and accept its NDJSON progress stream. They do not exercise
 the worker's hopper download/prefetch path.
 
+Deterministic graft fixture
+
+Build examples/graft-memory.rs against each dependency revision with the same
+profile, saving the two executables, then run:
+
+  python3 scripts/bench-graft.py BEFORE_FIXTURE AFTER_FIXTURE out/graft-pair
+
+The fixture calls the public reference-outcome graft API on an archive with
+512 members, 64 KiB of retained evidence per member, and eight declaring
+members. It loads only tests/fixtures/graft-memory rules. Each run uses a fresh
+process; the harness alternates order and requires complete report equality.
+It records binary/rule hashes and every full report. allocated_bytes counts
+cumulative caller-thread allocation requests during grafting, not live memory;
+peak_rss_kib is the fixture's VmHWM with the system allocator. Its subsecond
+timings need repetitions. Use the worker/cgroup benchmark above to establish
+whole-service improvements with the production allocator and real workload.
+
 Production profile symbolization
 
 The executable must be the exact build captured in the profile. Keep its hash
@@ -132,3 +155,72 @@ jeprof's C++ name shortening also collapses many Rust methods into the same
 name; retaining full demangled names avoids false attribution. Allocator
 backtrace frames are common ancestors of sampled allocations, not evidence
 that the profiler itself owns all the attributed memory.
+
+Foreground replay without idle work (Linux)
+
+Benchmark foreground serving and the idle worker separately. Run the server
+harness from outside its measured cgroup. It starts the real server without
+hopper, verifies the idle worker is off, and streams a foreground batch:
+
+  python3 scripts/bench-service.py FOREGROUND_DATASET out/foreground-before \
+    --binary out/memory-baseline/postdoc-combined-memory \
+    --models out/bench-assets/models --traits out/traits-catch-fixed \
+    --cache out/bench-cache --workers 192 --clients 20 \
+    --memory-gb 64 --max-rss-gb 54 --tmp-gb 16
+
+The dataset must contain unique content hashes. Keep the inputs, asset
+snapshots, resource settings, and client count fixed between runs.
+Fetch/follow and analysis-result caches are disabled. The harness does not
+contact production hopper. Its load generator stays outside the measured
+transient unit; postdoc and its helpers remain inside it. The unit is stopped
+on success or failure. Run the worker-only replay above in a separate phase.
+
+memory.jsonl records the server cgroup. summary.json retains the kernel
+cgroup peak and foreground wall time. foreground-fingerprint.json contains
+full report hashes for exactly the input roots. Any missing result, analysis
+error, unexpected idle worker, or OOM event fails the run.
+
+Separate benchmarks establish memory and throughput for each mode. Observe
+the production cgroup separately to attribute the live service's total memory;
+the idle worker can retain allocations while frozen during foreground work.
+
+When benchmarking on a machine serving production traffic, keep its companion
+idle worker paused too; disabling idle work only in the benchmark server does
+not remove the other worker's CPU and memory-bandwidth load. Restore production
+idle work after the timed run. Record that pause with the benchmark settings.
+
+Large TAR member fixtures
+
+  python3 tests/fixtures/archive-memory/make-corpus.py out/archive-memory-data
+
+This streams a large zero-run member with nonzero evidence markers, a dense
+member, and a truncated large member into compressed archives. It never writes
+the expanded members. The sibling manifest records expected full member hashes
+and lengths. Pass --large-mib 129 for quick correctness checks; the default
+8.5 GiB member exercises the geometric buffer growth found in a production
+archive. Replay this corpus with the worker harness above and compare complete
+reports. Include cgroup memory: jemalloc profiles omit anonymous mappings.
+Check the full workload separately before accepting memory or timing claims.
+
+For production worker-only tuning, POSTDOC_IDLE_CLEAVE_CONCURRENCY sets the
+idle child's heavy-analysis gate. The server forwards it to that child as
+SCAN_CLEAVE_CONCURRENCY; request concurrency and idle download slots retain
+their own settings. A standalone worker replay uses SCAN_CLEAVE_CONCURRENCY
+directly. Validate memory and full-workload wall time before choosing a value.
+
+Linux Rizin launch cost
+
+Filefacts can launch Rizin through setpriv, sh and prlimit when the scanner's
+RSS reaches 512 MiB. Each utility execs the next stage in the same process;
+the scanner can then use its normal spawn fast path without duplicating its
+large address space. The chain preserves the private process group, parent
+death signal and race check, scrubbed environment, and existing 4 GiB address
+space/data limits, including tighter inherited limits. Small callers keep the
+native child hook. Missing or incompatible utilities also use that hook.
+
+The utility chain is checked once with a bounded trusted no-op. Containment
+tests query the exec'd process's limits and signal, exercise parent exit,
+and preserve literal arguments. CPU sampling belongs in a separate run or
+after an explicitly retired timing window. perf's inclusive fork/exec costs
+include their page-table copying/unmapping children; avoid adding those leaf
+percentages again. Keep the exact sampled executable for symbolization.

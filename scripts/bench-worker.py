@@ -118,10 +118,17 @@ def main():
         "models_dir": env.get("SCAN_MODELS_DIR"), "traits_dir": env.get("CLEAVE_TRAITS_DIR"),
         "cache_dir": env.get("XDG_CACHE_HOME"), "cgroup": str(group) if group else None,
         "tuning_env": {name: env[name] for name in (
-            "SCAN_CLEAVE_CONCURRENCY", "SCAN_SMALL_LANE", "SCAN_SMALL_JOB_MB",
+            "SCAN_CLEAVE_CONCURRENCY", "SCAN_STAGED_BUFFER_MB",
+            "SCAN_ARCHIVE_ESTIMATE_MULTIPLIER",
+            "SCAN_ADMISSION_CGROUP",
+            "SCAN_SMALL_LANE", "SCAN_SMALL_JOB_MB",
             "SCAN_TAILS", "SCAN_PREFETCH_DEPTH", "SCAN_SJF", "SCAN_SJF_MAX_WAIT_SECS",
+            "SCAN_SPOOL_DIR", "SCAN_SPOOL_ROOT", "SCAN_SPOOL_THRESHOLD_MB",
+            "SCAN_SPOOL_BUDGET_GB",
             "CLEAVE_MEMBER_WINDOW_MB", "CLEAVE_MEMBER_WINDOW_COUNT",
-            "CLEAVE_PIPELINE_MEMBER_WINDOWS", "CLEAVE_RAYON_THREADS", "RAYON_NUM_THREADS",
+            "CLEAVE_PIPELINE_MEMBER_WINDOWS", "CLEAVE_RAYON_THREADS",
+            "CLEAVE_INNER_PARALLEL_OWNERS", "RAYON_NUM_THREADS",
+            "FILEFACTS_RIZIN_CONCURRENCY",
         ) if name in env},
     }, indent=2) + "\n")
     hopper = worker = None
@@ -180,8 +187,17 @@ def main():
                     except FileNotFoundError:
                         pass
                     time.sleep(.2)
+            worker_wall_s = time.monotonic() - started
+            # Freeze measurements before parsing the saved reports for parity.
+            # Validation can allocate a large JSON graph and is not worker work.
+            group_final = cgroup_sample(group) if group else None
             if worker.returncode:
                 raise RuntimeError(f"worker exited {worker.returncode}; see worker.log")
+            if group_final and any(
+                group_final["events"][name] != group_start["events"][name]
+                for name in ("oom", "oom_kill", "oom_group_kill")
+            ):
+                raise RuntimeError("memory cgroup reported OOM events; inspect memory.jsonl")
             summary = json.loads((output / "hopper-summary.json").read_text())
             if summary["done"] != len(manifest):
                 raise RuntimeError(f"incomplete run: {summary['done']} of {len(manifest)}")
@@ -191,11 +207,13 @@ def main():
                 subprocess.run([sys.executable, str(Path(__file__).with_name("detect-fingerprint.py")),
                                 str(output / "responses"), "--content"], stdout=fp, check=True)
             fingerprint = json.loads((output / "fingerprint.json").read_text())
-            summary.update(process_wall_s=time.monotonic() - started, peak_rss_mib=peak_kib / 1024,
+            summary.update(process_wall_s=worker_wall_s,
+                           harness_wall_s=time.monotonic() - started,
+                           peak_rss_mib=peak_kib / 1024,
                            peak_sampled_mappings=peak_mappings, heap_sampling=args.heap,
                            analysis_errors=sum("error" in entry for entry in fingerprint))
             if group:
-                summary["cgroup"] = {"start": group_start, "final": cgroup_sample(group),
+                summary["cgroup"] = {"start": group_start, "final": group_final,
                                      "sampled_peak_by_type": group_peak}
             (output / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
             print(json.dumps(summary, indent=2))

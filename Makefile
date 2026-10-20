@@ -28,7 +28,7 @@ LLM_MODEL ?=
 HOPPER ?= https://hops-ro.isotope13.ai,https://hops.isotope13.ai
 SERVER_HOPPER = $(if $(strip $(URL)),$(URL),$(HOPPER))
 
-.PHONY: all build release quick install lint fix test install-precommit clean help
+.PHONY: all build release quick install lint fix test test-bash-scanner install-precommit clean help
 
 all: build
 
@@ -104,8 +104,15 @@ fix:
 	$(CARGO) clippy --locked --fix --all-targets --allow-dirty --allow-staged
 	$(CARGO) fmt
 
-test:
+test: test-bash-scanner
 	$(CARGO) test --locked --quiet
+
+# The vendored tree-sitter-bash scanner is C, and this exercises the Unicode
+# lookahead that segfaulted the production worker before the local patch.
+test-bash-scanner:
+	@set -e; tmp=$$(mktemp); trap 'rm -f "$$tmp"' EXIT; \
+	  $${CC:-cc} -O2 -Ivendor/tree-sitter-bash/src \
+	    tests/fixtures/bash-scanner-repro.c -o "$$tmp"; "$$tmp"
 
 # Install the pre-commit gate (no path overrides + make test + make lint).
 # Bypass an individual commit with `git commit --no-verify`.

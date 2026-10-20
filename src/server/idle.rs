@@ -131,6 +131,7 @@ fn worker_command(
     cache_dir: &PathBuf,
     traits_dir: Option<&std::path::Path>,
     slots: usize,
+    cleave_concurrency: Option<&std::ffi::OsStr>,
 ) -> std::io::Result<Command> {
     let mut cmd = Command::new(std::env::current_exe()?);
     cmd.arg("worker")
@@ -142,6 +143,11 @@ fn worker_command(
         .arg(slots.to_string())
         .arg("--nice")
         .arg("19");
+    // Tune heavy background analysis independently of foreground requests.
+    // Keep the child's download slots separate from this analysis gate.
+    if let Some(concurrency) = cleave_concurrency {
+        cmd.env("SCAN_CLEAVE_CONCURRENCY", concurrency);
+    }
     if let Some(dir) = traits_dir {
         cmd.arg("--traits-dir").arg(dir);
     }
@@ -280,12 +286,14 @@ impl Worker {
         drop(exited);
 
         let traits_dir = cleave::traits_repo::override_dir();
+        let cleave_concurrency = std::env::var_os("POSTDOC_IDLE_CLEAVE_CONCURRENCY");
         let spawned = worker_command(
             &self.hopper,
             &self.name,
             &self.cache,
             traits_dir.as_deref(),
             self.slots,
+            cleave_concurrency.as_deref(),
         )
         .and_then(Idle::spawn);
         let started = match spawned {
@@ -423,8 +431,8 @@ mod tests {
     #[test]
     fn the_command_passes_only_what_must_differ() {
         let dir = PathBuf::from("/tmp/scan-idle-test");
-        let cmd =
-            worker_command("http://hopper.example", "host-idle", &dir, None, 4).expect("command");
+        let cmd = worker_command("http://hopper.example", "host-idle", &dir, None, 4, None)
+            .expect("command");
         let args: Vec<_> = cmd
             .get_args()
             .map(|a| a.to_string_lossy().to_string())
@@ -452,6 +460,36 @@ mod tests {
             .and_then(|(_, v)| v)
             .expect("the worker must not share the server's analysis cache");
         assert_eq!(cache, dir.as_os_str());
+        assert!(
+            !cmd.get_envs()
+                .any(|(key, _)| key == std::ffi::OsStr::new("SCAN_CLEAVE_CONCURRENCY")),
+            "without an idle override the child inherits the existing policy",
+        );
+    }
+
+    #[test]
+    fn idle_analysis_concurrency_does_not_reduce_download_slots() {
+        let cache = PathBuf::from("/tmp/scan-idle-test");
+        let cmd = worker_command(
+            "http://hopper.example",
+            "host-idle",
+            &cache,
+            None,
+            96,
+            Some(std::ffi::OsStr::new("8")),
+        )
+        .expect("command");
+        let concurrency = cmd
+            .get_envs()
+            .find(|(key, _)| *key == std::ffi::OsStr::new("SCAN_CLEAVE_CONCURRENCY"))
+            .and_then(|(_, value)| value);
+        assert_eq!(concurrency, Some(std::ffi::OsStr::new("8")));
+        let args: Vec<_> = cmd.get_args().collect();
+        let slots = args
+            .windows(2)
+            .find(|pair| pair[0] == std::ffi::OsStr::new("--workers"))
+            .map(|pair| pair[1]);
+        assert_eq!(slots, Some(std::ffi::OsStr::new("96")));
     }
 
     /// The server's `--traits-dir` is an in-process override, invisible to a
@@ -462,8 +500,15 @@ mod tests {
     fn the_command_forwards_the_servers_traits_dir() {
         let dir = PathBuf::from("/tmp/scan-idle-test");
         let traits = PathBuf::from("/var/lib/atomdrift/scan/traits");
-        let cmd = worker_command("http://hopper.example", "host-idle", &dir, Some(&traits), 4)
-            .expect("command");
+        let cmd = worker_command(
+            "http://hopper.example",
+            "host-idle",
+            &dir,
+            Some(&traits),
+            4,
+            None,
+        )
+        .expect("command");
         let args: Vec<_> = cmd
             .get_args()
             .map(|a| a.to_string_lossy().to_string())

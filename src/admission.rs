@@ -162,16 +162,52 @@ fn live_used() -> Option<u64> {
     cleave::memory_tracker::current_rss()
 }
 
+/// A dedicated Linux worker cgroup also charges Rizin children and tmpfs.
+/// Process RSS alone misses those, so an operator may use the cgroup's live
+/// charge for admission. Fall back to process RSS outside cgroup v2 or when
+/// its accounting file is unavailable.
+fn live_cgroup_used() -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        static MEMORY_CURRENT: std::sync::OnceLock<Option<std::path::PathBuf>> =
+            std::sync::OnceLock::new();
+        let path = MEMORY_CURRENT.get_or_init(|| {
+            let membership = std::fs::read_to_string("/proc/self/cgroup").ok()?;
+            cgroup_memory_path(&membership)
+        });
+        if let Some(path) = path
+            && let Ok(value) = std::fs::read_to_string(path)
+            && let Ok(bytes) = value.trim().parse::<u64>()
+        {
+            return Some(bytes);
+        }
+    }
+    live_used()
+}
+
+#[cfg(target_os = "linux")]
+fn cgroup_memory_path(membership: &str) -> Option<std::path::PathBuf> {
+    let group = membership
+        .lines()
+        .find_map(|line| line.strip_prefix("0::"))?;
+    Some(
+        std::path::Path::new("/sys/fs/cgroup")
+            .join(group.trim_start_matches('/'))
+            .join("memory.current"),
+    )
+}
+
 fn dynamic_estimate_bytes(
     path: &str,
     file_type: &str,
     on_disk_bytes: i64,
     head: Option<&[u8]>,
+    archive_multiplier: u64,
 ) -> u64 {
     let bytes = u64::try_from(on_disk_bytes).unwrap_or(0);
     if looks_like_archive(path, file_type) || head.is_some_and(looks_like_archive_bytes) {
         bytes
-            .saturating_mul(ARCHIVE_ESTIMATE_MULTIPLIER)
+            .saturating_mul(archive_multiplier)
             .saturating_add(DEFAULT_FLAT_ESTIMATE_BYTES)
             .min(MAX_ARCHIVE_ESTIMATE_BYTES)
     } else {
@@ -247,6 +283,9 @@ pub(crate) struct MemoryAdmission {
     /// Optional fixed reservation override. When absent, reservations are
     /// estimated from the job path/type/size.
     fixed_est_bytes: Option<u64>,
+    /// Size slope for archive reservations; the live-RSS check remains the
+    /// backstop when compressed size understates expanded member state.
+    archive_multiplier: u64,
     /// Sum of in-flight reservations.
     reserved: AtomicU64,
     next_id: AtomicU64,
@@ -266,11 +305,27 @@ impl MemoryAdmission {
     /// auto = 85% of RAM); `0` disables proactive throttling so an operator who
     /// opts out, or an unsupported platform, degrades to slot-limited dispatch.
     pub(crate) fn new(ceiling_bytes: u64) -> Arc<Self> {
+        let use_cgroup = cfg!(target_os = "linux")
+            && std::env::var("SCAN_ADMISSION_CGROUP").is_ok_and(|value| value == "1");
+        let used_fn = if use_cgroup {
+            live_cgroup_used
+        } else {
+            live_used
+        };
         let fixed_est_bytes = std::env::var("SCAN_PER_SLOT_ESTIMATE_MB")
             .ok()
             .and_then(|value| value.parse::<u64>().ok())
             .and_then(|mb| mb.checked_mul(1024 * 1024))
             .filter(|b| *b > 0);
+        let archive_multiplier = std::env::var("SCAN_ARCHIVE_ESTIMATE_MULTIPLIER")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|&value| (1..=64).contains(&value))
+            .unwrap_or(ARCHIVE_ESTIMATE_MULTIPLIER);
+        tracing::info!(
+            usage_source = if use_cgroup { "cgroup" } else { "process-rss" },
+            "memory admission usage source",
+        );
 
         if ceiling_bytes == 0 {
             tracing::warn!("memory admission disabled (max-rss 0); dispatch is slot-limited only");
@@ -285,7 +340,7 @@ impl MemoryAdmission {
                     ceiling_gb = ceiling_bytes as f64 / GIB,
                     flat_estimate_gb = DEFAULT_FLAT_ESTIMATE_BYTES as f64 / GIB,
                     max_archive_estimate_gb = MAX_ARCHIVE_ESTIMATE_BYTES as f64 / GIB,
-                    archive_multiplier = ARCHIVE_ESTIMATE_MULTIPLIER,
+                    archive_multiplier,
                     "live memory admission enabled with dynamic estimates",
                 ),
             }
@@ -309,11 +364,12 @@ impl MemoryAdmission {
         Arc::new(Self {
             ceiling_bytes,
             fixed_est_bytes,
+            archive_multiplier,
             reserved: AtomicU64::new(0),
             next_id: AtomicU64::new(0),
             inflight: Mutex::new(Vec::new()),
             released: Notify::new(),
-            used_fn: live_used,
+            used_fn,
             available_fn: live_available,
             host_floor_bytes,
         })
@@ -360,9 +416,15 @@ impl MemoryAdmission {
     ) -> AdmissionGuard {
         let started = Instant::now();
         let mut paused = false;
-        let est = self
-            .fixed_est_bytes
-            .unwrap_or_else(|| dynamic_estimate_bytes(&path, &file_type, on_disk_bytes, head));
+        let est = self.fixed_est_bytes.unwrap_or_else(|| {
+            dynamic_estimate_bytes(
+                &path,
+                &file_type,
+                on_disk_bytes,
+                head,
+                self.archive_multiplier,
+            )
+        });
 
         loop {
             // Registered before the check: `release` wakes only waiters that
@@ -642,6 +704,24 @@ mod tests {
 
     const GB: u64 = 1024 * 1024 * 1024;
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cgroup_v2_memory_path_is_scoped_to_the_worker_group() {
+        let membership =
+            "12:cpu:/system.slice/example.service\n0::/system.slice/example.service/idle\n";
+        assert_eq!(
+            cgroup_memory_path(membership),
+            Some(
+                std::path::Path::new("/sys/fs/cgroup/system.slice/example.service/idle")
+                    .join("memory.current")
+            ),
+        );
+        assert_eq!(
+            cgroup_memory_path("12:cpu:/system.slice/example.service\n"),
+            None
+        );
+    }
+
     fn no_used() -> Option<u64> {
         None
     }
@@ -671,6 +751,7 @@ mod tests {
         Arc::new(MemoryAdmission {
             ceiling_bytes: ceiling,
             fixed_est_bytes: Some(est),
+            archive_multiplier: ARCHIVE_ESTIMATE_MULTIPLIER,
             reserved: AtomicU64::new(0),
             next_id: AtomicU64::new(0),
             inflight: Mutex::new(Vec::new()),
@@ -737,9 +818,10 @@ mod tests {
     fn suffix_less_tarball_estimates_as_archive_when_sniffed() {
         // `v1`: a 37 MB gzip tarball hopper hands out with no suffix. Path and
         // type say "flat"; the bytes say archive.
-        let flat = dynamic_estimate_bytes("v1", "data", 37 * 1024 * 1024, None);
+        let flat = dynamic_estimate_bytes("v1", "data", 37 * 1024 * 1024, None, 8);
         assert_eq!(flat, DEFAULT_FLAT_ESTIMATE_BYTES);
-        let sniffed = dynamic_estimate_bytes("v1", "data", 37 * 1024 * 1024, Some(b"\x1f\x8b\x08"));
+        let sniffed =
+            dynamic_estimate_bytes("v1", "data", 37 * 1024 * 1024, Some(b"\x1f\x8b\x08"), 8);
         assert!(sniffed > flat);
     }
 
@@ -809,14 +891,18 @@ mod tests {
 
     #[test]
     fn dynamic_estimate_scales_archives_by_size() {
-        let small_zip = dynamic_estimate_bytes("pkg.zip", "data", 10 * 1024 * 1024, None);
-        let big_zip = dynamic_estimate_bytes("pkg.zip", "data", 100 * 1024 * 1024, None);
+        let small_zip = dynamic_estimate_bytes("pkg.zip", "data", 10 * 1024 * 1024, None, 8);
+        let big_zip = dynamic_estimate_bytes("pkg.zip", "data", 100 * 1024 * 1024, None, 8);
         assert!(small_zip > DEFAULT_FLAT_ESTIMATE_BYTES);
         assert!(big_zip > small_zip);
         assert!(big_zip <= MAX_ARCHIVE_ESTIMATE_BYTES);
         assert_eq!(
-            dynamic_estimate_bytes("plain.js", "javascript", 10 * 1024 * 1024, None),
+            dynamic_estimate_bytes("plain.js", "javascript", 10 * 1024 * 1024, None, 8),
             DEFAULT_FLAT_ESTIMATE_BYTES,
+        );
+        assert_eq!(
+            dynamic_estimate_bytes("pkg.zip", "data", 100 * 1024 * 1024, None, 16),
+            DEFAULT_FLAT_ESTIMATE_BYTES + 16 * 100 * 1024 * 1024,
         );
     }
 

@@ -66,6 +66,21 @@ impl Scratch {
         Ok(scratch)
     }
 
+    /// Give the worker's large-input spool a process-owned tree on a
+    /// disk-backed filesystem. The same lock and startup sweep used for
+    /// /tmp reclaim files left by SIGKILL without touching a live worker.
+    ///
+    /// # Safety
+    /// Call before spawning threads or reading `SCAN_SPOOL_DIR`.
+    #[allow(unsafe_code)]
+    pub(crate) unsafe fn install_spool(root: &Path) -> io::Result<Self> {
+        std::fs::create_dir_all(root)?;
+        let scratch = Self::in_dir(root)?;
+        // SAFETY: the caller guarantees single-threaded startup.
+        unsafe { std::env::set_var("SCAN_SPOOL_DIR", scratch.path().join("scan-spool")) };
+        Ok(scratch)
+    }
+
     /// Reclaim abandoned siblings after logging is ready. A cleanup failure
     /// must not prevent an otherwise healthy process from starting.
     pub(crate) fn cleanup_abandoned(&self) {

@@ -338,6 +338,25 @@ fn main() -> ExitCode {
             return ExitCode::from(EXIT_ERROR);
         }
     };
+    let cli = Cli::parse();
+    let _spool_scratch = if matches!(&cli.command, Command::Worker { .. }) {
+        if let Some(root) = std::env::var_os("SCAN_SPOOL_ROOT") {
+            // SAFETY: startup is still single-threaded. Large downloaded
+            // inputs use the process-owned disk root; archive extraction and
+            // other dependency scratch remain on the private tmpfs.
+            match unsafe { temp_space::Scratch::install_spool(std::path::Path::new(&root)) } {
+                Ok(scratch) => Some(scratch),
+                Err(error) => {
+                    eprintln!("postdoc: cannot prepare spool storage: {error}");
+                    return ExitCode::from(EXIT_ERROR);
+                }
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
 
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -347,6 +366,9 @@ fn main() -> ExitCode {
         .init();
 
     _scratch.cleanup_abandoned();
+    if let Some(spool) = &_spool_scratch {
+        spool.cleanup_abandoned();
+    }
 
     // Crash and thread dumps: a wedged worker has to be diagnosable in place,
     // and this must follow the signal mask `runtime::install` set.
@@ -357,7 +379,7 @@ fn main() -> ExitCode {
     // Stabilize trait discovery before any cleave shared resource initializes.
     scan::traits_repo::prepare_runtime_env();
 
-    match run(Cli::parse()) {
+    match run(cli) {
         Ok(code) => code,
         Err(error) => {
             eprintln!("postdoc: {error:#}");

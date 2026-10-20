@@ -1,0 +1,86 @@
+--- a/micro-behaviors/data/control-flow/analysis/javascript.yaml
++++ b/micro-behaviors/data/control-flow/analysis/javascript.yaml
+@@ -75,7 +75,7 @@
+       language: javascript
+       # Matches: catch(e) { ... e[prop][method](); } or e.prop.method()
+       query: |
+-        (catch_clause
++        ((catch_clause
+           parameter: (identifier) @err_param
+           body: (statement_block
+             (expression_statement
+@@ -91,7 +91,7 @@
+             )
+           )
+         )
+-        (#eq? @err_param @err_use)
++        (#eq? @err_param @err_use))
+   - id: js-dynamic-method-call
+     desc: Calls a method via computed bracket access
+     crit: baseline
+--- a/micro-behaviors/data/control-flow/analysis/loop.yaml
++++ b/micro-behaviors/data/control-flow/analysis/loop.yaml
+@@ -19,7 +19,7 @@
+       type: tree-sitter
+       language: javascript
+       query: |
+-        (while_statement
++        ((while_statement
+           body: (statement_block
+             (expression_statement
+               (augmented_assignment_expression
+@@ -29,7 +29,7 @@
+             )
+           )
+         )
+-        (#not-match? @step "^(approx|delta|epsilon|error|precision|diff|sum|total|chunk|byte|char|line|data|common|buffer|res)$")
++        (#not-match? @step "^(approx|delta|epsilon|error|precision|diff|sum|total|chunk|byte|char|line|data|common|buffer|res)$"))
+     unless:
+       - type: basename
+         regex: '(^jsbn(-combined|2)?\.js$|\.js\.map$)'
+--- a/micro-behaviors/data/encode/url/command-output.yaml
++++ b/micro-behaviors/data/encode/url/command-output.yaml
+@@ -12,7 +12,7 @@
+   desc: URI-encoded shell output reaches callback
+   if:
+     type: tree-sitter
+-    query: '(try_statement body: (statement_block (variable_declaration (variable_declarator name: (identifier) @output value: (call_expression function: (member_expression object: (call_expression function: (member_expression property: (property_identifier) @exec)) property: (property_identifier) @trim)))) (expression_statement (call_expression arguments: (arguments (binary_expression right: (call_expression function: (identifier) @encode arguments: (arguments (identifier) @sent)))))))) @block (#eq? @exec "execSync") (#eq? @trim "trim") (#eq? @encode "encodeURIComponent") (#eq? @output @sent)'
++    query: '((try_statement body: (statement_block (variable_declaration (variable_declarator name: (identifier) @output value: (call_expression function: (member_expression object: (call_expression function: (member_expression property: (property_identifier) @exec)) property: (property_identifier) @trim)))) (expression_statement (call_expression arguments: (arguments (binary_expression right: (call_expression function: (identifier) @encode arguments: (arguments (identifier) @sent)))))))) @block (#eq? @exec "execSync") (#eq? @trim "trim") (#eq? @encode "encodeURIComponent") (#eq? @output @sent))'
+ - id: execsync-output-uri-encode-call
+   desc: encodeURIComponent wraps execSync trimmed output
+   if:
+--- a/micro-behaviors/data/string/concat/javascript.yaml
++++ b/micro-behaviors/data/string/concat/javascript.yaml
+@@ -11,10 +11,10 @@
+       type: tree-sitter
+       language: javascript
+       query: |
+-        (variable_declaration
++        ((variable_declaration
+           (variable_declarator
+             value: (string) @init))
+-        (#match? @init "^(\"\"|'')$")
++        (#match? @init "^(\"\"|'')$"))
+ 
+   - id: dotted-variable-template
+     desc: JavaScript dotted variable template
+--- a/objectives/anti-static/obfuscation/syntax/decimal-xor-loop.yaml
++++ b/objectives/anti-static/obfuscation/syntax/decimal-xor-loop.yaml
+@@ -9,7 +9,7 @@
+       type: tree-sitter
+       language: javascript
+       query: |
+-        (while_statement
++        ((while_statement
+           body: (statement_block
+             (expression_statement
+               (assignment_expression
+@@ -27,7 +27,7 @@
+             )
+           )
+         )
+-        (#eq? @fn "parseInt")
++        (#eq? @fn "parseInt"))
+     unless:
+       - id: metadata/build/
+       - id: micro-behaviors/crypto/symmetric/aes/script::js-aes-inv-key-schedule
