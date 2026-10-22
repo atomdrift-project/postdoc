@@ -3620,7 +3620,24 @@ async fn prefetch_loop(shared: Arc<WorkerShared>, tx: mpsc::UnboundedSender<Pref
     // hour still reads as starved, which it is.
     let mut last_productive = Instant::now();
     let mut dry_warned_at: Option<Instant> = None;
+    // Keep staging earlier claims while polling for newly available room. One
+    // slow body (or a download waiting for the RAM budget) must not hold the
+    // next claim behind the rest of its burst. The gate retains the previous
+    // active-download bound; target_depth still bounds all outstanding jobs.
+    let download_gate = Arc::new(Semaphore::new(shared.slots));
+    let mut batches = JoinSet::<bool>::new();
     while !shared.stop.is_raised() {
+        while let Some(result) = batches.try_join_next() {
+            match result {
+                Ok(true) => {}
+                Ok(false) => return,
+                Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
+                Err(error) => {
+                    tracing::warn!(error = %error, "prefetch staging task cancelled");
+                    return;
+                }
+            }
+        }
         // Bound claimed jobs here; each download separately reserves bytes
         // before allocating, rather than allowing a whole batch to overshoot.
         let room = shared
@@ -3640,8 +3657,8 @@ async fn prefetch_loop(shared: Arc<WorkerShared>, tx: mpsc::UnboundedSender<Pref
             continue;
         }
 
-        // Cap a single poll's burst to `slots` so concurrent downloads stay
-        // bounded; the depth fills over a few polls.
+        // Cap a single response to `slots`; the shared download gate also
+        // bounds active requests across overlapping claim bursts.
         let count = room.min(shared.slots);
         let url = shared.hopper.poll_url(count, shared.slots);
         // Stamp the poll so the heartbeat can report poll age and want/claim.
@@ -3712,9 +3729,19 @@ async fn prefetch_loop(shared: Arc<WorkerShared>, tx: mpsc::UnboundedSender<Pref
                     );
                 }
                 last_productive = Instant::now();
-                if !stage_claimed(&shared, &tx, jobs).await {
-                    return; // the slots are gone
-                }
+                // Reserve the complete burst before spawning, so the next
+                // loop cannot claim past target_depth before its task polls.
+                shared.outstanding.fetch_add(jobs.len(), Ordering::Release);
+                let staging_shared = Arc::clone(&shared);
+                let staging_tx = tx.clone();
+                let gate = Arc::clone(&download_gate);
+                batches.spawn(async move {
+                    let accepted = stage_claimed(&staging_shared, &staging_tx, jobs, &gate).await;
+                    // Wake the producer to reap this task, including a closed
+                    // consumer, even when the outstanding queue is full.
+                    staging_shared.room.notify_one();
+                    accepted
+                });
             }
             Err(e) => {
                 consecutive_errors += 1;
@@ -3738,33 +3765,42 @@ async fn stage_claimed(
     shared: &Arc<WorkerShared>,
     tx: &mpsc::UnboundedSender<PrefetchedJob>,
     jobs: Vec<ClaimJob>,
+    download_gate: &Arc<Semaphore>,
 ) -> bool {
-    shared.outstanding.fetch_add(jobs.len(), Ordering::Release);
     let mut downloads = JoinSet::new();
     for job in jobs {
         let shared = Arc::clone(shared);
+        let gate = Arc::clone(download_gate);
         downloads.spawn(async move {
-            prefetch_one(
-                &shared.hopper,
-                shared.data_root.as_deref(),
-                &shared.spool,
-                job,
+            let _permit = gate.acquire_owned().await?;
+            Ok::<_, tokio::sync::AcquireError>(
+                prefetch_one(
+                    &shared.hopper,
+                    shared.data_root.as_deref(),
+                    &shared.spool,
+                    job,
+                )
+                .await,
             )
-            .await
         });
     }
     while let Some(res) = downloads.join_next().await {
         match res {
-            Ok(mut pj) => {
+            Ok(Ok(mut pj)) => {
                 // Enters the local queue now; tracked until its tail finishes.
                 pj.queue_id = shared.metrics.enqueue();
                 if tx.send(pj).is_err() {
                     return false;
                 }
             }
+            Ok(Err(error)) => {
+                tracing::debug!(%error, "prefetch download gate closed; ending staging");
+                return false;
+            }
             Err(e) => {
                 // Download task panicked; reclaim its depth slot.
                 shared.outstanding.fetch_sub(1, Ordering::Release);
+                shared.room.notify_one();
                 tracing::warn!(error = %e, "prefetch task panicked");
             }
         }
@@ -6549,6 +6585,8 @@ mod tests {
         assert!(spool.try_reserve(50).is_ok());
         assert!(spool.try_reserve(1).is_err());
     }
+
+    include!("worker_prefetch_tests.rs");
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn prefetcher_fills_to_target_backpressures_and_refills() {

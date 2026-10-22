@@ -30,7 +30,7 @@ Environment variables read at startup:
 | Variable               | Effect                                                       |
 | ---------------------- | ------------------------------------------------------------ |
 | `CLEAVE_TRAITS_DIR`    | Traits directory. `--traits-dir` overrides.                  |
-| `CLEAVE_RAYON_THREADS` | Override rayon pool size. Default is system parallelism.     |
+| `RAYON_NUM_THREADS` | Override global Rayon pool size. Default is available CPU parallelism. |
 | `SCAN_MODELS_REPO`   | Model repository URL.                                        |
 | `SCAN_WHALE_POOL_THREADS` | Threads in each whale's private pool (below); `0` sends whales to the global pool. Default: a quarter of the physical cores, 2–16. |
 | `SCAN_SMALL_POOL_THREADS` | Threads in a small payload's private pool; `0` keeps small payloads on the global pool. Default: an eighth of the physical cores, 2–8. |

@@ -20,6 +20,8 @@ import subprocess
 import sys
 import time
 
+from bench_host_memory import read_memory_state
+
 
 def manifest(root):
     rows = []
@@ -53,6 +55,18 @@ def memory(group):
             "frozen": int(control.get("frozen", 0)),
             **{k + "_bytes": int(stats.get(k, 0)) for k in ("anon", "shmem", "file", "kernel")},
             "events": {k: int(v) for k, v in events.items()}}
+
+
+def cpu(group):
+    return {key: int(value) for key, value in
+            (line.split() for line in (group / "cpu.stat").read_text().splitlines())}
+
+
+def host_load():
+    fields = Path("/proc/stat").read_text().splitlines()[0].split()[1:9]
+    return {"cpu_ticks": [int(value) for value in fields],
+            "ticks_per_second": os.sysconf("SC_CLK_TCK"),
+            **read_memory_state()}
 
 
 def upload(port, root, row, output, timeout):
@@ -140,6 +154,7 @@ def main():
     if args.gate:
         env["SCAN_CLEAVE_CONCURRENCY"] = str(args.gate)
     config = {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()}
+    config["host_memory_guard"] = os.environ.get("POSTDOC_BENCH_HOST_GUARD")
     with args.binary.open("rb") as stream:
         config["binary_sha256"] = hashlib.file_digest(stream, "sha256").hexdigest()
     config.update(unit=unit, env=env, idle_worker_enabled=False)
@@ -166,6 +181,7 @@ def main():
         futures = None
         foreground_started = None
         foreground_finished = None
+        foreground_cpu_start = None
         peak_by_type = {}
         with (output / "memory.jsonl").open("w") as samples:
             while True:
@@ -180,7 +196,8 @@ def main():
                     continue
                 group = Path("/sys/fs/cgroup") / state["ControlGroup"].lstrip("/")
                 phase = "startup" if futures is None else "foreground"
-                sample = {"elapsed_s": elapsed, "phase": phase, "service": memory(group)}
+                sample = {"elapsed_s": elapsed, "phase": phase, "service": memory(group),
+                          "cpu": cpu(group), "host": host_load()}
                 if (group / "idle").exists():
                     raise RuntimeError("unexpected idle worker cgroup during foreground benchmark")
                 for key in ("anon_bytes", "shmem_bytes", "file_bytes", "kernel_bytes"):
@@ -205,6 +222,7 @@ def main():
                         raise RuntimeError("idle worker must be disabled for foreground benchmarks")
                     (output / "stats-before.json").write_text(json.dumps(stats, indent=2) + "\n")
                     executor = ThreadPoolExecutor(max_workers=args.clients)
+                    foreground_cpu_start = cpu(group)
                     foreground_started = time.monotonic()
                     futures = [executor.submit(upload, port, root, row, responses, args.timeout)
                                for row in foreground]
@@ -230,7 +248,9 @@ def main():
                    "ready_s": ready_at - service_started,
                    "foreground_wall_s": foreground_finished - foreground_started,
                    "service_wall_s": time.monotonic() - service_started,
-                   "cgroup_final": memory(group), "sampled_peak_by_type": peak_by_type}
+                   "cgroup_final": memory(group), "sampled_peak_by_type": peak_by_type,
+                   "foreground_cpu_start": foreground_cpu_start,
+                   "foreground_cpu_end": cpu(group)}
         with (output / "foreground-fingerprint.json").open("w") as fp:
             subprocess.run([sys.executable, str(Path(__file__).with_name("detect-fingerprint.py")),
                             str(responses), "--content"], stdout=fp, check=True)

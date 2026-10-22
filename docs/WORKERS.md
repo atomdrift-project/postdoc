@@ -98,9 +98,9 @@ The worker is designed to share a host with other work.
   `memoryuse`, cgroup, etc.) that already enforces a hard cap.
 - **Concurrency.** `--workers` is the hard limit on simultaneous
   analyses. There is no queue beyond hopper itself.
-- **Rayon stack.** Worker startup installs an 8 MB rayon stack;
-  cleave's archive recursion exhausts the default 2 MB stack on
-  pathological inputs.
+- **Rayon pool.** The global analysis pool uses Rayon's default sizing and
+  stacks. Set `RAYON_NUM_THREADS` before startup to override its width.
+  Use the same pool settings in throughput benchmarks and deployment.
 
 ## Operations
 

@@ -28,6 +28,31 @@ Compare fingerprint.json before accepting any timing/memory result. Analysis
 errors are outcomes, not successful verdicts; inspect them even when the
 worker exits successfully. Repeat A/B runs when shared-host load is variable.
 
+For the 40% sample-throughput target, compare complete current-format worker
+replays (including cgroup accounting) with:
+
+  python3 scripts/compare-throughput.py out/before out/after \
+    --target 1.4 --report out/throughput-comparison.json
+
+This recomputes full content fingerprints from all retained responses and
+requires identical outcomes, including errors. A 40% throughput gain means
+wall time at most baseline / 1.4, about 28.6% shorter. Timing alone cannot
+pass the comparison. Preserve input, model, and rule snapshots; repeat the
+pair under comparable host load. Keep foreground and idle-worker modes
+separate and collect CPU profiles in a separate diagnostic run.
+
+For three runs per version, alternate before/after runs, then compare medians:
+
+  python3 scripts/compare-throughput.py out/before-1 out/after-1 \
+    --before-repeat out/before-2 --before-repeat out/before-3 \
+    --after-repeat out/after-2 --after-repeat out/after-3 \
+    --target 1.4 --report out/throughput-three-runs.json
+
+All six replays must be complete and have matching full outcomes. The tool
+also checks that the executable stays fixed within each version and that
+worker, allocator, admission, asset paths, and tuning settings match. Preserve
+asset content hashes separately and inspect the retained host-load samples.
+
 Memory scope: peak_rss_mib is the worker process's VmHWM, sampled while it
 runs. It excludes helper processes and filesystem memory. Benchmark extraction
 uses output/scratch on disk to avoid competing with the production /tmp cap.
@@ -61,6 +86,9 @@ whole-cgroup current/peak memory, anon, shmem, file cache, kernel, and OOM
 counters. summary.json retains these along with worker RSS. Per-type sampled
 peaks can occur at different times, so do not add them together. Disk output
 and input page-cache charges are included in file; shmem is a subset of file.
+CPU counters include the worker and its helpers. Host CPU ticks and available
+memory are sampled alongside them to identify interference from other jobs;
+these counters do not replace repeated wall-clock comparisons.
 --scratch-root creates a private directory and removes it after stopping all
 benchmark processes. A failed/timed-out run writes failure.json with partial
 progress; it is never represented as a completed benchmark.
@@ -202,6 +230,14 @@ archive. Replay this corpus with the worker harness above and compare complete
 reports. Include cgroup memory: jemalloc profiles omit anonymous mappings.
 Check the full workload separately before accepting memory or timing claims.
 
+Linux host memory samples retain raw MemAvailable and report OpenZFS ARC
+separately. Benchmark guards may credit half the clean, evictable ARC above
+its kernel floor, capped at 64 GiB, after subtracting memory already included
+in KReclaimable. They retain a 16 GiB effective reserve and stop below 4 GiB
+raw MemAvailable. This changes benchmark accounting only; application cgroup
+limits and ZFS cache settings stay fixed. Both versions must use the same
+guard policy, and cgroup peaks still include the application's actual memory.
+
 For production worker-only tuning, POSTDOC_IDLE_CLEAVE_CONCURRENCY sets the
 idle child's heavy-analysis gate. The server forwards it to that child as
 SCAN_CLEAVE_CONCURRENCY; request concurrency and idle download slots retain
@@ -224,3 +260,40 @@ and preserve literal arguments. CPU sampling belongs in a separate run or
 after an explicitly retired timing window. perf's inclusive fork/exec costs
 include their page-table copying/unmapping children; avoid adding those leaf
 percentages again. Keep the exact sampled executable for symbolization.
+
+Throughput investigation wrap-up (2026-10-22)
+
+The 40% goal was not established. On the frozen 404-input worker corpus,
+the original baseline took 1642.66 s. The best experimental tuning screen
+took 1290.20 s (+27.3% throughput), with a 41.37 GiB whole-cgroup peak and
+no OOM events. It used the scoped native Rizin indexes and a 64-thread
+global pool, with inner/nested owner caps of 4/64. These settings and native
+prototypes have not been deployed or integrated into the default runtime.
+
+A separate 16-thread member-model pool took 1326.42 s and peaked at
+38.31 GiB without OOMs. Its lower peak came with 2.8% longer wall time than
+the best screen, so it was not integrated. Both screens completed all inputs
+and retained the same one known malformed-input error. These are individual
+measurements, not a successful three-pair acceptance result.
+
+The best screen still has strict report differences, including independently
+reproduced baseline nondeterminism. Evidence normalization, accurate deadline
+diagnostics and deterministic stng fragment ordering remain separate source
+prototypes; their combined application validation is unfinished. Do not waive
+these differences or claim full output parity. Reviewed outcome improvements
+are permitted, but the observed nondeterminism must be fixed before acceptance.
+
+The workspace retains the validated overlapping prefetch implementation:
+10 prefetch tests, formatting and strict all-target postdoc Clippy passed.
+The benchmark memory-accounting and comparison helpers passed 14 Python
+tests. The model-pool experiment separately passed 20 pipeline tests and
+strict postdoc Clippy; that is functional evidence, not a throughput win.
+
+At wrap-up all experiment processes were stopped and the private benchmark
+tmpfs was released. Saved reports and source prototypes remain under
+out/throughput; wrapup-results.json records their scope and remaining work.
+System /tmp remains a 16 GiB tmpfs with hourly regular-file cleanup after
+12 hours of inactivity. Sockets and other non-regular files are excluded.
+The production service was left inactive, as before this final screen; its
+configured MemoryMax remains 128 GiB. The 48 GiB backstop applied to these
+benchmarks and is not a newly installed production limit.

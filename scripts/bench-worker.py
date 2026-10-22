@@ -17,6 +17,8 @@ import sys
 import tempfile
 import time
 
+from bench_host_memory import read_memory_state
+
 
 def stop(process):
     if process is None:
@@ -36,10 +38,19 @@ def stop(process):
 def cgroup_sample(group):
     stats = dict(line.split() for line in (group / "memory.stat").read_text().splitlines())
     events = dict(line.split() for line in (group / "memory.events").read_text().splitlines())
+    cpu = dict(line.split() for line in (group / "cpu.stat").read_text().splitlines())
     return {"current_bytes": int((group / "memory.current").read_text()),
             "peak_bytes": int((group / "memory.peak").read_text()),
             **{name + "_bytes": int(stats.get(name, 0)) for name in ("anon", "shmem", "file", "kernel")},
-            "events": {name: int(value) for name, value in events.items()}}
+            "events": {name: int(value) for name, value in events.items()},
+            "cpu": {name: int(value) for name, value in cpu.items()}}
+
+
+def host_load():
+    fields = Path("/proc/stat").read_text().splitlines()[0].split()[1:9]
+    return {"cpu_ticks": [int(value) for value in fields],
+            "ticks_per_second": os.sysconf("SC_CLK_TCK"),
+            **read_memory_state()}
 
 
 def main():
@@ -117,6 +128,7 @@ def main():
         "binary_sha256": hashlib.sha256(args.binary.read_bytes()).hexdigest(),
         "models_dir": env.get("SCAN_MODELS_DIR"), "traits_dir": env.get("CLEAVE_TRAITS_DIR"),
         "cache_dir": env.get("XDG_CACHE_HOME"), "cgroup": str(group) if group else None,
+        "host_memory_guard": env.get("POSTDOC_BENCH_HOST_GUARD"),
         "tuning_env": {name: env[name] for name in (
             "SCAN_CLEAVE_CONCURRENCY", "SCAN_STAGED_BUFFER_MB",
             "SCAN_ARCHIVE_ESTIMATE_MULTIPLIER",
@@ -173,6 +185,7 @@ def main():
                         sample = {"elapsed_s": elapsed, "rss_kib": rss, "peak_kib": peak_kib}
                         if group:
                             sample["cgroup"] = cgroup_sample(group)
+                            sample["host"] = host_load()
                             for name in ("anon", "shmem", "file", "kernel"):
                                 key = name + "_bytes"
                                 group_peak[key] = max(group_peak.get(key, 0), sample["cgroup"][key])
