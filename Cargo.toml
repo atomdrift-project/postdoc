@@ -117,6 +117,8 @@ tree-sitter = "0.28"
 # `links = "tree-sitter-language"` permits exactly one copy in the graph.
 # Keep in lockstep with the siblings; remove when a release lands.
 [patch.crates-io]
+# Inherited from a sibling by update-deps: [patch] applies only in the root.
+wasmtime = { git = "https://github.com/tstromberg/wasmtime.git", branch = "netbsd-solaris-45.0.3" }
 # Unicode-safe brace-range scanner; shared across consumers by update-deps.
 tree-sitter-bash = { git = "https://github.com/tstromberg/tree-sitter-bash" }
 tree-sitter = { git = "https://github.com/tstromberg/tree-sitter", branch = "master" }
