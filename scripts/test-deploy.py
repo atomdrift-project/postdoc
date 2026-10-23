@@ -207,6 +207,33 @@ class DeployTests(unittest.TestCase):
         self.assertNotIn("SCAN_LLM_KEY", saved)
         self.assertIn("WorkingDirectory=" + str(host.home) + "\n", unit)
 
+    def test_make_default_llm_chain_reaches_services_and_keeps_keys_separate(self):
+        env = {key: value for key, value in os.environ.items()
+               if key not in ("LLM", "MAKEFLAGS", "MFLAGS", "MAKELEVEL")}
+        result = subprocess.run(
+            ["make", "--no-print-directory", "-s", "-f", "Makefile", "-f", "-", "postdoc-test-llm-default"],
+            input="postdoc-test-llm-default:\n\t@printf '%s' '$(LLM)'\n",
+            cwd=SCRIPTS.parent, env=env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        chain = result.stdout
+        self.assertEqual(chain, "https://llm.isotope13.ai/v1,http://10.9.8.14:8000/v1,openrouter")
+        for platform in ("Linux", "FreeBSD"):
+            for mode in ("serve", "worker"):
+                with self.subTest(platform=platform, mode=mode):
+                    host = self.host(platform=platform)
+                    deployed = host.run(mode=mode, LLM=chain)
+                    self.assertEqual(deployed.returncode, 0, deployed.stderr)
+                    saved = json.loads((host.config / (mode + ".json")).read_text())
+                    self.assertEqual(saved["LLM"], chain)
+                    if platform == "Linux":
+                        unit = host.units / ("postdoc.service" if mode == "serve" else "postdoc-worker.service")
+                        self.assertIn("SCAN_LLM=" + chain, unit.read_text())
+                    else:
+                        name = "postdoc" if mode == "serve" else "postdoc_worker"
+                        self.assertEqual(host.state()["rcconf"][name + "_llm"], chain)
+                    for name in ("llm", "openrouter"):
+                        self.assertEqual((host.home / ".tok" / name).read_text(), name + " token\n")
+
     def test_worker_paths_with_spaces_and_freebsd_llm_clear(self):
         host = self.host(platform="FreeBSD", existing=True)
         result = host.run("worker", DATA_DIR="/samples/data dir", WORKERS="2", LLM="", LLM_MODEL="a model with spaces")
