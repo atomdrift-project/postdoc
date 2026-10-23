@@ -18,7 +18,7 @@ CARGO = env -u MAKEFLAGS -u MAKELEVEL -u MFLAGS cargo
 # as a base URL verbatim, and a bare host:port fails in the HTTP client.
 # A comma-separated list is a failover chain tried in order, so put the
 # endpoint you would rather pay for last.
-LLM ?= http://10.9.8.149:8000/v1
+LLM ?= https://llm.isotope13.ai/v1,http://10.9.8.14:8000/v1,openrouter
 # Unset lets postdoc pick whatever the endpoint reports it serves.
 LLM_MODEL ?=
 

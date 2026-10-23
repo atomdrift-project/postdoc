@@ -188,6 +188,21 @@ works identically everywhere, so `--interpret` — already deprecated in favour
 of `--llm` — is never passed. Only supervision differs, because systemd, rc.d
 and NSSM are different things.
 
+The deployment default is
+`LLM=https://llm.isotope13.ai/v1,http://10.9.8.14:8000/v1,openrouter`.
+Each request tries isotope13 first, the private endpoint second, and OpenRouter
+last. `LLM=` disables the pass; `LLM=<chain>` overrides the endpoints.
+The first two endpoints use `~/.tok/llm`; OpenRouter uses its separate
+`~/.tok/openrouter` token. Both files are installed for the service when present.
+Without an OpenRouter token, that endpoint is dropped from the chain.
+
+`cargo test --locked --test llm_failover` exercises model discovery,
+authentication, and ordered failover against local HTTP servers. To test each
+real endpoint with the current user's credentials, run
+`cargo test --locked --test llm_failover live_ -- --ignored --nocapture`.
+These live tests send a small completion request to each endpoint, including
+OpenRouter.
+
 ### What each platform needs that the others do not
 
 **FreeBSD** runs on libc's jemalloc rather than the one linked into the
