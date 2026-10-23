@@ -235,6 +235,10 @@ pub(super) struct Flights {
     /// atomic with respect to each other: a flight cannot gain a follower
     /// between its count reaching zero and its removal.
     live: Mutex<HashMap<FlightKey, Live>>,
+    /// How every flight ended, for `/_/metrics`. Kept here because
+    /// [`Self::finish`] is the one place every analysis passes through exactly
+    /// once, abandoned ones included.
+    outcomes: super::metrics::Outcomes,
 }
 
 #[derive(Debug)]
@@ -322,6 +326,11 @@ impl Flights {
         census
     }
 
+    /// How every finished flight ended.
+    pub(super) const fn outcomes(&self) -> &super::metrics::Outcomes {
+        &self.outcomes
+    }
+
     /// Retire `flight` and wake everyone waiting on it.
     fn finish(&self, flight: &Arc<Flight>, outcome: Outcome) {
         let mut live = lock(&self.live);
@@ -334,6 +343,7 @@ impl Flights {
             live.remove(flight.key());
         }
         drop(live);
+        self.outcomes.record(flight.key(), &outcome);
         // `send_replace` stores the value even with no receivers attached yet,
         // so a follower that subscribes a moment later still sees it.
         let _ = flight.outcome.send_replace(Some(Arc::new(outcome)));

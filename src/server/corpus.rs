@@ -135,21 +135,21 @@ pub(crate) struct Sample {
 pub(crate) struct CorpusStats {
     /// Every deferral, and what came back. `unreachable` is the one that
     /// reaches a caller as a decision about us rather than the artifact.
-    found: u64,
-    nothing: u64,
-    unreachable: u64,
+    pub(super) found: u64,
+    pub(super) nothing: u64,
+    pub(super) unreachable: u64,
     /// Non-zero `failed` on the first address with traffic on a later one is
     /// a failover in progress, whether or not anyone has noticed.
     preferred_resting: bool,
-    by_address: Vec<AddressStats>,
+    pub(super) by_address: Vec<AddressStats>,
 }
 
 #[derive(Debug, serde::Serialize)]
-struct AddressStats {
-    address: String,
+pub(super) struct AddressStats {
+    pub(super) address: String,
     asked: u64,
-    answered: u64,
-    failed: u64,
+    pub(super) answered: u64,
+    pub(super) failed: u64,
 }
 
 /// The corpus behind this worker's index.

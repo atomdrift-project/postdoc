@@ -155,6 +155,27 @@ Unix deployments also copy `~/.tok/llm`, when present, into the service's home
 with mode 0600. `LLM_TOKEN_FILE` overrides its source path. The server and its
 idle child use this credential when the configured LLM endpoint requires one.
 
+On Linux and FreeBSD, `make deploy-server` and `make deploy-worker` automatically
+enable the isotope13 Enriched rules when a subscription token is available:
+fresh the hour they clear QA, instead of the four-hourly public roll-up.
+Deployment reads `ISOTOPE13_TOKEN`, then `~/.tok/isotope13`
+(`ISOTOPE13_TOKEN_FILE` overrides the source path), or reuses the service's
+installed token when the source is absent. It adds `--enriched` to the service
+command and installs the token as `<state>/.config/atomdrift/isotope13-api.json`,
+mode 0600. The resolved `ENRICHED` setting is saved in the deployment manifest,
+so a rollout keeps it. With no token, deployment uses public rules;
+`ENRICHED=1` requires a token and fails deployment if none is available.
+`ENRICHED=0` skips token provisioning. `--enriched` changes only which
+rules postdoc analyzes with: postdoc is what isotope13's remote analysis runs
+on, so it never asks isotope13 for a verdict, and `--analyze=remote` is refused.
+postdoc runs the Enriched rules whenever it finds a token, so `ENRICHED=0` does
+not undo an earlier `ENRICHED=1`: remove the installed `isotope13-api.json` to
+go back to the public rules. A token refused at startup stops the service from
+starting; one refused at a later renewal is logged at error level while the
+installed rules go on serving.
+Windows deployments do not install the token yet; set `ISOTOPE13_TOKEN` in the
+service environment there.
+
 ## The three platforms are treated alike
 
 Same flags, same defaults, same behaviour. Scan diverged on three: `--interpret`

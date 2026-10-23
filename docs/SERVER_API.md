@@ -410,6 +410,37 @@ size. `/_/requests` lists in-flight analyses with elapsed time and
 phase. `/_/threads` reports per-thread state (Linux: `wchan`, context
 switch counts; FreeBSD: rayon thread count; other platforms: error).
 
+### `GET /_/metrik` and OTLP push
+
+The same metrics the Go services export through `obs` (see
+`../obs/OBSERVABILITY.md`), on the same terms:
+
+- **Pushed** every 15s as OTLP/HTTP (JSON) to the Prometheus receiver at
+  `http://otel:9090/api/v1/otlp/v1/metrics`. `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`
+  is used verbatim; `OTEL_EXPORTER_OTLP_ENDPOINT` gets `/v1/metrics` appended;
+  `OTEL_METRICS_EXPORTER=none` turns pushing off. A box that cannot reach the
+  receiver warns once and logs again on recovery.
+- **Served** for scraping at `/_/metrik`, behind the bearer token, under the
+  names the receiver gives the pushed series, so one query reads either.
+- Series carry `job="postdoc"` and `instance="<host>-<pid>"`;
+  `target_info` carries `host_name`, `service_version` and
+  `deployment_environment` (`OTEL_DEPLOYMENT_ENVIRONMENT`, default `dev`).
+
+| Series | Labels | Meaning |
+| ------ | ------ | ------- |
+| `postdoc_analyses_finished_total` | `ecosystem`, `outcome` | Analyses finished, counted once per run however many callers shared it. `ecosystem` is the PURL type (`cargo`, `golang`, `npm`, `pypi`, `other`), `url`, or `sha256`. `outcome` is `analyzed`, `cached`, or the error code the run ended with (`unretrievable`, `invalid_artifact`, `at_capacity`, `internal`, …). |
+| `postdoc_analyses_running`, `postdoc_slots`, `postdoc_slots_free` | | Saturation, as on `/_/stats`. |
+| `postdoc_ready`, `postdoc_overloaded` | | `1` or `0`. |
+| `postdoc_uptime_seconds`, `postdoc_memory_rss_bytes` | | Process. |
+| `postdoc_corpus_lookups_total` | `result` | `found`, `nothing`, `unreachable`. |
+| `postdoc_corpus_requests_total` | `address`, `result` | Per corpus address, `answered` or `failed`. |
+| `postdoc_hopper_renewals_total` | `result` | `uploaded` or `failed`. |
+| `postdoc_hopper_renewals_pending` | | Queue depth. |
+
+A server whose analyses all end `unretrievable` while its peers' do not
+has lost its registry egress; `/_/stats` cannot show that, because a box
+failing every fetch in two seconds looks idle and fast.
+
 ## Status codes
 
 | Code | Cause                                                                   |

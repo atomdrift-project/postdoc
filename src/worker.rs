@@ -927,7 +927,7 @@ impl RulesStartup {
         scan::refresh_rules_at_startup(
             self.refresh == Refresh::Force,
             self.refresh == Refresh::Skip,
-        );
+        )?;
         let model_dir = scan::cli::resolve_model_dir(self.model_dir)?;
         let level = scan::cli::operating_level(self.level, self.thresholds.is_some(), &model_dir);
         Ok(Rules {
@@ -1396,6 +1396,16 @@ fn renew_resources_once(rules: &Rules) -> Result<Option<Arc<ModelResources>>> {
     };
     let traits_changed = match scan::traits_repo::update(false, true) {
         Ok(changed) => changed,
+        // A refused enriched token is not an outage to ride out quietly: the
+        // fleet goes on serving the rules it has, and says so at error level
+        // on every renewal until someone fixes the subscription.
+        Err(error) if scan::traits_repo::enriched_refusal(&error).is_some() => {
+            tracing::error!(
+                reason = scan::traits_repo::enriched_refusal(&error).unwrap_or_default(),
+                "enriched rules refused at renewal; serving the installed rules"
+            );
+            false
+        }
         Err(error) => {
             tracing::warn!(error = %error, "traits renewal fetch failed; treating traits as unchanged");
             false
@@ -5281,7 +5291,21 @@ mod tests {
     }
 
     fn test_hopper(base: &str) -> Hopper {
+        without_host_traits();
         Hopper::new(base, "test-worker").unwrap()
+    }
+
+    /// Every hopper request reports the traits version, which on a host with
+    /// rules installed means scanning that whole tree first, seconds that the
+    /// timing tests here cannot spare. They test the worker, not the rules, so
+    /// point cleave at an empty tree.
+    fn without_host_traits() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            let dir = std::env::temp_dir().join("postdoc-tests-no-traits");
+            fs::create_dir_all(&dir).expect("create empty traits dir");
+            cleave::traits_repo::set_override_dir(Some(dir));
+        });
     }
 
     /// Shared state for `config`, adjusted by `adjust` before it is shared.

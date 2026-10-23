@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Deployment settings, argument serialization and readiness checks."""
+import functools
 import json
 import os
 from pathlib import Path
@@ -11,7 +12,7 @@ import urllib.error
 import urllib.request
 
 KEYS = ("BIND", "ALLOW_CIDR", "WORKERS", "DATA_DIR", "MAX_RSS_GB", "IDLE",
-        "LLM", "LLM_MODEL", "MEMORY_MAX", "MEMORY_LOW", "IDLE_MEMORY_MAX", "NICE")
+        "LLM", "LLM_MODEL", "MEMORY_MAX", "MEMORY_LOW", "IDLE_MEMORY_MAX", "NICE", "ENRICHED")
 
 
 def arguments(mode, url, home):
@@ -23,7 +24,12 @@ def arguments(mode, url, home):
             raise ValueError(key + " must be a valid slot count")
     if os.environ.get("MAX_RSS_GB") and int(os.environ["MAX_RSS_GB"]) < -1:
         raise ValueError("MAX_RSS_GB must be -1 or nonnegative")
+    if os.environ.get("ENRICHED", "0") not in ("0", "1"):
+        raise ValueError("ENRICHED must be 0 or 1")
     args = [mode]
+    # The isotope13 Enriched rules; the token is installed beside the service.
+    if os.environ.get("ENRICHED") == "1":
+        args += ["--enriched"]
     if mode == "worker":
         args += ["--url", url, "--nice", os.environ.get("WORKER_NICE", "0")]
     else:
@@ -43,11 +49,16 @@ def arguments(mode, url, home):
     return args
 
 
-def memory_bytes(value, total):
+@functools.cache
+def memory_total():
+    return int(re.search(r"MemTotal:\s+(\d+)", Path("/proc/meminfo").read_text())[1]) * 1024
+
+
+def memory_bytes(value):
     if value in ("max", "infinity"):
-        return total
+        return memory_total()
     if value.endswith("%"):
-        return int(total * float(value[:-1]) / 100)
+        return int(memory_total() * float(value[:-1]) / 100)
     match = re.fullmatch(r"(\d+(?:\.\d+)?)([KMGT]?)B?", value, re.I)
     if not match:
         raise ValueError("invalid memory size: " + value)
@@ -141,15 +152,17 @@ def main():
                 settings.setdefault("HOPPER", "none")
             exports(settings)
     elif command == "memory":
-        total = int(re.search(r"MemTotal:\s+(\d+)", Path("/proc/meminfo").read_text())[1]) * 1024
-        default = total * 80 // 100
-        if not args or args[0] == "serve":
-            default = min(default, 128 * 1024 ** 3)
-        maximum = memory_bytes(os.environ.get("MEMORY_MAX") or str(default), total)
+        # Host memory is read only when a default or a percentage needs it.
+        if os.environ.get("MEMORY_MAX"):
+            maximum = memory_bytes(os.environ["MEMORY_MAX"])
+        else:
+            maximum = memory_total() * 80 // 100
+            if not args or args[0] == "serve":
+                maximum = min(maximum, 128 * 1024 ** 3)
         if maximum <= 0:
             raise ValueError("MEMORY_MAX must be positive")
-        low = memory_bytes(os.environ.get("MEMORY_LOW") or str(maximum // 2 if not args or args[0] == "serve" else 0), total)
-        idle = memory_bytes(os.environ.get("IDLE_MEMORY_MAX") or str(maximum // 2), total)
+        low = memory_bytes(os.environ.get("MEMORY_LOW") or str(maximum // 2 if not args or args[0] == "serve" else 0))
+        idle = memory_bytes(os.environ.get("IDLE_MEMORY_MAX") or str(maximum // 2))
         print(f"MEMORY_MAX={maximum}\nMEMORY_LOW={min(low, maximum)}\nIDLE_MEMORY_MAX={min(idle, maximum // 2)}")
     elif command == "health":
         health(*args)

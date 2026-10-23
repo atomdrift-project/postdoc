@@ -203,6 +203,7 @@ binary is a deployment change and nothing else.
 | `GET  /lookup`, `/status` | The legacy lookup and the reconnect probe. |
 | `GET  /_/health`, `/_/info`, `/_/stats` | Liveness, build facts, counters. |
 | `GET  /_/memory`, `/_/requests`, `/_/threads` | Operator diagnostics. |
+| `GET  /_/metrik` | Prometheus scrape, as `obs` serves it; the same metrics are pushed over OTLP to `otel`. |
 | `POST /_/reload`, `/_/update` | Hot-swap the bundles. |
 
 An earlier draft cut this to the four routes beamline calls. That was wrong

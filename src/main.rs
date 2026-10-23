@@ -138,9 +138,19 @@ struct DaemonArgs {
     traits_dir: Option<PathBuf>,
 }
 
+const ENRICHED_HELP: &str = "Analyze with the isotope13 Enriched rules, fresh the hour they clear QA. \
+Needs a subscription token from `ISOTOPE13_TOKEN` or the saved one; on by default whenever one is \
+found. `ATOMDRIFT_ENRICHED=0` keeps the public rules.";
+
 /// Worker and server coordination for the Atomdrift analysis fleet.
 #[derive(Debug, Parser)]
 #[command(version, about, max_term_width = 100)]
+// Scan's wording for these describes remote verdicts, and postdoc never asks
+// isotope13 for one: it is what isotope13's remote analysis runs on.
+// `--analyze` is still accepted, so a shared `SCAN_ANALYZE` does not break a
+// host, but only `remote` changes anything, and that is refused.
+#[command(mut_arg("enriched", |arg| arg.help(ENRICHED_HELP).long_help(ENRICHED_HELP)))]
+#[command(mut_arg("analyze", |arg| arg.hide(true)))]
 struct Cli {
     /// Scan's own global flags, flattened rather than restated.
     ///
@@ -376,6 +386,17 @@ fn main() -> ExitCode {
     // Reclaim stale and oversized caches on a recurring loop, as a
     // never-exiting daemon needs.
     scan::cache_cleanup::start(true);
+    // Enriched picks the rules tree, so it is set before anything resolves
+    // one. It means the Enriched rules and nothing else here: postdoc is what
+    // isotope13's remote analysis runs on, so it never asks isotope13 for a
+    // verdict itself.
+    match wants_enriched(cli.global.enriched) {
+        Ok(on) => cleave::enriched::set_enabled(on),
+        Err(error) => {
+            eprintln!("postdoc: {error}");
+            return ExitCode::from(EXIT_ERROR);
+        }
+    }
     // Stabilize trait discovery before any cleave shared resource initializes.
     scan::traits_repo::prepare_runtime_env();
 
@@ -388,7 +409,32 @@ fn main() -> ExitCode {
     }
 }
 
+/// Whether to run the Enriched rules: as `--enriched` or `ATOMDRIFT_ENRICHED`
+/// says when either is given, and otherwise whenever this host holds an
+/// isotope13 token. A held token is then used exactly as `--enriched` would
+/// use it, so one refused at startup stops the daemon rather than quietly
+/// serving the public rules.
+fn wants_enriched(flag: bool) -> Result<bool, String> {
+    let explicit = std::env::var_os(cleave::enriched::ENABLE_ENV).is_some_and(|v| !v.is_empty());
+    if flag || explicit {
+        return Ok(flag);
+    }
+    let Some((token, source)) = cleave::enriched::token()? else {
+        return Ok(false);
+    };
+    tracing::info!(
+        tid = %token.fingerprint(),
+        source = source.as_str(),
+        "isotope13 token found; running the Enriched rules"
+    );
+    Ok(true)
+}
+
 fn run(cli: Cli) -> anyhow::Result<ExitCode> {
+    anyhow::ensure!(
+        cli.global.analyze != scan::remote::Analyze::Remote,
+        "--analyze=remote has no meaning for postdoc: it is the remote analysis"
+    );
     let command = cli.command;
     match command {
         Command::Worker {
@@ -517,6 +563,26 @@ mod tests {
     #[test]
     fn the_command_line_is_well_formed() {
         Cli::command().debug_assert();
+    }
+
+    /// postdoc never asks isotope13 for a verdict, so its help must not offer one.
+    #[test]
+    fn the_help_offers_no_remote_verdicts() {
+        let mut command = Cli::command();
+        let help = command.render_long_help().to_string();
+        assert!(!help.contains("--analyze"), "--analyze is listed:\n{help}");
+        assert!(
+            !help.contains("remote verdicts"),
+            "--enriched promises remote verdicts:\n{help}"
+        );
+        assert!(help.contains("Enriched rules"));
+        // Rendering the root propagated the global flags to its subcommands.
+        let serve = command
+            .find_subcommand_mut("serve")
+            .map(|serve| serve.render_long_help().to_string());
+        assert!(
+            serve.is_some_and(|help| help.contains("--enriched") && !help.contains("--analyze"))
+        );
     }
 
     #[test]

@@ -29,6 +29,7 @@ mod flight;
 mod handlers;
 mod idle;
 mod latency;
+mod metrics;
 mod v1;
 
 pub(crate) use acl::{Cidr, TokenDigest, parse_cidr_list};
@@ -1291,6 +1292,7 @@ fn assemble(config: ServerConfig) -> anyhow::Result<(Router, Arc<AppState>)> {
         .route("/_/memory", get(diag::memory_stats))
         .route("/_/requests", get(diag::requests))
         .route("/_/threads", get(diag::threads))
+        .route("/_/metrik", get(metrics::metrik))
         .route("/status", get(handlers::status))
         .route("/v1/lookup", get(v1::v1_lookup))
         .route("/v1/analyze", post(v1::v1_analyze))
@@ -1496,6 +1498,8 @@ pub(crate) async fn run(config: ServerConfig) -> anyhow::Result<()> {
     });
 
     let (app, state) = assemble(config)?;
+    // Here rather than in `assemble`, which tests build servers with.
+    metrics::spawn_pusher(&state);
     let config = &state.config;
 
     let listener = tokio::net::TcpListener::bind(config.bind).await?;

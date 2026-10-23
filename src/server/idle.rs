@@ -130,6 +130,7 @@ fn worker_command(
     name: &str,
     cache_dir: &PathBuf,
     traits_dir: Option<&std::path::Path>,
+    enriched: bool,
     slots: usize,
     cleave_concurrency: Option<&std::ffi::OsStr>,
 ) -> std::io::Result<Command> {
@@ -150,6 +151,13 @@ fn worker_command(
     }
     if let Some(dir) = traits_dir {
         cmd.arg("--traits-dir").arg(dir);
+    }
+    // The same rules tree for the same reason: `--enriched` is a process
+    // switch the child cannot inherit, and a worker on the open-source rules
+    // beside an Enriched server would report results under a version the
+    // server never runs.
+    if enriched {
+        cmd.arg("--enriched");
     }
     cmd
         // The server owns updating. Two processes refreshing the same traits
@@ -292,6 +300,7 @@ impl Worker {
             &self.name,
             &self.cache,
             traits_dir.as_deref(),
+            cleave::enriched::enabled(),
             self.slots,
             cleave_concurrency.as_deref(),
         )
@@ -431,8 +440,16 @@ mod tests {
     #[test]
     fn the_command_passes_only_what_must_differ() {
         let dir = PathBuf::from("/tmp/scan-idle-test");
-        let cmd = worker_command("http://hopper.example", "host-idle", &dir, None, 4, None)
-            .expect("command");
+        let cmd = worker_command(
+            "http://hopper.example",
+            "host-idle",
+            &dir,
+            None,
+            false,
+            4,
+            None,
+        )
+        .expect("command");
         let args: Vec<_> = cmd
             .get_args()
             .map(|a| a.to_string_lossy().to_string())
@@ -475,6 +492,7 @@ mod tests {
             "host-idle",
             &cache,
             None,
+            false,
             96,
             Some(std::ffi::OsStr::new("8")),
         )
@@ -505,6 +523,7 @@ mod tests {
             "host-idle",
             &dir,
             Some(&traits),
+            false,
             4,
             None,
         )
@@ -521,5 +540,30 @@ mod tests {
             args.get(at + 1).map(String::as_str),
             Some("/var/lib/atomdrift/scan/traits")
         );
+    }
+
+    /// `--enriched` is a process switch, invisible to a child, so an Enriched
+    /// server must pass it on — or its idle worker would analyze with the
+    /// open-source rules and report results under a version the server never
+    /// runs.
+    #[test]
+    fn the_command_forwards_enriched_only_when_the_server_runs_it() {
+        let dir = PathBuf::from("/tmp/scan-idle-test");
+        let has = |enriched| {
+            worker_command(
+                "http://hopper.example",
+                "host-idle",
+                &dir,
+                None,
+                enriched,
+                4,
+                None,
+            )
+            .expect("command")
+            .get_args()
+            .any(|a| a == "--enriched")
+        };
+        assert!(has(true));
+        assert!(!has(false));
     }
 }
