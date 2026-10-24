@@ -78,7 +78,7 @@ pub fn report(analysis: Analysis<'_>) -> Result<Report, serde_json::Error> {
     let findings = scan
         .cleave
         .as_ref()
-        .map(|report| scan::engine::collect_hits(report, purl.as_deref()))
+        .map(|report| report.hits(purl.as_deref()))
         .unwrap_or_default()
         .into_iter()
         .map(|hit| finding(hit, purl.as_deref()))
@@ -95,7 +95,9 @@ pub fn report(analysis: Analysis<'_>) -> Result<Report, serde_json::Error> {
         confidence: floor.map(|f| f.confidence),
         duration_ms: None,
         version: traits.unwrap_or_else(|| "unknown".to_owned()),
-        raw: Some(raw(&envelope.raw)?),
+        // scan stores the report already serialized; it is copied in as is,
+        // never re-encoded.
+        raw: Some((*envelope.raw).to_owned()),
     });
 
     // ml: the model alone, before the floor and before the interpreter.

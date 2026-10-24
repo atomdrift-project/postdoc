@@ -157,7 +157,7 @@ idle child use this credential when the configured LLM endpoint requires one.
 
 On Linux and FreeBSD, `make deploy-server` and `make deploy-worker` automatically
 enable the isotope13 Enriched rules when a subscription token is available:
-fresh the hour they clear QA, instead of the four-hourly public roll-up.
+the latest rules, the moment they clear QA, instead of the four-hourly public roll-up.
 Deployment reads `ISOTOPE13_TOKEN`, then `~/.tok/isotope13`
 (`ISOTOPE13_TOKEN_FILE` overrides the source path), or reuses the service's
 installed token when the source is absent. It adds `--enriched` to the service

@@ -138,9 +138,10 @@ struct DaemonArgs {
     traits_dir: Option<PathBuf>,
 }
 
-const ENRICHED_HELP: &str = "Analyze with the isotope13 Enriched rules, fresh the hour they clear QA. \
-Needs a subscription token from `ISOTOPE13_TOKEN` or the saved one; on by default whenever one is \
-found. `ATOMDRIFT_ENRICHED=0` keeps the public rules.";
+const ENRICHED_HELP: &str = "Insist on the isotope13 Enriched rules: the latest rules, the moment they clear QA. \
+On by itself whenever this host holds a token (`ISOTOPE13_TOKEN`, or the saved one). With the flag, \
+no token is an error, and a refused one stops the refresh instead of falling back to the public \
+rules. `ATOMDRIFT_ENRICHED=0` keeps the public rules.";
 
 /// Worker and server coordination for the Atomdrift analysis fleet.
 #[derive(Debug, Parser)]
@@ -257,6 +258,8 @@ enum Command {
         #[arg(long, default_value_t = server::DEFAULT_ANALYSIS_TIMEOUT_SECS)]
         analysis_timeout: u64,
     },
+    /// Show postdoc's version and which rules it analyzes with.
+    Version,
 }
 
 /// Windows counterpart of [`jemalloc`].
@@ -386,16 +389,20 @@ fn main() -> ExitCode {
     // Reclaim stale and oversized caches on a recurring loop, as a
     // never-exiting daemon needs.
     scan::cache_cleanup::start(true);
-    // Enriched picks the rules tree, so it is set before anything resolves
-    // one. It means the Enriched rules and nothing else here: postdoc is what
-    // isotope13's remote analysis runs on, so it never asks isotope13 for a
-    // verdict itself.
-    match wants_enriched(cli.global.enriched) {
-        Ok(on) => cleave::enriched::set_enabled(on),
-        Err(error) => {
-            eprintln!("postdoc: {error}");
-            return ExitCode::from(EXIT_ERROR);
-        }
+    // Enriched picks the rules tree, so it is decided before anything resolves
+    // one: on whenever this host holds a token, insisted on by `--enriched`,
+    // which needs the token now rather than at the first refresh. It means the
+    // Enriched rules and nothing else here: postdoc is what isotope13's remote
+    // analysis runs on, so it never asks isotope13 for a verdict itself.
+    if let Err(error) = cleave::enriched::resolve(cli.global.enriched) {
+        eprintln!("postdoc: {error}");
+        return ExitCode::from(EXIT_ERROR);
+    }
+    if cleave::enriched::required()
+        && let Err(error) = cleave::rule_update::sign_in()
+    {
+        eprintln!("postdoc: {error}");
+        return ExitCode::from(EXIT_ERROR);
     }
     // Stabilize trait discovery before any cleave shared resource initializes.
     scan::traits_repo::prepare_runtime_env();
@@ -409,27 +416,6 @@ fn main() -> ExitCode {
     }
 }
 
-/// Whether to run the Enriched rules: as `--enriched` or `ATOMDRIFT_ENRICHED`
-/// says when either is given, and otherwise whenever this host holds an
-/// isotope13 token. A held token is then used exactly as `--enriched` would
-/// use it, so one refused at startup stops the daemon rather than quietly
-/// serving the public rules.
-fn wants_enriched(flag: bool) -> Result<bool, String> {
-    let explicit = std::env::var_os(cleave::enriched::ENABLE_ENV).is_some_and(|v| !v.is_empty());
-    if flag || explicit {
-        return Ok(flag);
-    }
-    let Some((token, source)) = cleave::enriched::token()? else {
-        return Ok(false);
-    };
-    tracing::info!(
-        tid = %token.fingerprint(),
-        source = source.as_str(),
-        "isotope13 token found; running the Enriched rules"
-    );
-    Ok(true)
-}
-
 fn run(cli: Cli) -> anyhow::Result<ExitCode> {
     anyhow::ensure!(
         cli.global.analyze != scan::remote::Analyze::Remote,
@@ -437,6 +423,14 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
     );
     let command = cli.command;
     match command {
+        // The edition was chosen in `main` the way every command's is.
+        Command::Version => {
+            println!(
+                "{}",
+                cleave::version_report("postdoc", env!("CARGO_PKG_VERSION"))
+            );
+            Ok(ExitCode::SUCCESS)
+        }
         Command::Worker {
             url,
             name,
