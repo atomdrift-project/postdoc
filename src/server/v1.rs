@@ -171,9 +171,10 @@ impl V1LookupQuery {
     }
 }
 
-/// Resolve a request's follow selection. The configured policy supplies the
-/// default and the operational limits; an explicit request replaces only the
-/// selected reference categories after its syntax has been validated.
+/// Resolve a request's follow selection: the configured policy, restricted to
+/// what the request names. A request may follow less than the operator allows;
+/// asking for more is refused rather than quietly trimmed, so a caller never
+/// mistakes a shallower answer for the one it asked for.
 fn v1_follow_policy(
     q: &V1LookupQuery,
     configured: scan::fetch::FetchPolicy,
@@ -183,12 +184,16 @@ fn v1_follow_policy(
     }
     let selected = scan::fetch::FetchPolicy::parse_follow(&q.follow.join(","))
         .map_err(|message| ApiError::bad_request("invalid_follow_policy", message))?;
-    Ok(scan::fetch::FetchPolicy {
-        urls: selected.urls,
-        packages: selected.packages,
-        deps: selected.deps,
-        ci: selected.ci,
-        ..configured
+    configured.restricted_to(selected).ok_or_else(|| {
+        ApiError::bad_request(
+            "follow_not_allowed",
+            format!(
+                "This server follows {}; follow= may only narrow that.",
+                configured
+                    .follow_name()
+                    .unwrap_or_else(|| "a custom selection".to_owned())
+            ),
+        )
     })
 }
 
@@ -2271,7 +2276,7 @@ mod tests {
     }
 
     #[test]
-    fn follow_policy_repeats_union_and_overrides_the_server_default() {
+    fn follow_policy_repeats_union_and_only_narrows_the_server_default() {
         use scan::fetch::FetchPolicy;
 
         let configured: FetchPolicy = "all".parse().unwrap();
@@ -2282,12 +2287,16 @@ mod tests {
         let effective = v1_follow_policy(&query, configured).expect("valid selection");
         assert!(effective.urls && effective.packages && effective.deps && effective.ci);
 
+        // A server configured not to follow references must not be talked into
+        // it, and must say so rather than answer a shallower question.
         let dependencies_only: FetchPolicy = "dependencies".parse().unwrap();
-        let references = V1LookupQuery::parse(Some("follow=references"));
-        let effective = v1_follow_policy(&references, dependencies_only)
-            .expect("a request may override the configured categories");
-        assert!(effective.urls && effective.packages);
-        assert!(!effective.deps && !effective.ci);
+        let widen = V1LookupQuery::parse(Some("follow=references,dependencies"));
+        let refused = v1_follow_policy(&widen, dependencies_only).expect_err("widening refused");
+        assert_eq!(refused.status, StatusCode::BAD_REQUEST);
+        assert_eq!(refused.code, "follow_not_allowed");
+        let within = V1LookupQuery::parse(Some("follow=dependencies"));
+        let effective = v1_follow_policy(&within, dependencies_only).expect("same policy");
+        assert!(effective.deps && !effective.urls && !effective.packages && !effective.ci);
 
         let legacy = V1LookupQuery::parse(Some("follow=deps"));
         assert!(v1_follow_policy(&legacy, configured).is_err());

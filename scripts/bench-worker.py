@@ -101,8 +101,8 @@ def main():
     env = os.environ.copy()
     for name in ("SCAN_HOPPER", "SCAN_TOKEN_FILE", "SCAN_LLM", "SCAN_INTERPRET", "SCAN_HEAP_PROFILE_DIR", "HOPPER_TOKEN_FILE", "HOPPER_TOKEN"):
         env.pop(name, None)
-    env.update(SCAN_NO_ANALYSIS_CACHE="1", SCAN_NO_UPDATE_CHECK="1", SCAN_NO_UPDATE="1",
-               SCAN_FETCH=args.fetch, SCAN_FOLLOW=args.fetch, SCAN_ANALYSIS_TIMEOUT="0",
+    env.update(SCAN_NO_ANALYSIS_CACHE="1", SCAN_NO_UPDATE_CHECK="1",
+               SCAN_FOLLOW=args.fetch, SCAN_ANALYSIS_TIMEOUT="0",
                SCAN_HEARTBEAT_SECS="5", HOPPER_TOKEN="local-benchmark")
     allocator_prefix = args.allocator_config.rstrip(",")
     if allocator_prefix:

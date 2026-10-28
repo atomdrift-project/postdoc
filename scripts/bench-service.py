@@ -144,9 +144,9 @@ def main():
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         port = probe.getsockname()[1]
-    env = {"SCAN_NO_ANALYSIS_CACHE": "1", "SCAN_NO_UPDATE_CHECK": "1", "SCAN_NO_UPDATE": "1",
+    env = {"SCAN_NO_ANALYSIS_CACHE": "1", "SCAN_NO_UPDATE_CHECK": "1",
            "TMPDIR": "/tmp", "TMP": "/tmp", "TEMP": "/tmp",
-           "SCAN_FETCH": "none", "SCAN_FOLLOW": "none", "SCAN_ANALYSIS_TIMEOUT": "0",
+           "SCAN_FOLLOW": "none", "SCAN_ANALYSIS_TIMEOUT": "0",
            "SCAN_HEARTBEAT_SECS": "5",
            "SCAN_MODELS_DIR": str(args.models.resolve()), "CLEAVE_TRAITS_DIR": str(args.traits.resolve()),
            "XDG_CACHE_HOME": str(args.cache.resolve()),

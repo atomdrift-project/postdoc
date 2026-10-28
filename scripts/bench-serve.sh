@@ -3,7 +3,7 @@
 # Adapted from scan/scripts/bench-serve.sh. No production hopper is contacted.
 #
 # The caller selects policy through the environment. The Makefile target sets
-# SCAN_FETCH=all and disables all analysis-result caches while deliberately
+# SCAN_FOLLOW=all and disables all analysis-result caches while deliberately
 # retaining fletch's warmed download cache.
 set -eu
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
