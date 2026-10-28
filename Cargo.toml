@@ -43,7 +43,7 @@ serde_json = { version = "1", features = ["raw_value"] }
 cleave = { git = "https://github.com/atomdrift-project/cleave.git", default-features = false }
 # Lib name `scan`, package name `atomdrift-scan` — the same split ../isomer
 # relies on. Supplies the model, the trait floor, and the interpreter.
-atomdrift-scan = { git = "https://github.com/atomdrift-project/scan.git", features = ["daemon-support"] }
+atomdrift-scan = { git = "https://github.com/atomdrift-project/scan.git" }
 # The differential judge.
 isomer = { git = "https://github.com/atomdrift-project/isomer.git" }
 

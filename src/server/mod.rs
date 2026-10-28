@@ -278,8 +278,14 @@ impl Startup {
             fetch: rules.fetch,
             hopper,
             zip_passwords: rules.zip_passwords,
-            slot_lanes: (std::env::var("SCAN_SLOT_LANES").as_deref() == Ok("1"))
-                .then(scan::analysis::small_job_max_bytes),
+            slot_lanes: (std::env::var("SCAN_SLOT_LANES").as_deref() == Ok("1")).then(|| {
+                std::env::var("SCAN_SMALL_JOB_MB")
+                    .ok()
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .map_or(scan::analysis::SMALL_JOB_MAX_BYTES, |mb| {
+                        mb.saturating_mul(1024 * 1024)
+                    })
+            }),
         };
         config.validate()?;
         Ok(config)

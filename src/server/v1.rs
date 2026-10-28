@@ -183,7 +183,13 @@ fn v1_follow_policy(
     }
     let selected = scan::fetch::FetchPolicy::parse_follow(&q.follow.join(","))
         .map_err(|message| ApiError::bad_request("invalid_follow_policy", message))?;
-    Ok(configured.with_selection(selected))
+    Ok(scan::fetch::FetchPolicy {
+        urls: selected.urls,
+        packages: selected.packages,
+        deps: selected.deps,
+        ci: selected.ci,
+        ..configured
+    })
 }
 
 /// How many packages one URL may name.

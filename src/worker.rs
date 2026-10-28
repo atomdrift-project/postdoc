@@ -37,10 +37,10 @@ use crate::admission::MemoryAdmission;
 use scan::analysis::{ModelResources, classify_bytes, classify_file};
 use scan::cli::Refresh;
 use scan::explain::ShapImportance;
+use scan::hopper;
 use scan::memory::MaxRssPolicy;
 use scan::model::{Model, Thresholds};
 use scan::system_load_avg;
-use scan::upload::{hopper_token, use_hopper};
 
 const MIB: u64 = 1024 * 1024;
 const GIB: u64 = 1024 * MIB;
@@ -1386,8 +1386,9 @@ fn renew_resources_once(rules: &Rules) -> Result<Option<Arc<ModelResources>>> {
     // last-known-good state to roll back to. A combined-validation failure below
     // propagates; the worker keeps serving its current in-memory resources until
     // the next successful renewal or a restart.
-    let dir = scan::models_repo::install_target();
-    let models_changed = match scan::model_update::update(&dir, false, false) {
+    let models_changed = match scan::models_repo::install_target()
+        .and_then(|dir| scan::model_update::update(&dir, false, false))
+    {
         Ok(changed) => changed,
         Err(error) => {
             tracing::warn!(error = %error, "model renewal failed; treating models as unchanged");
@@ -2590,7 +2591,7 @@ pub(crate) async fn run(config: WorkerConfig) -> Result<Exit> {
     // Every hopper call carries a token, so a worker without one claims
     // nothing. Report the source (or its absence) before the first poll, and
     // arm the dependency precheck against the hopper this worker claims from.
-    use_hopper(&config.hopper_url);
+    hopper::configure(&config.hopper_url);
     let shared = Arc::new(WorkerShared::new(&config, hopper));
     tracing::info!(
         name = %config.name,
@@ -4491,7 +4492,7 @@ struct Hopper {
     /// only work it can finish.
     tools: String,
     /// Bearer token; hopper requires it on all of `/api/*` and `/data/`, and
-    /// does not exempt loopback. See [`scan::upload::hopper_token`].
+    /// does not exempt loopback. See [`scan::hopper::token`].
     token: Option<&'static str>,
     input_budget: Option<Arc<InputBudget>>,
 }
@@ -4516,7 +4517,7 @@ impl Hopper {
             base,
             worker: worker.to_owned(),
             tools: scan::tools::available_names().join(","),
-            token: hopper_token(),
+            token: hopper::token(),
             input_budget: None,
         })
     }
@@ -4782,14 +4783,14 @@ impl Hopper {
                     let body = resp.text().await.unwrap_or_default();
                     // Resending a payload hopper refused for good can never
                     // succeed, so retrying would just burn 20 minutes.
-                    if scan::upload::is_permanent(status) {
+                    if hopper::is_permanent(status) {
                         tracing::error!(sha256 = %sha256, %status, body = %body_excerpt(&body), elapsed_ms, attempt, "post result: rejected by server; not retrying");
                         return;
                     }
                     tracing::warn!(sha256 = %sha256, %status, body = %body_excerpt(&body), elapsed_ms, attempt, "post result: non-success response");
                 }
                 Err(e) => {
-                    tracing::warn!(sha256 = %sha256, error = %scan::upload::error_chain(&e), elapsed_ms = scan::duration_ms(post_start.elapsed()), attempt, "post result: send failed");
+                    tracing::warn!(sha256 = %sha256, error = %hopper::error_chain(&e), elapsed_ms = scan::duration_ms(post_start.elapsed()), attempt, "post result: send failed");
                 }
             }
             attempt += 1;
@@ -4819,7 +4820,7 @@ impl Hopper {
         let base = self.base.to_string();
         let worker = self.worker.clone();
         let _ = tokio::task::spawn_blocking(move || {
-            let Some(client) = scan::upload::hopper_http() else {
+            let Some(client) = hopper::http() else {
                 return;
             };
             let cache = scan::fetch::open_blob_cache().ok();

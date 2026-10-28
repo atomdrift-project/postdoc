@@ -447,7 +447,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             // and validation gate.
             // A replica refuses worker routes, so only the primary address of
             // a comma list is usable; the earlier ones are not a fallback.
-            let Some(hopper_url) = scan::upload::worker_endpoint(&url) else {
+            let Some(hopper_url) = scan::hopper::worker_endpoint(&url) else {
                 anyhow::bail!("--url names no hopper address");
             };
             let config = worker::Startup {

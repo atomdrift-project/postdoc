@@ -373,7 +373,7 @@ pub(super) fn start(
         tracing::info!("idle worker disabled: no --hopper to claim work from");
         return None;
     };
-    let Some(primary) = scan::upload::worker_endpoint(hopper) else {
+    let Some(primary) = scan::hopper::worker_endpoint(hopper) else {
         tracing::info!("idle worker disabled: --hopper names no address");
         return None;
     };

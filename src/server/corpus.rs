@@ -193,7 +193,7 @@ impl Corpus {
     /// A corpus reader, or `None` when `--hopper` named nothing and there is
     /// nothing behind this worker to defer to.
     pub(crate) fn new(hopper: Option<&str>) -> Option<Arc<Self>> {
-        let bases = scan::upload::endpoints(hopper.unwrap_or(""));
+        let bases = scan::hopper::endpoints(hopper.unwrap_or(""));
         if bases.is_empty() {
             return None;
         }
@@ -241,7 +241,7 @@ impl Corpus {
                 .client
                 .get(format!("{base}{path}"))
                 .timeout(Duration::from_secs(5 * 60));
-            if let Some(token) = scan::upload::hopper_token() {
+            if let Some(token) = scan::hopper::token() {
                 request = request.bearer_auth(token);
             }
             let mut response = match request.send().await {
@@ -486,7 +486,7 @@ impl Corpus {
             lag_seconds: Option<i64>,
         }
         let mut request = self.client.get(format!("{base}/_/replica"));
-        if let Some(token) = scan::upload::hopper_token() {
+        if let Some(token) = scan::hopper::token() {
             request = request.bearer_auth(token);
         }
         let response = request.send().await.ok()?;
@@ -534,7 +534,7 @@ impl Corpus {
         for attempt in 0..=READ_RETRIES {
             self.count(base, |a| &a.asked);
             let mut request = self.client.get(format!("{base}{path}"));
-            if let Some(token) = scan::upload::hopper_token() {
+            if let Some(token) = scan::hopper::token() {
                 request = request.bearer_auth(token);
             }
             let response = match request.send().await {
