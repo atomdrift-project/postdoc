@@ -119,8 +119,8 @@ tree-sitter = "0.28"
 [patch.crates-io]
 # Unicode-safe brace-range scanner; shared across consumers by update-deps.
 tree-sitter-bash = { git = "https://github.com/tstromberg/tree-sitter-bash" }
-tree-sitter = { git = "https://github.com/tstromberg/tree-sitter", branch = "master" }
-tree-sitter-language = { git = "https://github.com/tstromberg/tree-sitter", branch = "master" }
+tree-sitter = { git = "https://github.com/tstromberg/tree-sitter" }
+tree-sitter-language = { git = "https://github.com/tstromberg/tree-sitter" }
 
 # DEVELOPMENT OVERRIDE — must be commented out before committing.
 #
