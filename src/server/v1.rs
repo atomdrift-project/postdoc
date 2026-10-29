@@ -321,9 +321,9 @@ impl V1Analyze {
         // Kept apart on purpose: the normalized key is what everything
         // downstream is stored and looked up by, the caller's spelling is what
         // the answer is spelled with. See `V1Decision::asked_about`.
-        let purl = match q.purl.first() {
-            None => None,
-            Some(asked) => match normalize_pkg_purl(asked) {
+        let purl = match q.purl.as_slice() {
+            [] => None,
+            [asked] => match normalize_pkg_purl(asked) {
                 Ok(purl) => Some((asked.clone(), purl)),
                 Err(message) => {
                     return Err(Box::new(with_subject(
@@ -332,6 +332,12 @@ impl V1Analyze {
                     )));
                 }
             },
+            _ => {
+                return Err(reject(
+                    "too_many_packages",
+                    "Only one package may be analyzed per request.",
+                ));
+            }
         };
         Ok(Self {
             request_id,
@@ -423,10 +429,11 @@ pub(super) async fn v1_analyze(
             )
             .v1();
         }
-        return analyze_bytes(&state, &req, &headers, bytes, sha).await;
+        let filename = headers.get("x-filename").and_then(|v| v.to_str().ok());
+        return analyze_bytes(&state, &req, filename, bytes, sha).await;
     }
     if req.q.refresh {
-        return refresh(&state, &req, headers).await;
+        return refresh(&state, &req).await;
     }
     if let Some(url) = req.url.clone() {
         return analyze_url(&state, &req, url).await;
@@ -486,7 +493,7 @@ async fn read_body(
 async fn analyze_bytes(
     state: &Arc<AppState>,
     req: &V1Analyze,
-    headers: &HeaderMap,
+    filename: Option<&str>,
     bytes: bytes::Bytes,
     sha: String,
 ) -> Response {
@@ -494,10 +501,11 @@ async fn analyze_bytes(
     // The name only decides how cleave types the bytes, so a caller that sends
     // none still gets an analysis — of an artifact typed by content rather than
     // by extension.
-    let filename = headers
-        .get("x-filename")
-        .and_then(|v| v.to_str().ok())
+    let filename = filename
         .map(sanitize_upload_filename)
+        // `""` and `.` name the staging directory itself: staging would fail,
+        // and with it every request sharing this flight.
+        .filter(|name| !name.is_empty() && name != ".")
         .unwrap_or_else(|| format!("upload-{request_id}"));
     let asked = req.purl.as_ref().map(|(asked, _)| asked.as_str());
     let purl = req.purl.as_ref().map(|(_, purl)| purl.clone());
@@ -581,11 +589,12 @@ async fn analyze_bytes(
         tracing::info!(id = request_id, sha256 = %sha, "--> POST /v1/analyze (bytes; joined a run already in flight)");
     }
     // The digest labels the request in logs; it is never the locator.
-    let named = Named {
-        subject: purl.clone().unwrap_or(sha),
-        key: purl,
-        asked: asked.map(str::to_owned),
-        is_url: false,
+    let named = match &req.purl {
+        Some((asked, key)) => Named::Purl {
+            key: key.clone(),
+            asked: asked.clone(),
+        },
+        None => Named::Upload { sha256: sha },
     };
     answer(req, attachment, named).await
 }
@@ -633,7 +642,7 @@ fn repair(state: &AppState, request_id: u64, filename: &str, sha: &str, bytes: b
 
 /// `?sha256=…&refresh=1`: reconcile a digest with hopper, analyzing it here
 /// when hopper's verdict is missing or from other traits.
-async fn refresh(state: &Arc<AppState>, req: &V1Analyze, mut headers: HeaderMap) -> Response {
+async fn refresh(state: &Arc<AppState>, req: &V1Analyze) -> Response {
     let request_id = req.request_id;
     let Some(sha) = req.q.sha256.first().map(|sha| sha.to_ascii_lowercase()) else {
         return ApiError::bad_request("missing_sha256", "refresh=1 requires ?sha256=.").v1();
@@ -650,7 +659,7 @@ async fn refresh(state: &Arc<AppState>, req: &V1Analyze, mut headers: HeaderMap)
         {
             let mut resp = answered(
                 V1Decision::stored(&verdict, None, req.budget),
-                "scan:index",
+                Source::Index,
                 req.elapsed_ms(),
             );
             resp.extensions_mut().insert(Subject::sha256(&sha));
@@ -716,12 +725,9 @@ async fn refresh(state: &Arc<AppState>, req: &V1Analyze, mut headers: HeaderMap)
     if let Err(refusal) = state.admit_request(request_id).await {
         return refusal.v1();
     }
-    let short_sha: String = sha.chars().take(12).collect();
-    if let Ok(value) = HeaderValue::from_str(&format!("refresh-{short_sha}")) {
-        headers.insert("x-filename", value);
-    }
+    let filename = format!("refresh-{}", sha.chars().take(12).collect::<String>());
     tracing::info!(id = request_id, sha256 = %sha, size_bytes = sample.bytes.len(), "Hopper verdict missing or stale; analyzing fetched bytes");
-    analyze_bytes(state, req, &headers, sample.bytes, sample.sha256).await
+    analyze_bytes(state, req, Some(&filename), sample.bytes, sample.sha256).await
 }
 
 /// Analyze an exact URL, fetched verbatim.
@@ -747,12 +753,7 @@ async fn analyze_url(state: &Arc<AppState>, req: &V1Analyze, url: String) -> Res
     } else {
         tracing::info!(id = request_id, url = %url, "--> POST /v1/analyze (joined a run already in flight)");
     }
-    let named = Named {
-        key: Some(url.clone()),
-        asked: Some(url.clone()),
-        subject: url,
-        is_url: true,
-    };
+    let named = Named::Url(url);
     answer(req, attachment, named).await
 }
 
@@ -826,12 +827,7 @@ async fn analyze_purl(state: &Arc<AppState>, req: &V1Analyze) -> Response {
     }
     // Named, not analyzed from bytes, so there is always a coordinate: the
     // normalized one keys everything, and `asked` is what the caller typed.
-    let named = Named {
-        key: Some(purl.clone()),
-        asked: Some(asked),
-        subject: purl,
-        is_url: false,
-    };
+    let named = Named::Purl { key: purl, asked };
     answer(req, attachment, named).await
 }
 
@@ -848,11 +844,10 @@ fn refused(req: &V1Analyze, refusal: &ApiError) -> Response {
 }
 
 /// A decision answered without an analysis.
-fn answered(decided: V1Decision, source: &'static str, elapsed_ms: u64) -> Response {
+fn answered(decided: V1Decision, source: Source, elapsed_ms: u64) -> Response {
     let mut resp = Json(decided).into_response();
     resp.headers_mut().insert("X-Total-Ms", elapsed_ms.into());
-    resp.headers_mut()
-        .insert("X-Scan-Source", HeaderValue::from_static(source));
+    resp.headers_mut().insert("X-Scan-Source", source.into());
     resp
 }
 
@@ -864,36 +859,61 @@ fn answered(decided: V1Decision, source: &'static str, elapsed_ms: u64) -> Respo
 /// what the caller typed and what the answer is spelled with, and `subject`
 /// labels logs and progress — the digest, when an upload named no coordinate
 /// at all.
-struct Named {
-    key: Option<String>,
-    asked: Option<String>,
-    subject: String,
-    is_url: bool,
+enum Named {
+    /// A package: `key` is the normalized coordinate, `asked` the caller's.
+    Purl { key: String, asked: String },
+    /// An exact URL, keyed and answered as given.
+    Url(String),
+    /// Bytes uploaded with no coordinate, labeled by their digest, which is
+    /// never a locator.
+    Upload { sha256: String },
 }
 
 impl Named {
+    /// What the index and the corpus are keyed by.
+    fn key(&self) -> Option<&str> {
+        match self {
+            Self::Purl { key, .. } => Some(key),
+            Self::Url(url) => Some(url),
+            Self::Upload { .. } => None,
+        }
+    }
+
+    /// What logs and progress are labeled with.
+    fn subject(&self) -> &str {
+        match self {
+            Self::Purl { key, .. } => key,
+            Self::Url(url) => url,
+            Self::Upload { sha256 } => sha256,
+        }
+    }
+
     /// The field a frame names the artifact in.
     fn locator_field(&self) -> &'static str {
-        if self.is_url {
-            "url"
-        } else if self.asked.is_some() {
-            "purl"
-        } else {
-            "sha256"
+        match self {
+            Self::Purl { .. } => "purl",
+            Self::Url(_) => "url",
+            Self::Upload { .. } => "sha256",
         }
     }
 
     /// The artifact as a frame names it: the caller's spelling, or the digest
     /// for an upload with no coordinate.
     fn locator(&self) -> &str {
-        self.asked.as_deref().unwrap_or(&self.subject)
+        match self {
+            Self::Purl { asked, .. } => asked,
+            Self::Url(url) => url,
+            Self::Upload { sha256 } => sha256,
+        }
     }
 
+    /// The access-line subject: an upload with no coordinate is named by its
+    /// digest, never logged as a `purl`.
     fn access_subject(&self) -> Subject {
-        if self.is_url {
-            Subject::url(&self.subject, None)
-        } else {
-            Subject::purl(&self.subject, None)
+        match self {
+            Self::Purl { key, .. } => Subject::purl(key, None),
+            Self::Url(url) => Subject::url(url, None),
+            Self::Upload { sha256 } => Subject::sha256(sha256),
         }
     }
 
@@ -904,13 +924,30 @@ impl Named {
     /// for the same artifact. The verdict is stored under the normalized key;
     /// only the answer going back out is spelled the caller's way.
     fn decision(&self, result: &scan::engine::ScanResult, budget: u16) -> V1Decision {
-        let key = self.key.as_deref();
-        if self.is_url {
-            let verdict = scan::lookup::Verdict::from_scan(result, None);
-            V1Decision::stored(&verdict, None, budget).asked_about_url(self.asked.as_deref())
-        } else {
-            let verdict = scan::lookup::Verdict::from_scan(result, key);
-            V1Decision::stored(&verdict, key, budget).asked_about(self.asked.as_deref())
+        match self {
+            Self::Purl { key, asked } => {
+                let verdict = scan::lookup::Verdict::from_scan(result, Some(key));
+                V1Decision::stored(&verdict, Some(key), budget).asked_about(Some(asked))
+            }
+            Self::Url(url) => {
+                let verdict = scan::lookup::Verdict::from_scan(result, None);
+                V1Decision::stored(&verdict, None, budget).asked_about_url(Some(url))
+            }
+            Self::Upload { .. } => {
+                let verdict = scan::lookup::Verdict::from_scan(result, None);
+                V1Decision::stored(&verdict, None, budget).asked_about(None)
+            }
+        }
+    }
+
+    /// No decision about this artifact, spelled as a decision would be.
+    fn unavailable(&self) -> V1Decision {
+        match self {
+            Self::Purl { key, asked } => {
+                V1Decision::unavailable(None, Some(key)).asked_about(Some(asked))
+            }
+            Self::Url(url) => V1Decision::unavailable(None, None).asked_about_url(Some(url)),
+            Self::Upload { .. } => V1Decision::unavailable(None, None).asked_about(None),
         }
     }
 }
@@ -962,7 +999,7 @@ async fn answer(req: &V1Analyze, attachment: Attachment, named: Named) -> Respon
     match waited {
         Ok(outcome) => outcome_response(&outcome, &named, &framing, !attachment.leads()),
         Err(_) => {
-            tracing::info!(id = req.request_id, subject = %named.subject, "answering as a stream");
+            tracing::info!(id = req.request_id, subject = %named.subject(), "answering as a stream");
             streamed(attachment, named, framing)
         }
     }
@@ -992,11 +1029,12 @@ fn outcome_response(
             // what its fleet spends cannot tell those apart from the route.
             resp.headers_mut().insert(
                 "X-Scan-Source",
-                HeaderValue::from_static(if result.analysis_cached {
-                    "scan:cached"
+                if result.analysis_cached {
+                    Source::Cached
                 } else {
-                    "scan:analysis"
-                }),
+                    Source::Analysis
+                }
+                .into(),
             );
             resp
         }
@@ -1007,7 +1045,7 @@ fn outcome_response(
     };
     // Which question this answer answers. The caller resolved a policy before
     // asking, but only this server knows what it applied on top of its own
-    // configuration, and the answer has to be filed under what was measured
+    // configuration, and the answer has to be filed under what was applied
     // rather than what was requested. On refusals too: a caller correlating a
     // retry should not have to infer which policy was in play.
     if let Some(name) = framing.follow.as_deref()
@@ -1024,7 +1062,7 @@ fn outcome_response(
     // and buys the same analysis twice. Only this server knows they are one
     // coordinate, because only this server ran them through the normalizer,
     // so it is this server that has to say so.
-    if let Some(key) = named.key.as_deref()
+    if let Some(key) = named.key()
         && let Ok(value) = HeaderValue::from_str(key)
     {
         resp.headers_mut().insert("X-Scan-Purl", value);
@@ -1095,7 +1133,7 @@ fn streamed(attachment: Attachment, named: Named, framing: V1Framing) -> Respons
         full,
     } = framing;
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<bytes::Bytes, std::io::Error>>(4);
-    let canonical = named.key.clone();
+    let canonical = named.key().map(str::to_owned);
     let access_subject = named.access_subject();
     tokio::spawn(async move {
         let flight = Arc::clone(attachment.flight());
@@ -1110,7 +1148,7 @@ fn streamed(attachment: Attachment, named: Named, framing: V1Framing) -> Respons
                     // channel, which ends the stream. The analysis keeps going:
                     // it is not this connection's to lose.
                     if !v1_send(&tx, &progress_frame(&attachment, &named, started)).await {
-                        tracing::info!(id = request_id, subject = %named.subject, "stream closed by the caller; the analysis continues");
+                        tracing::info!(id = request_id, subject = %named.subject(), "stream closed by the caller; the analysis continues");
                         return;
                     }
                 }
@@ -1122,7 +1160,7 @@ fn streamed(attachment: Attachment, named: Named, framing: V1Framing) -> Respons
         let elapsed = scan::duration_ms(started.elapsed());
         let decided = match outcome.as_ref() {
             Outcome::Report(result) => {
-                tracing::info!(id = request_id, subject = %named.subject, elapsed_ms = elapsed, "streamed analysis answered");
+                tracing::info!(id = request_id, subject = %named.subject(), elapsed_ms = elapsed, "streamed analysis answered");
                 if full {
                     v1_send(&tx, &V1FullResult::from_scan(result)).await;
                     return;
@@ -1135,7 +1173,7 @@ fn streamed(attachment: Attachment, named: Named, framing: V1Framing) -> Respons
                 // router reads as "hand this to a worker with room". A decision
                 // here would be final and wrong — the package was never looked
                 // at.
-                tracing::warn!(id = request_id, subject = %named.subject, elapsed_ms = elapsed, "streamed analysis refused; ending without a decision");
+                tracing::warn!(id = request_id, subject = %named.subject(), elapsed_ms = elapsed, "streamed analysis refused; ending without a decision");
                 let mut frame = serde_json::json!({
                     "state": "refused",
                     "elapsed_ms": elapsed,
@@ -1151,7 +1189,7 @@ fn streamed(attachment: Attachment, named: Named, framing: V1Framing) -> Respons
                 return;
             }
             Outcome::Failed(refusal) => {
-                tracing::warn!(id = request_id, subject = %named.subject, status = refusal.status.as_u16(), elapsed_ms = elapsed, "streamed analysis failed");
+                tracing::warn!(id = request_id, subject = %named.subject(), status = refusal.status.as_u16(), elapsed_ms = elapsed, "streamed analysis failed");
                 // An artifact nobody can download is not an outage, and the
                 // difference is already drawn on the unstreamed path, where an
                 // unretrievable package is a 422. Collapsing every failure into
@@ -1168,15 +1206,7 @@ fn streamed(attachment: Attachment, named: Named, framing: V1Framing) -> Respons
                 // changes is that `reason` says whose failure it was, which
                 // beamline already relays verbatim.
                 let reason = unretrievable_reason(refusal.status);
-                if named.is_url {
-                    V1Decision::unavailable(None, None)
-                        .asked_about_url(named.asked.as_deref())
-                        .because(reason)
-                } else {
-                    V1Decision::unavailable(None, named.key.as_deref())
-                        .asked_about(named.asked.as_deref())
-                        .because(reason)
-                }
+                named.unavailable().because(reason)
             }
         };
         v1_send(&tx, &decided).await;
@@ -1197,7 +1227,7 @@ fn streamed(attachment: Attachment, named: Named, framing: V1Framing) -> Respons
         HeaderValue::from_static("no-store"),
     );
     headers.insert("X-Accel-Buffering", HeaderValue::from_static("no"));
-    headers.insert("X-Scan-Source", HeaderValue::from_static("scan:analysis"));
+    headers.insert("X-Scan-Source", Source::Analysis.into());
     // See `outcome_response`. These headers go out before the first progress
     // frame, so a caller knows how to file the decision before it arrives.
     if let Some(name) = follow
@@ -1369,24 +1399,60 @@ async fn v1_lookup_inner(state: &Arc<AppState>, q: &V1LookupQuery) -> Result<Res
         )
     };
     let decided = decide_many(state, keys, budget, q.fresh).await;
-    let mut source = None;
-    let mut out = Vec::with_capacity(decided.len());
-    for ((decided, row_source), purl) in decided.into_iter().zip(asked) {
-        source = Some(match source {
-            None => row_source,
-            Some(previous) if previous == row_source => previous,
-            Some(_) => "scan:analysis",
-        });
-        out.push(decided.asked_about(purl));
-    }
-    Ok(sourced(Json(out), source.unwrap_or("scan:analysis")))
+    let source = decided
+        .iter()
+        .map(|&(_, source)| source)
+        .max()
+        .unwrap_or(Source::None);
+    let out: Vec<_> = decided
+        .into_iter()
+        .zip(asked)
+        .map(|((decided, _), purl)| decided.asked_about(purl))
+        .collect();
+    Ok(sourced(Json(out), source))
 }
 
-fn sourced(body: impl IntoResponse, source: &'static str) -> Response {
+fn sourced(body: impl IntoResponse, source: Source) -> Response {
     let mut resp = body.into_response();
-    resp.headers_mut()
-        .insert("X-Scan-Source", HeaderValue::from_static(source));
+    resp.headers_mut().insert("X-Scan-Source", source.into());
     resp
+}
+
+/// Where an answer came from, for `X-Scan-Source`.
+///
+/// Declared in order of what it costs to be answered there, the scale
+/// beamline's `CACHE_LAYERS` bills by, so a batch reports its deepest row:
+/// that is what the request cost. `None` reached no layer at all, so it stands
+/// only when no row was answered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Source {
+    None,
+    Index,
+    Cached,
+    Bloom,
+    Replica,
+    Primary,
+    Analysis,
+}
+
+impl Source {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Index => "scan:index",
+            Self::Cached => "scan:cached",
+            Self::Bloom => "scan:bloom",
+            Self::Replica => "scan:replica",
+            Self::Primary => "scan:primary",
+            Self::Analysis => "scan:analysis",
+        }
+    }
+}
+
+impl From<Source> for HeaderValue {
+    fn from(source: Source) -> Self {
+        Self::from_static(source.as_str())
+    }
 }
 
 /// One artifact a v1 request names, every key normalized: what the index and
@@ -1437,22 +1503,22 @@ impl Key {
             })
     }
 
-    fn unavailable(&self) -> (V1Decision, &'static str) {
+    fn unavailable(&self) -> (V1Decision, Source) {
         (
             V1Decision::unavailable(self.sha.as_deref(), self.purl.as_deref())
                 .with_url(self.url.as_deref()),
-            "none",
+            Source::None,
         )
     }
 
-    fn stored(&self, verdict: &scan::lookup::Verdict, budget: u16) -> (V1Decision, &'static str) {
+    fn stored(&self, verdict: &scan::lookup::Verdict, budget: u16) -> (V1Decision, Source) {
         (
             V1Decision::stored(verdict, self.purl.as_deref(), budget).with_url(self.url.as_deref()),
             // Held, not produced. This used to report `scan:analysis` — the
             // same value a fresh run reports — which made an instant index hit
             // and a ninety-second analysis indistinguishable to anything
             // counting cache layers.
-            "scan:index",
+            Source::Index,
         )
     }
 }
@@ -1478,12 +1544,7 @@ fn held(index: &scan::lookup::Index, key: &Key, corpus: bool) -> Option<scan::lo
 /// the caller nobody has analyzed this package, when what is true is that we
 /// cannot say — and those two carry different policies at the other end. That
 /// is the whole reason `unavailable` is a separate value.
-async fn decide(
-    state: &AppState,
-    key: &Key,
-    budget: u16,
-    fresh: bool,
-) -> (V1Decision, &'static str) {
+async fn decide(state: &AppState, key: &Key, budget: u16, fresh: bool) -> (V1Decision, Source) {
     if key.needs_corpus(state.corpus.is_some()) {
         return decide_unheld(state, key, budget, fresh).await;
     }
@@ -1502,7 +1563,7 @@ async fn decide_many(
     keys: Vec<Key>,
     budget: u16,
     fresh: bool,
-) -> Vec<(V1Decision, &'static str)> {
+) -> Vec<(V1Decision, Source)> {
     // A row whose task fails stays `unavailable`: we could not find out.
     let mut out: Vec<_> = keys.iter().map(Key::unavailable).collect();
     let lookup = keys.clone();
@@ -1562,11 +1623,11 @@ fn bloom_decision(sha: Option<&str>, purl: Option<&str>) -> scan::bloom_repo::De
     lk.decide_any(purl, sha.and_then(burton::parse_sha256_hex).as_ref())
 }
 
-fn corpus_source(source: Option<corpus::CorpusSource>) -> &'static str {
+fn corpus_source(source: Option<corpus::CorpusSource>) -> Source {
     match source {
-        Some(corpus::CorpusSource::Replica) => "scan:replica",
-        Some(corpus::CorpusSource::Primary) => "scan:primary",
-        None => "none",
+        Some(corpus::CorpusSource::Replica) => Source::Replica,
+        Some(corpus::CorpusSource::Primary) => Source::Primary,
+        None => Source::None,
     }
 }
 
@@ -1577,7 +1638,7 @@ async fn decide_unheld(
     key: &Key,
     budget: u16,
     fresh: bool,
-) -> (V1Decision, &'static str) {
+) -> (V1Decision, Source) {
     let (sha, purl, url) = (key.sha.as_deref(), key.purl.as_deref(), key.url.as_deref());
     // Nothing measured here. Ask the filters before the network: they are the
     // cheapest knowledge in the process, and for a blessed artifact they are
@@ -1604,7 +1665,7 @@ async fn decide_unheld(
         && !key.needs_corpus(state.corpus.is_some())
         && let Some(d) = V1Decision::bloom(bloom, sha, purl, budget)
     {
-        return (d.with_url(url), "scan:bloom");
+        return (d.with_url(url), Source::Bloom);
     }
 
     let filters_or_unanalyzed = || {
@@ -1621,7 +1682,7 @@ async fn decide_unheld(
     // the real level, the real findings and the sentence a person reads. Only
     // when it holds nothing does the filter's own claim stand in.
     let Some(corpus) = state.corpus.as_ref() else {
-        return (filters_or_unanalyzed(), "scan:bloom");
+        return (filters_or_unanalyzed(), Source::Bloom);
     };
     let (reached, source) = corpus.known_with_source(sha, purl).await;
     let decided = match reached {
@@ -2675,15 +2736,41 @@ mod tests {
         leader.flight().set_phase(phase.clone());
         phase.set("cleave:analyze");
 
-        let named = Named {
-            key: None,
-            asked: None,
-            subject: sha.clone(),
-            is_url: false,
+        let named = Named::Upload {
+            sha256: sha.clone(),
         };
         let frame = progress_frame(&follower, &named, Instant::now());
         assert_eq!(frame["state"], "analyzing");
         assert_eq!(frame["phase"], "cleave:analyze");
         assert_eq!(frame["sha256"], sha, "an upload is named by its digest");
+    }
+
+    /// Analyze takes one package. A second `purl` is refused rather than
+    /// silently dropped in favor of the first.
+    #[tokio::test]
+    async fn a_second_purl_is_refused() -> anyhow::Result<()> {
+        let (_router, state) = super::super::assemble(super::super::ServerConfig::default())?;
+        let q = V1LookupQuery::parse(Some("purl=npm%2Fa%401.0.0&purl=npm%2Fb%401.0.0"));
+        let Err(refusal) = V1Analyze::parse(&state, 1, q) else {
+            anyhow::bail!("two purls were accepted");
+        };
+        assert_eq!(refusal.status(), StatusCode::BAD_REQUEST);
+        Ok(())
+    }
+
+    /// A batch bills as its most expensive row, on beamline's scale. A row that
+    /// reached nothing must not mask one that was answered, and work is never
+    /// claimed by rows that only read a layer.
+    #[test]
+    fn a_batch_reports_its_deepest_source() {
+        let deepest = |rows: &[Source]| rows.iter().copied().max().unwrap_or(Source::None);
+        assert_eq!(
+            deepest(&[Source::Index, Source::None, Source::Primary, Source::Bloom]),
+            Source::Primary
+        );
+        assert_eq!(deepest(&[Source::None, Source::Index]), Source::Index);
+        assert_eq!(deepest(&[Source::None, Source::None]), Source::None);
+        assert!(Source::Bloom < Source::Replica && Source::Primary < Source::Analysis);
+        assert_eq!(HeaderValue::from(Source::Replica), "scan:replica");
     }
 }

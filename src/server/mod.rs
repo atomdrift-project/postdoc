@@ -648,8 +648,6 @@ pub(crate) fn purl_type_bucket(purl: &str) -> usize {
     PURL_TYPE_NAMES
         .iter()
         .position(|n| ty.eq_ignore_ascii_case(n))
-        // `other` is the last name and is never matched by a real type.
-        .filter(|i| *i + 1 < PURL_TYPE_NAMES.len())
         .unwrap_or(PURL_TYPE_NAMES.len() - 1)
 }
 
@@ -871,18 +869,21 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 impl AppState {
     /// Analyses this server can start right now: a slot and a core for each.
     pub(super) fn available_analysis_permits(&self) -> usize {
-        let slots = match &self.lanes {
-            Some(lanes) => lanes.available(),
-            None => self.slots.available_permits(),
-        };
-        slots.min(self.cpu.available_permits())
+        self.free_slots().min(self.cpu.available_permits())
     }
 
-    /// Analyses running now.
+    /// Request slots free now: the lanes when they gate admission.
+    fn free_slots(&self) -> usize {
+        match &self.lanes {
+            Some(lanes) => lanes.available(),
+            None => self.slots.available_permits(),
+        }
+    }
+
+    /// Analyses running now. Every analysis holds a slot for its whole run;
+    /// the CPU gate is narrower than the slots, so it cannot count them.
     pub(super) fn active_tasks(&self) -> usize {
-        self.config
-            .workers
-            .saturating_sub(self.available_analysis_permits())
+        self.config.workers.saturating_sub(self.free_slots())
     }
 
     fn next_request_id(&self) -> u64 {
@@ -1407,21 +1408,13 @@ fn load_shap(model_dir: &std::path::Path) -> anyhow::Result<Option<ShapImportanc
     Ok(shap)
 }
 
-/// Periodically log stuck in-flight requests, and signal cooperative
-/// cancellation to those past the cancel threshold so cleave can bail out of
-/// slow rules. Never terminates the process; that is the operator's call.
-///
-/// The threshold follows the analysis timeout: at least the historical 10
-/// minutes, and always past `--analysis-timeout` itself (the request has
-/// already 504'd by then; this reaps the orphaned blocking thread). A timeout
-/// of 0 is an explicit opt-out of time limits, so the watchdog only logs.
+/// Periodically log long-running in-flight requests. Never cancels or
+/// terminates anything: `--analysis-timeout` already signalled cooperative
+/// cancellation (see [`RequestGuard::run`]), so a request still here with its
+/// flag raised is an orphan cleave has not yet noticed, and is logged as one.
 ///
 /// Holds the state weakly and stops on shutdown, so it never outlives the app.
 fn spawn_watchdog(state: &Arc<AppState>) {
-    let cancel_after_secs = match state.config.analysis_timeout_secs {
-        0 => None,
-        t => Some(t.max(600)),
-    };
     let weak = Arc::downgrade(state);
     let mut stop = state.shutdown.subscribe();
     tokio::spawn(async move {
@@ -1436,17 +1429,19 @@ fn spawn_watchdog(state: &Arc<AppState>) {
             let Some(state) = weak.upgrade() else {
                 return;
             };
-            let active = state.active_tasks();
-            if active == 0 {
+            if state.in_flight.is_empty() {
                 continue;
             }
+            let active = state.active_tasks();
             let stuck = state.stuck_orphans.load(Ordering::Relaxed);
             for entry in &state.in_flight {
                 let elapsed_secs = entry.started_at.elapsed().as_secs();
+                if elapsed_secs < 120 {
+                    continue;
+                }
                 let phase = entry.phase.get();
                 let tid = entry.thread_id.load(Ordering::Relaxed);
-                if cancel_after_secs.is_some_and(|t| elapsed_secs >= t) {
-                    entry.cancellation.store(true, Ordering::Release);
+                if entry.cancellation.load(Ordering::Acquire) {
                     tracing::error!(
                         request_id = entry.key(),
                         name = %entry.name,
@@ -1455,9 +1450,9 @@ fn spawn_watchdog(state: &Arc<AppState>) {
                         thread_id = tid,
                         stuck_orphans = stuck,
                         active_tasks = active,
-                        "watchdog: task past cancel threshold — cancellation signalled",
+                        "watchdog: timed-out task still running after cancellation",
                     );
-                } else if elapsed_secs >= 120 {
+                } else {
                     tracing::warn!(
                         request_id = entry.key(),
                         name = %entry.name,

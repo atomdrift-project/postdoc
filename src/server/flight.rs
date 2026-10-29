@@ -2,7 +2,7 @@
 //!
 //! Two clients asking about the same artifact should cost one analysis, not
 //! two. Beamline already collapses duplicate lookups, but only within one
-//! Worker isolate: it runs many, and a client that retries after a `202`
+//! Worker isolate: it runs many, and a client that retries a cut-short stream
 //! usually lands on a different one, so the same sha can arrive here several
 //! times while the first analysis is still running. Each duplicate would take a
 //! slot of its own and push the server toward `429 At capacity` for work it is

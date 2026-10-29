@@ -226,6 +226,10 @@ One package answers with one object; a repeated `purl` answers with a
 list, in the order asked. Every field is always present — `null` when
 unknown, `[]` when empty.
 
+`X-Scan-Source` names the layer that answered: `scan:index`, `scan:bloom`,
+`scan:replica`, `scan:primary`, or `none` when nothing could. A list reports
+the most expensive layer any row reached, in that order.
+
 `decision` is one of:
 
 | | |

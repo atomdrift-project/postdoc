@@ -924,10 +924,7 @@ impl RulesStartup {
         if let Some(dir) = self.traits_dir.as_ref() {
             cleave::traits_repo::set_override_dir(Some(dir.into()));
         }
-        scan::refresh_rules_at_startup(
-            self.refresh == Refresh::Force,
-            self.refresh == Refresh::Skip,
-        )?;
+        scan::refresh_rules_at_startup(self.refresh)?;
         let model_dir = scan::cli::resolve_model_dir(self.model_dir)?;
         let level = scan::cli::operating_level(self.level, self.thresholds.is_some(), &model_dir);
         Ok(Rules {
