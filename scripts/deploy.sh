@@ -47,7 +47,8 @@ esac
 
 SERVICE_USER=postdoc
 BINARY=postdoc
-STATE_HOME=/var/lib/atomdrift/postdoc
+STATE_PARENT=/var/lib/atomdrift
+STATE_HOME=$STATE_PARENT/postdoc
 BIN_DIR=${STATE_HOME}/bin
 BIN_PATH=${BIN_DIR}/${BINARY}
 UNIT_FILE=/etc/systemd/system/${SERVICE_NAME}.service
@@ -150,6 +151,14 @@ if ! getent passwd "$SERVICE_USER" >/dev/null; then
         --home-dir "$STATE_HOME" --shell /usr/sbin/nologin \
         --comment "Atomdrift postdoc" "$SERVICE_USER"
 fi
+# Scan may own the shared parent with mode 0750. Creating postdoc's home
+# does not repair that ancestor, so the new account cannot reach its home.
+# Allow traversal of this shared container, preserving its owner and existing
+# read/write permissions. Never change permissions on custom home ancestors.
+if [ "$STATE_HOME" = "$STATE_PARENT/postdoc" ]; then
+    $SUDO mkdir -p "$STATE_PARENT"
+    $SUDO chmod a+x "$STATE_PARENT"
+fi
 $SUDO install -d -m0750 -o "$SERVICE_USER" -g "$SERVICE_USER" "$STATE_HOME"
 $SUDO install -d -m0700 -o "$SERVICE_USER" -g "$SERVICE_USER" "$STATE_HOME/.tok"
 
@@ -182,7 +191,8 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=simple
+# Wait for exec so setup failures (including CHDIR) fail the deploy itself.
+Type=exec
 User=${SERVICE_USER}
 Group=${SERVICE_USER}
 
@@ -268,6 +278,18 @@ fi
 if ! $SUDO systemctl is-active --quiet "$SERVICE_NAME"; then
     $SUDO journalctl -u "$SERVICE_NAME" -n 40 --no-pager || true
     die "$SERVICE_NAME failed to start"
+fi
+# Type=exec catches setup errors; also catch immediate application failures
+# such as an unusable LLM chain before declaring a worker deploy successful.
+# This is a startup grace period, not a claim that a job has completed.
+if [ "$MODE" = worker ]; then
+    for attempt in 1 2 3 4 5; do
+        sleep 1
+        if ! $SUDO systemctl is-active --quiet "$SERVICE_NAME"; then
+            $SUDO journalctl -u "$SERVICE_NAME" -n 40 --no-pager || true
+            die "$SERVICE_NAME exited during startup"
+        fi
+    done
 fi
 wait_ready
 log "$SERVICE_NAME is running"

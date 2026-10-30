@@ -33,11 +33,33 @@ install_token() {
     fi
 }
 
+# Reuse the retired service's credentials only when neither the operator nor
+# postdoc has one. Explicit source overrides and installed tokens take priority.
+legacy_token_source() {
+    if [ "$1" = "$HOME/.tok/$2" ] && [ ! -e "$1" ] &&
+       ! $SUDO test -e "$STATE_HOME/.tok/$2"; then
+        legacy_home=$(getent passwd scan | cut -d: -f6 || true)
+        if [ -n "$legacy_home" ] && $SUDO test -f "$legacy_home/.tok/$2"; then
+            (umask 077; $SUDO cat "$legacy_home/.tok/$2" > "$DEPLOY_TMP/legacy-$2") ||
+                die "could not migrate Scan's $2 credential"
+            printf '%s\n' "$DEPLOY_TMP/legacy-$2"
+            return
+        fi
+    fi
+    printf '%s\n' "$1"
+}
+
 prepare_credentials() {
     HOPPER_TOKEN_FILE=${HOPPER_TOKEN_FILE:-${TOKEN_FILE:-$HOME/.tok/hopper}}
     SCAN_TOKEN_FILE=${SCAN_TOKEN_FILE:-$HOME/.tok/scan}
     LLM_TOKEN_FILE=${LLM_TOKEN_FILE:-$HOME/.tok/llm}
     OPENROUTER_TOKEN_FILE=${OPENROUTER_TOKEN_FILE:-$HOME/.tok/openrouter}
+    HOPPER_TOKEN_FILE=$(legacy_token_source "$HOPPER_TOKEN_FILE" hopper)
+    if [ "$MODE" = serve ]; then
+        SCAN_TOKEN_FILE=$(legacy_token_source "$SCAN_TOKEN_FILE" scan)
+    fi
+    LLM_TOKEN_FILE=$(legacy_token_source "$LLM_TOKEN_FILE" llm)
+    OPENROUTER_TOKEN_FILE=$(legacy_token_source "$OPENROUTER_TOKEN_FILE" openrouter)
     requirement=optional
     if [ "$MODE" = worker ] || [ -n "$URL" ]; then requirement=required; fi
     check_token "$HOPPER_TOKEN_FILE" "$STATE_HOME/.tok/hopper" "$requirement"
@@ -62,6 +84,22 @@ prepare_credentials() {
     requirement=optional
     if [ "$or_count" -gt 0 ] && [ "$or_count" -eq "$endpoint_count" ]; then requirement=required; fi
     check_token "$OPENROUTER_TOKEN_FILE" "$STATE_HOME/.tok/openrouter" "$requirement"
+    # A mixed failover chain used to make both key files optional, even when
+    # neither endpoint could authenticate. Require a key for at least one
+    # configured endpoint before stopping or replacing any service.
+    if [ "$endpoint_count" -gt 0 ]; then
+        llm_key_available=0
+        if [ "$endpoint_count" -gt "$or_count" ] &&
+           { token_present "$LLM_TOKEN_FILE" || $SUDO grep -q '[^[:space:]]' "$STATE_HOME/.tok/llm" 2>/dev/null; }; then
+            llm_key_available=1
+        fi
+        if [ "$or_count" -gt 0 ] &&
+           { token_present "$OPENROUTER_TOKEN_FILE" || $SUDO grep -q '[^[:space:]]' "$STATE_HOME/.tok/openrouter" 2>/dev/null; }; then
+            llm_key_available=1
+        fi
+        [ "$llm_key_available" -eq 1 ] ||
+            die "no usable LLM credential for the configured endpoints; provide LLM_TOKEN_FILE, OPENROUTER_TOKEN_FILE, or SCAN_LLM_KEY (LLM= explicitly disables LLM analysis)"
+    fi
     # Provision the operator's subscription for the service automatically.
     # Keep an installed token usable on redeploy when its source is absent.
     # An explicit ENRICHED setting still controls whether we provision it.

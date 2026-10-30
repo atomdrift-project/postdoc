@@ -33,6 +33,22 @@ when already root. Deployment creates the `postdoc` service account and
 installs the binary in that user's `~/bin/postdoc`. The binary and its `bin`
 directory remain root-owned (`root:root` on Linux, `root:wheel` on FreeBSD).
 Redeploys replace the binary by rename so a running service can be upgraded.
+On Linux, deployment repairs traversal permissions on the default shared
+`/var/lib/atomdrift` directory, which older Scan installs may leave at `0750`.
+It preserves that directory's ownership and read/write permissions; the
+postdoc home remains private at `0750`. Custom home ancestors are left alone.
+Systemd waits for the executable to start, so working-directory and execution
+failures fail deployment instead of appearing to succeed before a restart loop.
+Linux worker deploys also require five seconds of continuous active status to
+catch immediate application exits; this does not verify job completion.
+Unix migration reuses credentials from the old `scan` account when both the
+operator's default token file and postdoc's installed token are absent. Explicit
+token-file overrides take precedence, and existing postdoc tokens are preserved.
+When LLM analysis is enabled, Unix deployment requires a nonblank key for at
+least one configured endpoint before changing services, including mixed
+endpoint/OpenRouter chains. `LLM=` explicitly disables analysis and this key
+requirement. Preflight checks key availability; endpoint authentication is
+validated when postdoc starts.
 
 | Platform | Service home and writable state | Enabled/restarted service |
 | --- | --- | --- |

@@ -27,6 +27,9 @@ def done(code=0):
 if cmd == 'id': print('1000'); done()
 if cmd == 'uname': print(os.environ['MOCK_PLATFORM']); done()
 if cmd == 'getent':
+    if args[-1] == 'scan':
+        if s.get('legacy_home'): print('scan:x:998:998:scan:' + s['legacy_home'] + ':/usr/sbin/nologin'); done()
+        done(2)
     if s['user']: print('postdoc:x:999:999:postdoc:' + s['home'] + ':/usr/sbin/nologin'); done()
     done(2)
 if cmd == 'pw':
@@ -34,7 +37,18 @@ if cmd == 'pw':
     s['user'] = True; done()
 if cmd == 'useradd': s['user'] = True; done()
 if cmd == 'readlink': print(os.path.realpath(args[-1])); done()
+if cmd == 'mkdir': pathlib.Path(args[-1]).mkdir(parents=True, exist_ok=True); done()
+if cmd == 'chmod':
+    assert args[0] == 'a+x', args
+    path = pathlib.Path(args[-1]); path.chmod(path.stat().st_mode | 0o111); done()
 if cmd == 'grep': done(subprocess.run(['/usr/bin/grep', *args]).returncode)
+if cmd == 'test':
+    path = pathlib.Path(args[-1])
+    done(0 if (path.is_file() if args[0] == '-f' else path.exists()) else 1)
+if cmd == 'cat': print(pathlib.Path(args[-1]).read_text(), end=''); done()
+if cmd == 'sleep':
+    if os.environ.get('MOCK_WORKER_CRASH'): s['running'] = False
+    done()
 if cmd == 'pacman':
     package=args[-1]
     names={'base-devel':['cc','c++'],'pkgconf':['pkg-config']}.get(package,[package])
@@ -96,6 +110,11 @@ if cmd == 'systemctl':
     if action in ('daemon-reload','enable','disable'): done()
     if action == 'is-enabled': print('disabled'); done(1)
     if action in ('restart','start'):
+        # Model traversal by postdoc through a legacy scan-owned parent.
+        parent = pathlib.Path(s['home']).parent
+        if s.get('legacy_parent') and not parent.stat().st_mode & 0o001:
+            print('Changing to the requested working directory failed: Permission denied', file=sys.stderr)
+            done(1)
         if action == 'restart' or not s['running']: s['starts']+=1
         s['running']=True; done()
     if action == 'is-active': done(0 if args[-1].startswith('postdoc') and s['running'] else 3)
@@ -125,7 +144,7 @@ class Host:
         shutil.copytree(SCRIPTS, self.scripts)
         self.bin = self.root / "bin"
         self.bin.mkdir()
-        self.home = self.root / "service-home"
+        self.home = self.root / "state-parent" / "postdoc"
         self.operator = self.root / "operator"
         (self.operator / ".tok").mkdir(parents=True)
         for name in ("hopper", "scan", "llm", "openrouter"):
@@ -139,11 +158,11 @@ class Host:
         state = dict(calls=[], user=existing, home=str(self.home), running=False, starts=0, rcconf={})
         (self.root / "state.json").write_text(json.dumps(state))
         for command in ("doas", "id", "uname", "getent", "pw", "useradd", "readlink", "cmp", "install",
-                        "systemctl", "sysrc", "service", "mv", "chown", "touch", "journalctl"):
+                        "systemctl", "sysrc", "service", "mv", "chown", "touch", "journalctl", "mkdir", "chmod", "sleep"):
             executable = self.bin / command
             executable.write_text(MOCK)
             executable.chmod(0o755)
-        for command in ("dirname", "cut", "grep", "tr", "mktemp", "rm", "sed", "head", "awk", "cat", "sleep", "python3"):
+        for command in ("dirname", "cut", "grep", "tr", "mktemp", "rm", "sed", "head", "awk", "cat", "python3"):
             (self.bin / command).symlink_to(shutil.which(command))
         for command in ("7zz", "rizin", "upx", "innoextract"):
             executable = self.bin / command
@@ -153,7 +172,7 @@ class Host:
         for script in ("deploy.sh", "deploy-freebsd.sh"):
             path = self.scripts / script
             source = path.read_text()
-            for old, new in (("/var/lib/atomdrift/postdoc", self.home), ("/var/db/atomdrift/postdoc", self.home),
+            for old, new in (("/var/lib/atomdrift", self.home.parent), ("/var/db/atomdrift/postdoc", self.home),
                              ("/usr/local/etc/postdoc", self.config), ("/etc/postdoc", self.config),
                              ("/etc/systemd/system", self.units), ("/usr/local/etc/rc.d", self.units)):
                 source = source.replace(old, str(new))
@@ -183,6 +202,26 @@ class DeployTests(unittest.TestCase):
         self.addCleanup(host.close)
         return host
 
+    def test_linux_repairs_legacy_scan_parent_on_deploy_and_redeploy(self):
+        for mode in ("worker", "serve"):
+            with self.subTest(mode=mode):
+                host = self.host(existing=True)
+                host.home.parent.mkdir()
+                original_owner = host.home.parent.stat().st_uid
+                state = host.state()
+                state["legacy_parent"] = True
+                (host.root / "state.json").write_text(json.dumps(state))
+                for _ in range(2):
+                    host.home.parent.chmod(0o750)
+                    result = host.run(mode=mode)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(host.home.parent.stat().st_mode & 0o777, 0o751)
+                    self.assertEqual(host.home.parent.stat().st_uid, original_owner)
+                    self.assertEqual(host.home.stat().st_mode & 0o777, 0o750)
+                self.assertEqual(host.state()["starts"], 1)
+                unit = host.units / ("postdoc-worker.service" if mode == "worker" else "postdoc.service")
+                self.assertIn("Type=exec\n", unit.read_text())
+
     def test_redeploy_does_not_restart_and_rotation_does(self):
         for platform in ("Linux", "FreeBSD"):
             with self.subTest(platform=platform):
@@ -197,8 +236,74 @@ class DeployTests(unittest.TestCase):
                 self.assertEqual(host.run().returncode, 0)
                 self.assertEqual(host.state()["starts"], 2)
 
+    def test_legacy_credentials_migrate_without_overwriting_current_credentials(self):
+        for platform in ("Linux", "FreeBSD"):
+            with self.subTest(platform=platform):
+                host = self.host(platform=platform)
+                legacy = host.root / "scan-home"
+                (legacy / ".tok").mkdir(parents=True)
+                state = host.state()
+                state["legacy_home"] = str(legacy)
+                (host.root / "state.json").write_text(json.dumps(state))
+                for name in ("hopper", "scan", "llm", "openrouter"):
+                    (legacy / ".tok" / name).write_text("legacy-" + name + "-secret\n")
+                    (host.operator / ".tok" / name).unlink()
+                overridden = host.run(LLM="openrouter", OPENROUTER_TOKEN_FILE=str(host.root / "missing-key"))
+                self.assertNotEqual(overridden.returncode, 0, "explicit source overrides must not inherit a legacy key")
+                result = host.run(LLM="openrouter")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                for name in ("hopper", "scan", "llm", "openrouter"):
+                    installed = host.home / ".tok" / name
+                    self.assertEqual(installed.read_text(), "legacy-" + name + "-secret\n")
+                    self.assertEqual(installed.stat().st_mode & 0o777, 0o600)
+                    (legacy / ".tok" / name).write_text("stale-secret\n")
+                result = host.run(LLM="openrouter")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(host.state()["starts"], 1)
+                (host.operator / ".tok/llm").write_text("operator-secret\n")
+                result = host.run(LLM="openrouter")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual((host.home / ".tok/llm").read_text(), "operator-secret\n")
+                self.assertNotIn("-secret", json.dumps(host.state()))
+
+    def test_worker_crash_during_startup_fails_deploy(self):
+        host = self.host()
+        result = host.run(mode="worker", MOCK_WORKER_CRASH="1")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("exited during startup", result.stderr)
+
+    def test_missing_llm_credentials_fail_before_service_changes(self):
+        for platform in ("Linux", "FreeBSD"):
+            for chain in ("https://llm.example/v1", "https://llm.example/v1,openrouter", "openrouter"):
+                with self.subTest(platform=platform, chain=chain):
+                    host = self.host(platform=platform)
+                    for name in ("llm", "openrouter"):
+                        (host.operator / ".tok" / name).unlink()
+                    result = host.run(mode="worker", LLM=chain)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("credential", result.stderr)
+                    self.assertFalse(any(command in ("install", "useradd", "pw", "service", "systemctl")
+                                         for command, _ in host.state()["calls"]))
+
+    def test_llm_key_must_match_an_endpoint_and_disabled_llm_needs_no_key(self):
+        host = self.host()
+        (host.operator / ".tok/llm").unlink()
+        result = host.run(mode="worker", LLM="https://llm.example/v1")
+        self.assertNotEqual(result.returncode, 0, "an unrelated OpenRouter key must not satisfy a direct endpoint")
+        (host.operator / ".tok/openrouter").unlink()
+        result = host.run(mode="worker", LLM="")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_mixed_llm_chain_accepts_either_applicable_key(self):
+        for name in ("llm", "openrouter"):
+            with self.subTest(missing=name):
+                host = self.host()
+                (host.operator / ".tok" / name).unlink()
+                result = host.run(mode="worker", LLM="https://llm.example/v1,openrouter")
+                self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_blank_tokens_fail_before_any_service_changes(self):
-        for name in ("scan", "hopper"):
+        for name in ("scan", "hopper", "llm", "openrouter"):
             host = self.host()
             (host.operator / ".tok" / name).write_text(" \t\n")
             result = host.run()
@@ -361,6 +466,8 @@ class DeployTests(unittest.TestCase):
 
     def test_openrouter_key_is_installed_without_argv_disclosure(self):
         host = self.host()
+        for name in ("llm", "openrouter"):
+            (host.operator / ".tok" / name).unlink()
         result = host.run(LLM="openrouter", SCAN_LLM_KEY="secret-test-key")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual((host.home / ".tok/openrouter").read_text(), "secret-test-key\n")
@@ -405,6 +512,7 @@ class DeployTests(unittest.TestCase):
     def test_existing_home_with_spaces_is_used(self):
         host = self.host(existing=True)
         custom = host.root / "custom home"
+        parent_mode = host.root.stat().st_mode
         state = host.state()
         state["home"] = str(custom)
         (host.root / "state.json").write_text(json.dumps(state))
@@ -412,6 +520,7 @@ class DeployTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue((custom / "bin/postdoc").exists())
         self.assertIn("WorkingDirectory=" + str(custom) + "\n", (host.units / "postdoc.service").read_text())
+        self.assertEqual(host.root.stat().st_mode, parent_mode)
 
     def test_bootstrap_updates_an_old_toolchain_for_this_build(self):
         host = self.host()
