@@ -1356,7 +1356,7 @@ async fn load_resources(state: Arc<AppState>) {
         // it before reporting ready: a server that answers `/_/health` with
         // "ok" while failing every analysis on a missing traits directory is
         // worse than one that never starts.
-        let traits = cleave::traits_repo::try_resolve()?;
+        let traits = cleave::traits_repo::try_resolve().map_err(|e| format!("{e:#}"))?;
         tracing::info!(dir = %traits.display(), "cleave traits resolved");
         let opts = cleave::AnalysisOptions {
             slow_rule_ms,
@@ -1493,9 +1493,13 @@ pub(crate) async fn run(config: ServerConfig) -> anyhow::Result<()> {
 
     // Enforces the RSS ceiling on wall-clock time, independent of request
     // traffic: memory can grow between requests (fragmentation, background
-    // YARA work). Skipped when throttling is disabled.
+    // YARA work). Skipped when throttling is disabled. Sustained overload
+    // exits so the supervisor restarts us before the kernel OOM-kills us.
     let _rss_logger = config.max_rss_bytes.map(|limit| {
-        cleave::memory_tracker::start_periodic_logging(Duration::from_secs(10), limit.get())
+        cleave::memory_tracker::start_periodic_logging(Duration::from_secs(10), limit.get(), || {
+            tracing::error!("RSS over the cap for >30s; exiting to avoid an OOM kill");
+            std::process::exit(1);
+        })
     });
 
     let (app, state) = assemble(config)?;

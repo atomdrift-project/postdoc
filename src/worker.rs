@@ -5159,7 +5159,11 @@ fn verify_download_digest(
     if actual == expected {
         return Ok(());
     }
-    let actual_hex = burton::hex(&actual);
+    let actual_hex: String = actual.iter().fold(String::with_capacity(64), |mut out, b| {
+        use std::fmt::Write as _;
+        let _ = write!(out, "{b:02x}");
+        out
+    });
     tracing::error!(
         expected_sha256 = %expected_hex,
         actual_sha256 = %actual_hex,
