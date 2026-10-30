@@ -46,9 +46,47 @@ case "$(uname -s)" in
             [ "$RUNTIME_PKG" != pkg ] || ca_package=ca-root-nss
             install_runtime_package "$ca_package" || die "install a system CA certificate bundle"
         fi
-        if ! command -v cargo >/dev/null 2>&1 || ! python3 -c 'import subprocess,re; from pathlib import Path; required=tuple(map(int,re.search(r"rust-version = \"([0-9.]+)\"",Path("Cargo.toml").read_text())[1].split("."))); actual=tuple(map(int,subprocess.check_output(["rustc","--version"],text=True).split()[1].split("-")[0].split("."))); raise SystemExit(actual < required)'; then
+        required_rust=$(python3 -c 'import re; from pathlib import Path; print(re.search(r"rust-version = \"([0-9.]+)\"", Path("Cargo.toml").read_text())[1])')
+        rust_tools_run() {
+            rustc --version >/dev/null 2>&1 && cargo --version >/dev/null 2>&1
+        }
+        rust_ready() {
+            cargo --version >/dev/null 2>&1 || return 1
+            python3 - "$required_rust" <<'PY'
+import subprocess
+import sys
+
+def version(value):
+    return (tuple(map(int, value.split("-")[0].split("."))) + (0, 0, 0))[:3]
+
+try:
+    output = subprocess.check_output(["rustc", "--version"], text=True, stderr=subprocess.DEVNULL)
+    supported = version(output.split()[1]) >= version(sys.argv[1])
+except (OSError, subprocess.CalledProcessError, ValueError, IndexError):
+    supported = False
+sys.exit(0 if supported else 1)
+PY
+        }
+        if ! rust_ready; then
             if command -v rustup >/dev/null 2>&1; then
-                rustup toolchain install stable --profile minimal
+                # A usable stable may already exist even when no default is set.
+                # Select it only for this build, preserving the user's default.
+                RUSTUP_TOOLCHAIN=stable
+                export RUSTUP_TOOLCHAIN
+                if ! rust_ready; then
+                    rust_install_status=0
+                    rustup toolchain install stable --profile minimal || rust_install_status=$?
+                    # Interrupted installs can report "unchanged" while lacking
+                    # a manifest or compiler. Reinstall only an unusable toolchain;
+                    # a failed update must not remove a working older version.
+                    if ! rust_tools_run; then
+                        log "Stable Rust is unusable; reinstalling the toolchain"
+                        rustup toolchain uninstall stable || die "could not remove the incomplete stable Rust toolchain"
+                        rustup toolchain install stable --profile minimal || die "could not reinstall stable Rust"
+                    elif [ "$rust_install_status" -ne 0 ]; then
+                        die "could not update stable Rust; Rust $required_rust or newer is required"
+                    fi
+                fi
             else
                 rust_installer=$(mktemp)
                 curl --proto '=https' --tlsv1.2 -fsS https://sh.rustup.rs -o "$rust_installer"
@@ -60,7 +98,7 @@ case "$(uname -s)" in
             RUSTUP_TOOLCHAIN=stable
             export RUSTUP_TOOLCHAIN
         fi
-        python3 -c 'import subprocess; from pathlib import Path; import re; required=tuple(map(int,re.search(r"rust-version = \"([0-9.]+)\"",Path("Cargo.toml").read_text())[1].split("."))); actual=tuple(map(int,subprocess.check_output(["rustc","--version"],text=True).split()[1].split("-")[0].split("."))); assert actual >= required, f"Rust {required} required; update Rust with rustup update stable"'
+        rust_ready || die "Rust $required_rust or newer and a working Cargo are required; repair the toolchain with rustup"
         if [ "$(uname -s)" = FreeBSD ]; then ulimit -d "$(ulimit -Hd)" 2>/dev/null || true; fi
         ;;
     MINGW*|MSYS*|CYGWIN*)

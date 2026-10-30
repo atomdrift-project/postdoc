@@ -42,8 +42,28 @@ if cmd == 'pacman':
         binary=root/'bin'/name; binary.write_text('#!/bin/sh\nexit 0\n'); binary.chmod(0o755)
     done()
 if cmd == 'rustup':
+    if 'rust' in s:
+        rust = s['rust']
+        if args == ['toolchain', 'uninstall', 'stable']:
+            rust['removed'] = True
+            rust['stable'] = None
+            done()
+        assert args == ['toolchain', 'install', 'stable', '--profile', 'minimal'], args
+        if rust.get('removed'):
+            if rust.get('repair_fails'): done(1)
+            if not rust.get('repair_noop'): rust['stable'] = '1.99.1'; rust['cargo_broken'] = False
+        elif not rust.get('install_noop'):
+            rust['stable'] = rust.get('installed_version', '1.99.1')
+        done(rust.get('install_status', 0) if not rust.get('removed') else 0)
     binary=root/'bin/rustc'; binary.write_text("#!/bin/sh\necho 'rustc 1.99.1 (updated)'\n"); binary.chmod(0o755)
     done()
+if cmd in ('rustc', 'cargo'):
+    rust = s['rust']
+    selected = os.environ.get('RUSTUP_TOOLCHAIN', 'default')
+    version = rust.get(selected)
+    if not version or (cmd == 'cargo' and rust.get('cargo_broken')):
+        print('error: missing or incomplete toolchain', file=sys.stderr); done(1)
+    print(cmd + ' ' + version + ' (test)'); done()
 if cmd == 'cmp': done(0 if pathlib.Path(args[-1]).exists() and filecmp.cmp(args[-2], args[-1], shallow=False) else 1)
 if cmd == 'install':
     paths=[]; mode=0o755; i=0
@@ -411,6 +431,86 @@ class DeployTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue(result.stdout.endswith("stable"))
         self.assertIn(["rustup", ["toolchain", "install", "stable", "--profile", "minimal"]], host.state()["calls"])
+
+
+class BootstrapRustTests(unittest.TestCase):
+    def exercise(self, **rust):
+        host = Host()
+        self.addCleanup(host.close)
+        (host.root / "Cargo.toml").write_text('rust-version = "1.97"\n')
+        host.env.pop("RUSTUP_TOOLCHAIN", None)
+        state = host.state()
+        state["rust"] = rust
+        (host.root / "state.json").write_text(json.dumps(state))
+        for name in ("cargo", "rustc", "rustup", "cc", "c++", "pkg-config", "git", "curl"):
+            path = host.bin / name
+            path.write_text(MOCK if name in ("cargo", "rustc", "rustup") else "#!/bin/sh\nexit 0\n")
+            path.chmod(0o755)
+        script = host.scripts / "deploy-bootstrap.sh"
+        script.write_text(script.read_text().replace('PATH="$HOME/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"', 'PATH="$PATH"'))
+        result = subprocess.run(
+            ["/bin/sh", "-c", '. ./scripts/deploy-bootstrap.sh; printf "selected=%s\\n" "${RUSTUP_TOOLCHAIN:-default}"; cargo build --locked --release'],
+            cwd=host.root, env=host.env, capture_output=True, text=True,
+        )
+        self.assertNotIn("Traceback", result.stderr)
+        calls = host.state()["calls"]
+        # No build is allowed after an unsuccessful bootstrap.
+        self.assertEqual(["cargo", ["build", "--locked", "--release"]] in calls, result.returncode == 0)
+        return result, [args for cmd, args in calls if cmd == "rustup"]
+
+    def test_healthy_default_is_preserved(self):
+        result, calls = self.exercise(default="1.97.0")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("selected=default", result.stdout)
+        self.assertEqual(calls, [])
+
+    def test_no_default_selects_existing_stable_without_installing(self):
+        result, calls = self.exercise(stable="1.99.1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("selected=stable", result.stdout)
+        self.assertEqual(calls, [])
+
+    def test_missing_toolchain_is_installed(self):
+        result, calls = self.exercise()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(calls, [["toolchain", "install", "stable", "--profile", "minimal"]])
+
+    def test_incomplete_stable_is_reinstalled_after_unchanged_or_failed_install(self):
+        for status in (0, 1):
+            with self.subTest(status=status):
+                result, calls = self.exercise(install_noop=True, install_status=status)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("selected=stable", result.stdout)
+                self.assertEqual(calls, [
+                    ["toolchain", "install", "stable", "--profile", "minimal"],
+                    ["toolchain", "uninstall", "stable"],
+                    ["toolchain", "install", "stable", "--profile", "minimal"],
+                ])
+
+    def test_broken_cargo_also_requires_repair(self):
+        result, calls = self.exercise(stable="1.99.1", cargo_broken=True, install_noop=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(["toolchain", "uninstall", "stable"], calls)
+
+    def test_failed_update_preserves_working_old_stable(self):
+        result, calls = self.exercise(stable="1.20.0", install_noop=True, install_status=1)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("could not update stable Rust", result.stderr)
+        self.assertEqual(calls, [["toolchain", "install", "stable", "--profile", "minimal"]])
+
+    def test_failed_or_ineffective_repair_stops_before_build(self):
+        for failure in ("repair_fails", "repair_noop"):
+            with self.subTest(failure=failure):
+                result, calls = self.exercise(install_noop=True, **{failure: True})
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("error:", result.stderr)
+                self.assertEqual(len(calls), 3)
+
+    def test_stable_below_required_version_stops_before_build(self):
+        result, calls = self.exercise(installed_version="1.96.0")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Rust 1.97 or newer", result.stderr)
+        self.assertEqual(calls, [["toolchain", "install", "stable", "--profile", "minimal"]])
 
 
 if __name__ == "__main__":
