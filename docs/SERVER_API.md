@@ -21,7 +21,6 @@ The defaults are deliberate. Override them only when you have a reason.
 | `--max-rss-gb`   | `0` (auto)         | RSS ceiling. `0` reads the cgroup signal. `-1` disables.   |
 | `--allow-cidr`   | none               | Extra CIDR networks allowed beyond loopback.               |
 | `--token-file`   | none               | File holding the required bearer token. See below.         |
-| `--traits-dir`   | none               | Writable cleave traits directory (sets env on launch).     |
 | `--hopper`       | none               | Hopper base URL. Every analyzed result is renewed on its `/api/result`. Needs a hopper token; see below. |
 | `--idle-worker-slots` | on when `--hopper` is set | Runs a companion `postdoc worker` process that claims hopper queue work, frozen by the kernel for the whole of every analysis request. Any non-zero value enables it; `0` disables. |
 
@@ -29,7 +28,7 @@ Environment variables read at startup:
 
 | Variable               | Effect                                                       |
 | ---------------------- | ------------------------------------------------------------ |
-| `CLEAVE_TRAITS_DIR`    | Traits directory. `--traits-dir` overrides.                  |
+| `CLEAVE_TRAITS_DIR`    | Traits directory.                                            |
 | `RAYON_NUM_THREADS` | Override global Rayon pool size. Default is available CPU parallelism. |
 | `SCAN_MODELS_REPO`   | Model repository URL.                                        |
 | `SCAN_WHALE_POOL_THREADS` | Threads in each whale's private pool (below); `0` sends whales to the global pool. Default: a quarter of the physical cores, 2–16. |
@@ -94,8 +93,7 @@ route returns 503 with `{"error":"server starting"}`. Poll `/_/health`
 until the status flips to `ok`.
 
 Models and traits are refreshed once at startup — that is what a restart is
-for, and with `--traits-dir` it is also what installs traits into a directory
-that does not exist yet. `-u` forces the refresh even when the local copy looks
+for, and it is also what installs traits on a fresh host. `-u` forces the refresh even when the local copy looks
 current; `--no-update` (before the subcommand) skips it. If traits still cannot
 be resolved afterwards the server never reports ready: `/_/health` returns 503
 with `{"status":"failed","reason":"initialization_failed"}` and the log names

@@ -455,9 +455,9 @@ No file over 2000 lines.
      were all settled in scan's CLI, private, so no second binary could serve
      the same way. `atomscan serve`'s own command line is unchanged.
    - **done** — the startup rule refresh is `scan::refresh_rules_at_startup`,
-     shared by both binaries and both modes. It is also what creates a
-     `--traits-dir` on a fresh deploy; without it a server starts, reports
-     healthy, and fails every analysis.
+     shared by both binaries and both modes. It is also what installs the
+     traits on a fresh deploy; without it a server starts, reports healthy,
+     and fails every analysis.
    - in progress — scan's 38 global flags become a public `clap::Args` that
      both binaries flatten. Until then `postdoc serve` accepts only its own
      14 flags, so an operator passing `--llm` or `--fetch` gets different

@@ -788,34 +788,27 @@ pub(crate) struct Startup {
     pub(crate) name: Option<String>,
     /// Concurrent analysis slots. `None` takes [`default_workers`].
     pub(crate) workers: Option<NonZeroUsize>,
-    /// Pause between claim polls when hopper has no work.
-    pub(crate) poll_interval: Duration,
     /// `--max-rss-gb`, resolved here against this host's (cgroup-aware) memory.
     pub(crate) max_rss: MaxRssPolicy,
     /// Nice value for the process; 0 leaves it unchanged.
     pub(crate) nice: i32,
     /// A sample tree this worker can read directly, skipping the download.
     pub(crate) data_dir: Option<PathBuf>,
-    /// Stop after this many jobs. `None` runs until killed.
-    pub(crate) max_jobs: Option<u64>,
-    /// Exit rather than idle when hopper has nothing to claim.
-    pub(crate) exit_if_empty: bool,
-    /// Skip the trait-validation gate. A worker that starts with an
-    /// incomplete rule set reports benign verdicts it has not earned, so this
-    /// is for local work against on-disk rules, not for a fleet.
-    pub(crate) no_validate: bool,
     /// Where the rules and the model come from.
     pub(crate) rules: RulesStartup,
 }
+
+/// Pause between claim polls when hopper has no work.
+const POLL_INTERVAL: Duration = Duration::from_secs(2);
 
 impl Startup {
     /// Settle every default and prove the rule set is complete.
     ///
     /// Reads the `SCAN_*` tuning, resolves the memory ceiling, the slot count,
     /// the model bundle and the operating point, then runs the trait-validation
-    /// gate unless [`Startup::no_validate`] waives it. The gate is the
-    /// load-bearing part: a worker running a partial rule set answers benign
-    /// for samples it never really examined, and does it quietly.
+    /// gate. The gate is the load-bearing part: a worker running a partial
+    /// rule set answers benign for samples it never really examined, and does
+    /// it quietly.
     ///
     /// # Errors
     ///
@@ -838,37 +831,30 @@ impl Startup {
             hopper_url: &self.hopper_url,
             name: &name,
             workers,
-            poll_interval: self.poll_interval,
+            poll_interval: POLL_INTERVAL,
             max_rss_policy: self.max_rss,
             max_rss,
             data_dir: self.data_dir.as_deref(),
-            max_jobs: self.max_jobs,
-            traits_dir: self.rules.traits_dir.as_deref(),
             nice: self.nice,
         });
 
         let renew_rules = self.rules.refresh != Refresh::Skip;
         let rules = self.rules.resolve()?;
-        if self.no_validate {
-            tracing::warn!(
-                "--no-validate: skipping the trait-validation gate; running \
-                 against on-disk rules as-is",
-            );
-        } else {
-            rules
-                .validate()
-                .context("worker startup validation failed")?;
-        }
+        rules
+            .validate()
+            .context("worker startup validation failed")?;
 
         Ok(WorkerConfig {
             hopper_url: self.hopper_url,
             name,
             workers,
-            poll_interval: self.poll_interval,
+            poll_interval: POLL_INTERVAL,
             max_rss,
             data_dir: self.data_dir,
-            max_jobs: self.max_jobs,
-            exit_if_empty: self.exit_if_empty,
+            // Batch knobs no command line sets: a fleet worker runs until it
+            // is stopped.
+            max_jobs: None,
+            exit_if_empty: false,
             renew_rules,
             nice: self.nice,
             rules,
@@ -892,8 +878,6 @@ pub(crate) struct RulesStartup {
     pub(crate) level: Option<u16>,
     /// Manual probability cutoffs, bypassing the level grid.
     pub(crate) thresholds: Option<Thresholds>,
-    /// Traits bundle override (`--traits-dir`).
-    pub(crate) traits_dir: Option<PathBuf>,
     /// The startup refresh (`-u` / `--no-update`). [`Refresh::Skip`] also
     /// pins the rules for the whole run.
     pub(crate) refresh: Refresh,
@@ -916,14 +900,9 @@ impl RulesStartup {
     /// Returns an error when no model bundle is named and none can be
     /// installed.
     pub(crate) fn resolve(self) -> Result<Rules> {
-        // Order is load-bearing and is why the refresh lives here rather than
-        // at the call site. The override has to be applied first, or the
-        // refresh installs into the default directory while `--traits-dir`
-        // points at an empty one — and a daemon started that way comes up,
-        // reports healthy, and fails every analysis.
-        if let Some(dir) = self.traits_dir.as_ref() {
-            cleave::traits_repo::set_override_dir(Some(dir.into()));
-        }
+        // The refresh lives here rather than at the call site so every daemon
+        // installs its rules before resolving them: a daemon that skipped it
+        // would come up, report healthy, and fail every analysis.
         scan::refresh_rules_at_startup(self.refresh)?;
         let model_dir = scan::cli::resolve_model_dir(self.model_dir)?;
         let level = scan::cli::operating_level(self.level, self.thresholds.is_some(), &model_dir);
@@ -1275,8 +1254,6 @@ struct StartupDiagnostics<'a> {
     max_rss_policy: MaxRssPolicy,
     max_rss: Option<NonZeroU64>,
     data_dir: Option<&'a Path>,
-    max_jobs: Option<u64>,
-    traits_dir: Option<&'a Path>,
     nice: i32,
 }
 
@@ -1327,8 +1304,6 @@ fn log_startup_diagnostics(d: &StartupDiagnostics<'_>) {
         resolved_max_rss_mb = max_rss_bytes / MIB,
         rss_throttling_enabled = d.max_rss.is_some(),
         data_dir = ?d.data_dir,
-        max_jobs = ?d.max_jobs,
-        traits_dir = ?d.traits_dir,
         nice = d.nice,
         total_memory_mb = ?total_memory_mb,
         cleave_memory_limit_mb = memory_limit_mb,

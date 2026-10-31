@@ -92,7 +92,6 @@ use std::net::SocketAddr;
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 
@@ -132,10 +131,6 @@ struct DaemonArgs {
     /// postdoc.
     #[arg(long, global = true, allow_hyphen_values = true)]
     max_rss_gb: Option<i64>,
-
-    /// Traits bundle override.
-    #[arg(long, global = true)]
-    traits_dir: Option<PathBuf>,
 }
 
 const ENRICHED_HELP: &str = "Insist on the isotope13 Enriched rules: the latest rules, the moment they clear QA. \
@@ -193,33 +188,13 @@ enum Command {
         #[arg(long)]
         name: Option<String>,
 
-        /// Seconds to wait before polling again when hopper has no work.
-        #[arg(long, default_value = "2")]
-        poll_secs: u64,
-
         /// A sample tree this worker can read directly, skipping the download.
         #[arg(long)]
         data_dir: Option<PathBuf>,
 
-        /// Stop after this many jobs.
-        #[arg(long)]
-        max_jobs: Option<u64>,
-
         /// Nice value for the analysis threads.
         #[arg(long, default_value = "18", allow_hyphen_values = true)]
         nice: i32,
-
-        /// Exit rather than idle when hopper has nothing to claim.
-        #[arg(long)]
-        exit_if_empty: bool,
-
-        /// Skip the trait-validation gate.
-        ///
-        /// A worker running an incomplete rule set reports benign verdicts it
-        /// has not earned, and does it quietly. For local work against
-        /// on-disk rules, never for a fleet.
-        #[arg(long)]
-        no_validate: bool,
     },
 
     /// Serve the HTTP analysis API.
@@ -434,12 +409,8 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         Command::Worker {
             url,
             name,
-            poll_secs,
             data_dir,
-            max_jobs,
             nice,
-            exit_if_empty,
-            no_validate,
         } => {
             // Every default is settled by scan's own resolver, so a postdoc
             // worker and an atomscan worker start on identical footing — the
@@ -454,13 +425,9 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                 hopper_url,
                 name,
                 workers: cli.daemon.workers,
-                poll_interval: Duration::from_secs(poll_secs),
                 max_rss: scan::memory::MaxRssPolicy::from_cli(cli.daemon.max_rss_gb.unwrap_or(0)),
                 nice,
                 data_dir,
-                max_jobs,
-                exit_if_empty,
-                no_validate,
                 rules: worker::RulesStartup {
                     model_dir: cli.global.model_dir.clone(),
                     // Both are global flags, so a worker has to honor them the
@@ -468,7 +435,6 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                     // choice, which is what a fleet worker normally runs on.
                     level: cli.global.level,
                     thresholds: cli.global.thresholds(),
-                    traits_dir: cli.daemon.traits_dir.clone(),
                     refresh: cli.global.refresh(),
                     slow_rule_ms: scan::cli::DEFAULT_SLOW_RULE_MS,
                     interpret: cli.global.interpret_config()?,
@@ -524,7 +490,6 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                     model_dir: cli.global.model_dir.clone(),
                     level: cli.global.level,
                     thresholds: cli.global.thresholds(),
-                    traits_dir: cli.daemon.traits_dir.clone(),
                     refresh: cli.global.refresh(),
                     slow_rule_ms: scan::cli::DEFAULT_SLOW_RULE_MS,
                     interpret: cli.global.interpret_config()?,
@@ -582,13 +547,7 @@ mod tests {
     #[test]
     fn a_worker_needs_only_a_hopper_url() {
         let cli = Cli::try_parse_from(["postdoc", "worker", "--url", "http://h:8081"]).unwrap();
-        let Command::Worker {
-            url,
-            poll_secs,
-            nice,
-            ..
-        } = cli.command
-        else {
+        let Command::Worker { url, nice, .. } = cli.command else {
             panic!("`worker` must parse as the worker command");
         };
         assert_eq!(url, "http://h:8081");
@@ -598,7 +557,6 @@ mod tests {
             "unset means postdoc resolves its own ceiling"
         );
         assert!(cli.daemon.workers.is_none(), "three per physical core");
-        assert_eq!(poll_secs, 2);
         assert_eq!(nice, 18);
     }
 

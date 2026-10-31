@@ -155,9 +155,8 @@ one of those places. A default stated in four places is a default that
 disagrees with itself, and the disagreement surfaces as one host behaving
 unlike its neighbour.
 
-The same rule applies inside the binary: `--workers`, `--max-rss-gb` and
-`--traits-dir` apply to both modes, so they are declared once and shared, not
-written twice.
+The same rule applies inside the binary: `--workers` and `--max-rss-gb` apply
+to both modes, so they are declared once and shared, not written twice.
 
 For deployment, `~/.tok/scan` is installed as `<state>/.tok/scan` and passed
 to `serve --token-file`; it stays the API token Beamline supplies as
