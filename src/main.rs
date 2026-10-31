@@ -349,7 +349,11 @@ fn main() -> ExitCode {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("postdoc=info,scan=info")),
+                // `cache_sweep` is fletch's: what its sweeps evict, and why
+                // one refuses a cache directory.
+                .unwrap_or_else(|_| {
+                    tracing_subscriber::EnvFilter::new("postdoc=info,scan=info,cache_sweep=info")
+                }),
         )
         .init();
 
