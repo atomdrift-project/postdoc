@@ -151,6 +151,8 @@ lto = false
 codegen-units = 16
 
 [profile.dev]
+# `false` still permits local Thin LTO in optimized crates.
+lto = "off"
 debug = "line-tables-only"
 
 # Dependencies at opt-level 1 in dev builds. postdoc's own analysis work is all
