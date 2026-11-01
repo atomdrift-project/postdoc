@@ -951,7 +951,7 @@ impl Rules {
         .with_slow_rule_ms(self.slow_rule_ms)
         .with_level(self.level)
         .with_zip_passwords(self.zip_passwords.clone());
-        scan::validate::run(&config, false)
+        scan::validate::run(&config)
     }
 
     /// Load the model bundle these rules name.

@@ -152,12 +152,12 @@ fn worker_command(
     if let Some(dir) = traits_dir {
         cmd.arg("--traits-dir").arg(dir);
     }
-    // The same rules tree for the same reason: `--enriched` is a process
+    // The same rules tree for the same reason: `--uplink` is a process
     // switch the child cannot inherit, and a worker on the open-source rules
     // beside an Enriched server would report results under a version the
     // server never runs.
     if enriched {
-        cmd.arg("--enriched");
+        cmd.arg("--uplink");
     }
     cmd
         // The server owns updating. Two processes refreshing the same traits
@@ -542,7 +542,7 @@ mod tests {
         );
     }
 
-    /// `--enriched` is a process switch, invisible to a child, so an Enriched
+    /// `--uplink` is a process switch, invisible to a child, so an Enriched
     /// server must pass it on — or its idle worker would analyze with the
     /// open-source rules and report results under a version the server never
     /// runs.
@@ -561,7 +561,7 @@ mod tests {
             )
             .expect("command")
             .get_args()
-            .any(|a| a == "--enriched")
+            .any(|a| a == "--uplink")
         };
         assert!(has(true));
         assert!(!has(false));
