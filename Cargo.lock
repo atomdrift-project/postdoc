@@ -2795,7 +2795,7 @@ checksum = "a6cb138bb79a146c1bd460005623e142ef0181e3d0219cb493e02f7d08a35695"
 [[package]]
 name = "isomer"
 version = "0.5.0"
-source = "git+https://github.com/atomdrift-project/isomer.git#618955c104f96ea350425892b64900f7bbe64220"
+source = "git+https://github.com/atomdrift-project/isomer.git#3bc313249d967dbf00da27f09c66966bdf049381"
 dependencies = [
  "anyhow",
  "atomdrift-scan",
