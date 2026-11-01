@@ -28,16 +28,90 @@ LLM_MODEL ?=
 HOPPER ?= https://hops-ro.isotope13.ai,https://hops.isotope13.ai
 SERVER_HOPPER = $(if $(strip $(URL)),$(URL),$(HOPPER))
 
-.PHONY: all build release quick install lint fix test test-bash-scanner install-precommit clean help
+.PHONY: all build release pgo-train quick install lint fix test test-bash-scanner install-precommit clean help
 
 all: build
 
 build:
 	$(CARGO) build --locked
 
+# --- Profile-guided optimization ---------------------------------------------
+# `release` is profile-guided, as in ../scan: the first build trains a profile
+# (`pgo-train`) and later builds reuse it until `make pgo-train` runs again
+# (../scan measured CPU -7% to -10% over its benchmark corpora with identical
+# findings). postdoc has no local-scan entry point, so training drives an
+# instrumented `serve` over the corpus through scripts/bench-serve.sh (curl and
+# python3, both deploy prerequisites). The instrumented binary writes its
+# counters only on a normal exit, which SIGTERM gives the server on Unix; a
+# script cannot stop it gracefully on Windows, so training is skipped there
+# and the build proceeds unprofiled unless a profile already exists.
+#
+# The corpus is the rules repo's testdata beside this checkout (../traits-dev
+# or ../traits), or a shallow clone of https://github.com/atomdrift-project/traits
+# made into $(PGO_DIR)/traits when neither exists, plus ../scan's tests/ and
+# testdata/ when present. PGO=0 builds without a profile and without training.
+# Needs rustup's llvm-tools (deploy-bootstrap installs it; `rustup component
+# add llvm-tools` by hand).
+PGO ?= 1
+PGO_DIR ?= build/pgo
+PGO_PROFDATA = $(PGO_DIR)/$(BINARY)-release.profdata
+PGO_RAW_DIR = $(PGO_DIR)/raw
+PGO_TRAIN_PORT ?= 49996
+PGO_TRAIN_WORKERS ?= 8
+TRAITS_TESTDATA ?= $(firstword $(wildcard ../traits-dev/testdata ../traits/testdata))
+PGO_TRAIN_CORPUS = $(if $(TRAITS_TESTDATA),$(TRAITS_TESTDATA),$(PGO_DIR)/traits/testdata)
+PGO_TRAIN_PATHS ?= $(PGO_TRAIN_CORPUS) $(wildcard ../scan/tests ../scan/testdata)
+
+# The training sub-make has a recipe line of its own: make runs a line that
+# mentions $(MAKE) even under `-n`, so sharing it with the cargo build would
+# turn a dry run into a real build. The bootstrap is sourced on that build
+# line because it is what puts cargo on PATH.
 release:
+	@if [ "$(PGO)" != 0 ] && [ ! -f "$(PGO_PROFDATA)" ]; then \
+	  case "$$(uname -s)" in \
+	    Linux|FreeBSD|Darwin) \
+	      if [ "$${POSTDOC_DEPLOY_BUILD:-}" = 1 ]; then . ./scripts/deploy-bootstrap.sh; fi; \
+	      $(MAKE) --no-print-directory pgo-train \
+	        || echo "release: PGO training failed (see above); building without PGO" >&2 ;; \
+	    *) echo "release: no PGO profile at $(PGO_PROFDATA) and no graceful server stop on $$(uname -s) to train with; building without PGO" >&2 ;; \
+	  esac; \
+	fi
 	@if [ "$${POSTDOC_DEPLOY_BUILD:-}" = 1 ]; then . ./scripts/deploy-bootstrap.sh; fi; \
-	  $(CARGO) build --locked --release
+	set -e; prof="$(PGO_PROFDATA)"; flags=""; \
+	if [ "$(PGO)" != 0 ] && [ -f "$$prof" ]; then \
+	  abs="$$(pwd)/$$prof"; \
+	  if command -v cygpath >/dev/null 2>&1; then abs=$$(cygpath -m "$$abs"); fi; \
+	  flags="-C profile-use=$$abs"; echo "release: PGO enabled ($$prof)"; \
+	else \
+	  echo "release: building without PGO"; \
+	fi; \
+	env -u MAKEFLAGS -u MAKELEVEL -u MFLAGS RUSTFLAGS="$${RUSTFLAGS:-} $$flags" cargo build --locked --release
+
+# Regenerate the PGO profile: instrumented release build, then every training
+# path is served through it (slow mode, analysis only) and the counters are
+# merged. Any representative corpus works; PGO only needs the hot paths run.
+pgo-train:
+	@set -e; lp="$${LLVM_PROFDATA:-$$(find ~/.rustup -type f -name 'llvm-profdata*' 2>/dev/null | head -1)}"; \
+	[ -n "$$lp" ] || { echo "error: llvm-profdata not found — run: rustup component add llvm-tools (or set LLVM_PROFDATA)"; exit 1; }; \
+	if [ ! -d "$(PGO_TRAIN_CORPUS)" ] && [ "$(PGO_TRAIN_CORPUS)" = "$(PGO_DIR)/traits/testdata" ]; then \
+	  echo "pgo-train: no rules testdata beside this checkout; cloning atomdrift-project/traits into $(PGO_DIR)/traits"; \
+	  mkdir -p "$(PGO_DIR)" && git clone --quiet --depth 1 https://github.com/atomdrift-project/traits "$(PGO_DIR)/traits"; \
+	fi; \
+	found=0; for path in $(PGO_TRAIN_PATHS); do [ -d "$$path" ] && found=1; done; \
+	[ "$$found" = 1 ] || { echo "error: no training corpus found among: $(PGO_TRAIN_PATHS)"; exit 1; }; \
+	raw="$$(pwd)/$(PGO_RAW_DIR)"; prof="$$(pwd)/$(PGO_PROFDATA)"; \
+	rm -rf "$(PGO_RAW_DIR)" && mkdir -p "$(PGO_RAW_DIR)" "$(PGO_DIR)"; \
+	echo "pgo-train: instrumented release build"; \
+	env -u MAKEFLAGS -u MAKELEVEL -u MFLAGS RUSTFLAGS="$${RUSTFLAGS:-} -C profile-generate=$$raw" cargo build --locked --release; \
+	n=0; for path in $(PGO_TRAIN_PATHS); do \
+	  [ -d "$$path" ] || continue; n=$$((n+1)); \
+	  echo "pgo-train: serving $$path through the instrumented binary (log: $(PGO_RAW_DIR)/serve-$$n.log)"; \
+	  SCAN_NO_UPDATE_CHECK=1 sh scripts/bench-serve.sh target/release/$(BINARY) "$$path" "$(PGO_RAW_DIR)/serve-$$n" "$(PGO_TRAIN_PORT)" "$(PGO_TRAIN_WORKERS)" > "$(PGO_RAW_DIR)/serve-$$n.log" 2>&1 \
+	    || echo "pgo-train: bench-serve exited non-zero on $$path (see the log); its counters are still used"; \
+	done; \
+	"$$lp" merge -o "$$prof" "$(PGO_RAW_DIR)"/*.profraw; \
+	rm -rf "$(PGO_RAW_DIR)"; \
+	echo "✓ PGO profile: $(PGO_PROFDATA) — release builds use it until the next pgo-train"
 
 # Optimized but un-LTO'd, for targets that build then immediately run the
 # binary. See [profile.quick] in Cargo.toml.
@@ -190,7 +264,8 @@ clean:
 help:
 	@echo "postdoc targets:"
 	@echo "  build     debug build (optimized dependencies)"
-	@echo "  release   optimized build"
+	@echo "  release   optimized, profile-guided build (trains the profile on first use; PGO=0 to skip)"
+	@echo "  pgo-train retrain the PGO profile on the rules testdata"
 	@echo "  quick     optimized build, no LTO — fast to link"
 	@echo "  install   cargo install to ~/.cargo/bin"
 	@echo "  lint      rustfmt --check + clippy with warnings denied"

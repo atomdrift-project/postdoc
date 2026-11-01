@@ -99,6 +99,13 @@ PY
             export RUSTUP_TOOLCHAIN
         fi
         rust_ready || die "Rust $required_rust or newer and a working Cargo are required; repair the toolchain with rustup"
+        # `make release` trains a PGO profile on first use and merges the
+        # counters with llvm-profdata (rustup's llvm-tools). Missing tools
+        # only cost the profile: the build then proceeds unprofiled.
+        if command -v rustup >/dev/null 2>&1             && ! find "${RUSTUP_HOME:-$HOME/.rustup}" -type f -name 'llvm-profdata*' 2>/dev/null | grep -q .; then
+            log "Installing rustup's llvm-tools for profile-guided builds"
+            rustup component add llvm-tools || log "llvm-tools unavailable; release builds proceed without PGO"
+        fi
         if [ "$(uname -s)" = FreeBSD ]; then ulimit -d "$(ulimit -Hd)" 2>/dev/null || true; fi
         ;;
     MINGW*|MSYS*|CYGWIN*)
