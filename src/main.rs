@@ -133,10 +133,9 @@ struct DaemonArgs {
     max_rss_gb: Option<i64>,
 }
 
-const ENRICHED_HELP: &str = "Insist on the isotope13 Enriched rules: the latest rules, the moment they clear QA. \
-On by itself whenever this host holds a token (`ISOTOPE13_TOKEN`, or the saved one). With the flag, \
-no token is an error, and a refused one stops the refresh instead of falling back to the public \
-rules. `ATOMDRIFT_ENRICHED=0` keeps the public rules.";
+const UPLINK_HELP: &str = "Insist on Atomdrift Uplink rules: the latest rules, the moment they clear QA. \
+Enabled automatically when this host holds a token. With the flag, a missing token starts \
+connection and a refused token stops the refresh. `ATOMDRIFT_UPLINK=0` keeps the public rules.";
 
 /// Worker and server coordination for the Atomdrift analysis fleet.
 #[derive(Debug, Parser)]
@@ -145,12 +144,12 @@ rules. `ATOMDRIFT_ENRICHED=0` keeps the public rules.";
 // isotope13 for one: it is what isotope13's remote analysis runs on.
 // `--analyze` is still accepted, so a shared `SCAN_ANALYZE` does not break a
 // host, but only `remote` changes anything, and that is refused.
-#[command(mut_arg("enriched", |arg| arg.help(ENRICHED_HELP).long_help(ENRICHED_HELP)))]
+#[command(mut_arg("uplink", |arg| arg.help(UPLINK_HELP).long_help(UPLINK_HELP)))]
 #[command(mut_arg("analyze", |arg| arg.hide(true)))]
 struct Cli {
     /// Scan's own global flags, flattened rather than restated.
     ///
-    /// `--llm*`, `--fetch*`, `--follow`, `--threshold-*`, `-l`, `--mode`,
+    /// `--llm*`, `--fetch*`, `--follow`, `-l`, `--mode`,
     /// `--zip-password` and the rest all reach the analysis stack here. They
     /// are declared once, in scan, so `postdoc serve --llm …` cannot come to
     /// mean something different from `atomscan serve --llm …` — which is what
@@ -369,11 +368,11 @@ fn main() -> ExitCode {
     // never-exiting daemon needs.
     scan::cache_cleanup::start(true);
     // Enriched picks the rules tree, so it is decided before anything resolves
-    // one: on whenever this host holds a token, insisted on by `--enriched`,
-    // which needs the token now rather than at the first refresh. It means the
+    // one: on whenever this host holds a token, insisted on by `--uplink`,
+    // which connects the host before the first refresh. It means the
     // Enriched rules and nothing else here: postdoc is what isotope13's remote
     // analysis runs on, so it never asks isotope13 for a verdict itself.
-    if let Err(error) = cleave::enriched::resolve(cli.global.enriched) {
+    if let Err(error) = cleave::enriched::resolve(cli.global.uplink) {
         eprintln!("postdoc: {error}");
         return ExitCode::from(EXIT_ERROR);
     }
@@ -433,12 +432,9 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                 nice,
                 data_dir,
                 rules: worker::RulesStartup {
-                    model_dir: cli.global.model_dir.clone(),
-                    // Both are global flags, so a worker has to honor them the
-                    // way atomscan's does. Left unset they stay the bundle's
-                    // choice, which is what a fleet worker normally runs on.
+                    model_dir: None,
                     level: cli.global.level,
-                    thresholds: cli.global.thresholds(),
+                    thresholds: None,
                     refresh: cli.global.refresh(),
                     slow_rule_ms: scan::cli::DEFAULT_SLOW_RULE_MS,
                     interpret: cli.global.interpret_config()?,
@@ -491,9 +487,9 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                 idle_worker_slots,
                 analysis_timeout_secs: analysis_timeout,
                 rules: worker::RulesStartup {
-                    model_dir: cli.global.model_dir.clone(),
+                    model_dir: None,
                     level: cli.global.level,
-                    thresholds: cli.global.thresholds(),
+                    thresholds: None,
                     refresh: cli.global.refresh(),
                     slow_rule_ms: scan::cli::DEFAULT_SLOW_RULE_MS,
                     interpret: cli.global.interpret_config()?,
@@ -536,16 +532,14 @@ mod tests {
         assert!(!help.contains("--analyze"), "--analyze is listed:\n{help}");
         assert!(
             !help.contains("remote verdicts"),
-            "--enriched promises remote verdicts:\n{help}"
+            "--uplink promises remote verdicts:\n{help}"
         );
-        assert!(help.contains("Enriched rules"));
+        assert!(help.contains("Uplink rules"));
         // Rendering the root propagated the global flags to its subcommands.
         let serve = command
             .find_subcommand_mut("serve")
             .map(|serve| serve.render_long_help().to_string());
-        assert!(
-            serve.is_some_and(|help| help.contains("--enriched") && !help.contains("--analyze"))
-        );
+        assert!(serve.is_some_and(|help| help.contains("--uplink") && !help.contains("--analyze")));
     }
 
     #[test]
@@ -621,31 +615,6 @@ mod tests {
         assert_eq!(cli.global.llm.as_deref(), Some("http://vllm:8000/v1"));
         assert_eq!(cli.global.level, Some(50));
         assert_eq!(cli.global.zip_passwords, vec!["infected".to_owned()]);
-        assert!(
-            cli.global.thresholds().is_none(),
-            "no manual cutoff: the model's level grid decides"
-        );
-    }
-
-    #[test]
-    fn a_manual_cutoff_answers_hostile_versus_benign() {
-        // `--threshold-hostile` alone collapses the suspicious cutoff onto it.
-        // The level-space lookup a suspicious band needs is exactly what a
-        // manual probability bypasses, so there is no band left to report.
-        let cli = Cli::try_parse_from(["postdoc", "--threshold-hostile", "0.8", "serve"]).unwrap();
-        let cutoffs = cli.global.thresholds().expect("a manual cutoff was named");
-        assert_eq!(cutoffs.hostile, 0.8);
-        assert_eq!(cutoffs.suspicious, 0.8);
-    }
-
-    #[test]
-    fn a_manual_cutoff_and_a_level_cannot_both_be_given() {
-        // Scan declares these mutually exclusive, because a manual
-        // probability bypasses the level grid entirely. Flattening has to
-        // carry the conflict across, not just the two flags.
-        let both =
-            Cli::try_parse_from(["postdoc", "--threshold-hostile", "0.8", "-l", "50", "serve"]);
-        assert!(both.is_err(), "the conflict must survive being flattened");
     }
 
     #[test]
