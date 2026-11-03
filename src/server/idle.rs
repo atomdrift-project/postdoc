@@ -150,7 +150,7 @@ fn worker_command(
         cmd.env("SCAN_CLEAVE_CONCURRENCY", concurrency);
     }
     if let Some(dir) = traits_dir {
-        cmd.arg("--traits-dir").arg(dir);
+        cmd.env("CLEAVE_TRAITS_DIR", dir);
     }
     // The same rules tree for the same reason: `--uplink` is a process
     // switch the child cannot inherit, and a worker on the open-source rules
@@ -511,7 +511,7 @@ mod tests {
     }
 
     /// The server's `--traits-dir` is an in-process override, invisible to a
-    /// child, so it must be on the command line. Measured on uruk-hai
+    /// child, so it must be forwarded in the environment. Measured on uruk-hai
     /// (2026-09-25): the server ran `--traits-dir …/traits` and its idle worker
     /// was spawned without it.
     #[test]
@@ -528,18 +528,12 @@ mod tests {
             None,
         )
         .expect("command");
-        let args: Vec<_> = cmd
-            .get_args()
-            .map(|a| a.to_string_lossy().to_string())
-            .collect();
-        let at = args
-            .iter()
-            .position(|a| a == "--traits-dir")
-            .expect("the traits dir must be forwarded");
-        assert_eq!(
-            args.get(at + 1).map(String::as_str),
-            Some("/var/lib/atomdrift/scan/traits")
-        );
+        let forwarded = cmd
+            .get_envs()
+            .find(|(key, _)| *key == std::ffi::OsStr::new("CLEAVE_TRAITS_DIR"))
+            .and_then(|(_, value)| value);
+        assert_eq!(forwarded, Some(traits.as_os_str()));
+        assert!(!cmd.get_args().any(|arg| arg == "--traits-dir"));
     }
 
     /// `--uplink` is a process switch, invisible to a child, so an Enriched
