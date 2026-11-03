@@ -6,8 +6,8 @@
 //!
 //! ```text
 //! postdoc-bench-hopper --dataset ~/data/benchmark/realworld-small --port 8090
-//! scan worker --url http://127.0.0.1:8090 --data-dir ~/data/benchmark/realworld-small \
-//!     --workers 12 --max-jobs <file-count>
+//! postdoc worker --url http://127.0.0.1:8090 --data-dir ~/data/benchmark/realworld-small \
+//!     --workers 12
 //! ```
 //!
 //! Lives in its own process so its (tiny) memory never lands in the worker's
@@ -18,7 +18,7 @@
 //! - `GET /api/next?...&count=N` → up to `N` distinct jobs (one per dataset
 //!   file, each with the file's *real* sha256 so the worker's local-file and
 //!   download integrity checks pass); `204 No Content` once every file has been
-//!   handed out, so a `--max-jobs <count>` worker drains and exits.
+//!   handed out. Stop the worker once every result has been received.
 //! - `GET /data/{url-encoded path}` → file bytes, streamed from disk.
 //! - `POST /api/result` → tallied (and optionally dumped for parity diffing).
 //!

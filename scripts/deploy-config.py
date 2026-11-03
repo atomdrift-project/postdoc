@@ -29,7 +29,7 @@ def arguments(mode, url, home):
     args = [mode]
     # The isotope13 Enriched rules; the token is installed beside the service.
     if os.environ.get("ENRICHED") == "1":
-        args += ["--enriched"]
+        args += ["--uplink"]
     if mode == "worker":
         args += ["--url", url, "--nice", os.environ.get("WORKER_NICE", "0")]
     else:

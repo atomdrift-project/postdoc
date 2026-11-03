@@ -165,11 +165,6 @@ fn worker_command(
         // and the worker's copy is the server's copy. The embedded worker set
         // this too, for the same reason.
         .arg("--no-update")
-        // Skip the startup fixture validation: 143 benign targets scanned
-        // before the first claim. Worth paying once for a worker an operator
-        // started; wasteful for one a supervisor may restart, and the server
-        // beside it has already validated these very models and traits.
-        .arg("--no-validate")
         // Its own cache root. cleave's analysis cache is SQLite in WAL mode
         // with a single writer and a five-second busy timeout, and its store
         // runs synchronously before an analysis returns — so a freeze landing
@@ -466,11 +461,15 @@ mod tests {
                 "4",
                 "--nice",
                 "19",
-                "--no-update",
-                "--no-validate"
+                "--no-update"
             ],
             "the child must honor the configured idle slots and background priority",
         );
+        use clap::Parser;
+        crate::Cli::try_parse_from(
+            std::iter::once(std::ffi::OsStr::new("postdoc")).chain(cmd.get_args()),
+        )
+        .expect("the idle worker command must match the current CLI");
         let cache = cmd
             .get_envs()
             .find(|(k, _)| *k == std::ffi::OsStr::new("XDG_CACHE_HOME"))

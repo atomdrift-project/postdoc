@@ -166,7 +166,7 @@ def main():
             if not port:
                 raise RuntimeError("mock hopper failed to start; see hopper.err")
             command = [str(args.binary.resolve()), "worker", "--url", f"http://127.0.0.1:{port}",
-                "--exit-if-empty", "--nice", "0", "--no-update", "--no-validate", "--workers", str(args.workers),
+                "--nice", "0", "--no-update", "--workers", str(args.workers),
                 "--max-rss-gb", str(args.max_rss_gb)]
             started = time.monotonic()
             peak_kib = 0
@@ -178,6 +178,13 @@ def main():
                     elapsed = time.monotonic() - started
                     if elapsed > args.timeout:
                         raise TimeoutError(f"benchmark exceeded {args.timeout}s")
+                    try:
+                        progress = json.loads((output / "hopper-summary.json").read_text())
+                        if progress["done"] == len(manifest):
+                            stop(worker)
+                            break
+                    except (FileNotFoundError, json.JSONDecodeError):
+                        pass  # The hopper rewrites the summary after each result.
                     try:
                         status = dict(line.split(":", 1) for line in Path(f"/proc/{worker.pid}/status").read_text().splitlines())
                         rss = int(status.get("VmRSS", "0 kB").split()[0])

@@ -386,9 +386,9 @@ class DeployTests(unittest.TestCase):
                 self.assertEqual(saved["ENRICHED"], "1")
                 if platform == "Linux":
                     unit = (host.units / "postdoc.service").read_text()
-                    self.assertIn('"--enriched"', unit)
+                    self.assertIn('"--uplink"', unit)
                 else:
-                    self.assertIn("--enriched", (host.units / "postdoc").read_text())
+                    self.assertIn("--uplink", (host.units / "postdoc").read_text())
                 token = host.home / ".config/atomdrift/isotope13-api.json"
                 self.assertEqual(json.loads(token.read_text()), {"token": "i13_test_secret"})
                 self.assertEqual(token.stat().st_mode & 0o777, 0o600)
@@ -421,7 +421,7 @@ class DeployTests(unittest.TestCase):
                                           ("Linux", "worker"): "postdoc-worker.service",
                                           ("FreeBSD", "serve"): "postdoc",
                                           ("FreeBSD", "worker"): "postdoc_worker"}[(platform, mode)])
-                    self.assertIn("--enriched", unit.read_text())
+                    self.assertIn("--uplink", unit.read_text())
                     installed = host.home / ".config/atomdrift/isotope13-api.json"
                     self.assertEqual(json.loads(installed.read_text()), {"token": "i13_auto_secret"})
                     self.assertEqual(installed.stat().st_mode & 0o777, 0o600)
@@ -455,7 +455,7 @@ class DeployTests(unittest.TestCase):
         result = host.run(ENRICHED="0")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse((host.home / ".config/atomdrift/isotope13-api.json").exists())
-        self.assertNotIn("--enriched", (host.units / "postdoc.service").read_text())
+        self.assertNotIn("--uplink", (host.units / "postdoc.service").read_text())
 
     def test_enriched_auto_detection_rejects_blank_source_before_service_changes(self):
         host = self.host()
