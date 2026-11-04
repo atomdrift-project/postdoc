@@ -654,9 +654,7 @@ The server is built for trusted networks. The defaults reflect that.
   equivalent).
 - **Concurrency is a hard semaphore.** When `--workers` slots are
   full, new requests get 503 immediately. There is no queue.
-- **Static analysis only.** No untrusted code is executed. Cleave
-  runs rizin in an isolated process group; if it gets stuck, the
-  watchdog kills the group, not just the parent.
+- **Static analysis only.** No untrusted code is executed. External analysis tools run under process supervision.
 
 ## Example session
 

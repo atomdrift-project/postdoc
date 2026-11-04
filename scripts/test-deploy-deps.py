@@ -79,14 +79,14 @@ ensure_runtime_tools "$4"
     def test_complete_host_needs_no_package_manager(self):
         for sevenzip in ("7z", "7za", "7zz", "7zr"):
             with self.subTest(sevenzip=sevenzip):
-                result, calls, _ = self.exercise(tools=("rizin", "upx", "innoextract", sevenzip))
+                result, calls, _ = self.exercise(tools=("upx", "innoextract", sevenzip))
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(calls, [])
 
     def test_linux_package_managers_install_only_missing_tool(self):
         for manager in ("apt-get", "dnf", "yum", "zypper", "pacman", "xbps-install"):
             with self.subTest(manager=manager):
-                result, calls, tools = self.exercise(manager=manager, tools=("rizin", "upx", "innoextract"))
+                result, calls, tools = self.exercise(manager=manager, tools=("upx", "innoextract"))
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertIn("7zz", tools)
                 self.assertEqual([args[-1] for _, args in calls if args != ["update"]], ["7zip"])
@@ -96,11 +96,11 @@ ensure_runtime_tools "$4"
     def test_freebsd_installs_all_runtime_tools(self):
         result, calls, tools = self.exercise(manager="pkg", platform="FreeBSD")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(tools, ["7zz", "innoextract", "rizin", "upx"])
-        self.assertEqual([args[-1] for _, args in calls], ["rizin", "upx", "innoextract", "7-zip"])
+        self.assertEqual(tools, ["7zz", "innoextract", "upx"])
+        self.assertEqual([args[-1] for _, args in calls], ["upx", "innoextract", "7-zip"])
 
     def test_older_apt_package_names(self):
-        result, calls, tools = self.exercise(manager="apt-get", tools=("rizin", "innoextract"),
+        result, calls, tools = self.exercise(manager="apt-get", tools=("innoextract",),
                                              fail=("upx-ucl", "7zip"))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("upx", tools)
@@ -114,7 +114,7 @@ ensure_runtime_tools "$4"
                 self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_package_failure_blocks_deployment(self):
-        result, _, _ = self.exercise(manager="pacman", tools=("rizin", "upx", "innoextract"),
+        result, _, _ = self.exercise(manager="pacman", tools=("upx", "innoextract"),
                                     fail=("7zip", "p7zip"))
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("7zip is still unavailable", result.stderr)
@@ -122,10 +122,10 @@ ensure_runtime_tools "$4"
     def test_package_success_without_executable_still_blocks(self):
         result, _, _ = self.exercise(manager="pkg", platform="FreeBSD", no_install=True)
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("rizin is still unavailable", result.stderr)
+        self.assertIn("upx is still unavailable", result.stderr)
 
     def test_operator_private_path_does_not_satisfy_service(self):
-        result, _, _ = self.exercise(private_tools=("rizin", "upx", "innoextract", "7zz"))
+        result, _, _ = self.exercise(private_tools=("upx", "innoextract", "7zz"))
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("missing runtime tools", result.stderr)
 

@@ -60,7 +60,7 @@ $nssm = $nssm.Source
 
 # Validate the PATH inherited by the service before stopping any running work.
 # Windows tools are commonly installed with Scoop or winget by the operator.
-foreach ($tool in 'rizin', 'upx', 'innoextract') {
+foreach ($tool in 'upx', 'innoextract') {
     if (-not (Get-Command $tool -CommandType Application -ErrorAction SilentlyContinue)) {
         Die "$tool is required; install it and add it to PATH before deploying"
     }
@@ -275,7 +275,7 @@ if ($LASTEXITCODE -ne 0) { Die "NSSM operation failed for $ServiceName" }
 
 # HOME steers every ~/.tok lookup into the state directory. The tokens
 # themselves never enter the environment block, which any local user can read
-# out of the registry. PATH is the deploying user's, so rizin/7z/upx installed
+# out of the registry. PATH is the deploying user's, so 7z/upx installed
 # per-user stay reachable.
 $svcEnv = @(
     "HOME=$StateHome",

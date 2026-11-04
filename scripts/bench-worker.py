@@ -140,7 +140,6 @@ def main():
             "CLEAVE_MEMBER_WINDOW_MB", "CLEAVE_MEMBER_WINDOW_COUNT",
             "CLEAVE_PIPELINE_MEMBER_WINDOWS", "CLEAVE_RAYON_THREADS",
             "CLEAVE_INNER_PARALLEL_OWNERS", "RAYON_NUM_THREADS",
-            "FILEFACTS_RIZIN_CONCURRENCY",
         ) if name in env},
     }, indent=2) + "\n")
     hopper = worker = None

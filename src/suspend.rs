@@ -7,10 +7,8 @@
 //! Cooperative cancellation cannot do this. Cleave polls a cancellation flag
 //! between members, so the flag is only read as often as the shortest member
 //! takes; and the expensive work is not cleave's at all but the children it
-//! spawns. A stripped ELF's `rizin aaa` pass runs 10-30 s single-threaded (see
-//! [`scan::thread_priority`]) inside a blocking `Command::output`
-//! that no flag reaches. Asking nicely has a tail measured in tens of seconds,
-//! which is the whole latency budget.
+//! spawns. An external tool may run inside a blocking `Command::output`
+//! that no flag reaches. Waiting for it can exceed the latency budget.
 //!
 //! So the kernel does it. Each platform has one primitive that acts on
 //! *membership* rather than on a process group, which is what makes it a

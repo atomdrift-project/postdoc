@@ -57,7 +57,7 @@ validated when postdoc starts.
 
 ## Runtime prerequisites
 
-Both worker and server deployments require `rizin`, `upx`, `innoextract`, and
+Both worker and server deployments require `upx`, `innoextract`, and
 one of `7z`, `7za`, `7zz`, or `7zr`. These checks run before retiring Scan or
 replacing the service binary. An unavailable tool fails deployment.
 

@@ -164,7 +164,7 @@ class Host:
             executable.chmod(0o755)
         for command in ("dirname", "cut", "grep", "tr", "mktemp", "rm", "sed", "head", "awk", "cat", "python3"):
             (self.bin / command).symlink_to(shutil.which(command))
-        for command in ("7zz", "rizin", "upx", "innoextract"):
+        for command in ("7zz", "upx", "innoextract"):
             executable = self.bin / command
             executable.write_text("#!/bin/sh\nexit 0\n")
             executable.chmod(0o755)

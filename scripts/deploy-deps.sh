@@ -34,11 +34,11 @@ install_runtime_package() {
 
 ensure_runtime_tools() {
     runtime_missing=""
-    for runtime_tool in rizin upx innoextract 7zip; do
+    for runtime_tool in upx innoextract 7zip; do
         runtime_tool_available "$runtime_tool" || runtime_missing="$runtime_missing $runtime_tool"
     done
     if [ -z "$runtime_missing" ]; then
-        log "Runtime prerequisites available: rizin, upx, innoextract, 7-Zip"
+        log "Runtime prerequisites available: upx, innoextract, 7-Zip"
         return 0
     fi
 
@@ -77,5 +77,5 @@ ensure_runtime_tools() {
         runtime_tool_available "$runtime_tool" ||
             die "$runtime_tool is still unavailable on $SERVICE_PATH; tried packages: $runtime_candidates; install it before deploying"
     done
-    log "Runtime prerequisites available: rizin, upx, innoextract, 7-Zip"
+    log "Runtime prerequisites available: upx, innoextract, 7-Zip"
 }

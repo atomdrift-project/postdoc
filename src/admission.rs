@@ -162,7 +162,7 @@ fn live_used() -> Option<u64> {
     cleave::memory_tracker::current_rss()
 }
 
-/// A dedicated Linux worker cgroup also charges Rizin children and tmpfs.
+/// A dedicated Linux worker cgroup also charges child processes and tmpfs.
 /// Process RSS alone misses those, so an operator may use the cgroup's live
 /// charge for admission. Fall back to process RSS outside cgroup v2 or when
 /// its accounting file is unavailable.
