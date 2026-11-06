@@ -98,6 +98,7 @@ use clap::{Parser, Subcommand};
 mod admission;
 mod allocator;
 mod inflight;
+mod memory;
 mod server;
 #[allow(unsafe_code)]
 mod suspend;

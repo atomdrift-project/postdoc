@@ -168,7 +168,7 @@ pub(super) async fn health(
                 request_id: *entry.key(),
                 name: entry.name.clone(),
                 elapsed_secs,
-                phase: entry.phase.get(),
+                phase: entry.phase.current(),
                 thread_id: entry.thread_id.load(Ordering::Relaxed),
             });
         }
@@ -674,7 +674,7 @@ pub(super) async fn requests(State(state): State<Arc<AppState>>) -> Json<Request
                 size_bytes: e.size_bytes,
                 elapsed_ms,
                 long_running: elapsed_ms >= 120_000,
-                phase: e.phase.get(),
+                phase: e.phase.current(),
                 thread_id: (tid > 0).then_some(tid),
             }
         })

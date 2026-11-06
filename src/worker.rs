@@ -823,7 +823,7 @@ impl Startup {
         let tuning = WorkerTuning::from_env()?;
         let name = self.name.unwrap_or_else(default_worker_name);
         let workers = self.workers.unwrap_or_else(default_workers);
-        let max_rss = self.max_rss.worker_ceiling();
+        let max_rss = crate::memory::worker_ceiling(self.max_rss);
         scan::memory::log_max_rss_resolution(
             "worker",
             self.max_rss,
@@ -1263,7 +1263,7 @@ struct StartupDiagnostics<'a> {
 /// validation that can take minutes — so a worker that never comes up still
 /// says what it was trying to be.
 fn log_startup_diagnostics(d: &StartupDiagnostics<'_>) {
-    use scan::memory::{cgroup_memory_diagnostics, proc_memtotal_mb, worker_memory_basis};
+    use crate::memory::{cgroup_memory_diagnostics, proc_memtotal_mb, worker_memory_basis};
 
     let total_memory_mb = cleave::memory_tracker::total_memory().map(|b| b / MIB);
     let memory_limit_mb = cleave::memory_tracker::memory_limit() / MIB;
@@ -3176,7 +3176,7 @@ impl SummaryTicker {
         let mappings = crate::allocator::mappings();
         // FreeBSD reads libc jemalloc via mallctl; everywhere else the bundled
         // tikv-jemalloc answers through cleave's ctl wrapper.
-        let heap = scan::heap_profile::stats()
+        let heap = scan::freebsd_malloc::stats()
             .map(|s| {
                 (
                     s.allocated as u64,

@@ -34,7 +34,7 @@ mod v1;
 
 pub(crate) use acl::{Cidr, TokenDigest, parse_cidr_list};
 
-use scan::analysis::{ACTIVE_REQUESTS, ModelResources, RequestPhase};
+use scan::analysis::{ActiveRequest, ModelResources, RequestPhase};
 
 use axum::Router;
 use axum::extract::{ConnectInfo, DefaultBodyLimit};
@@ -455,6 +455,8 @@ pub(super) struct RequestGuard {
     /// Keeps the idle worker frozen for the whole analysis, which outlives the
     /// handler whenever the client hangs up before it finishes.
     _busy: idle::BusyToken,
+    /// Counts the analysis in scan's lane sizing until the guard drops.
+    _active: ActiveRequest,
 }
 
 impl RequestGuard {
@@ -469,13 +471,13 @@ impl RequestGuard {
         let cancellation = Arc::clone(&entry.cancellation);
         state.in_flight.insert(request_id, entry);
         state.jobs.started.fetch_add(1, Ordering::Relaxed);
-        ACTIVE_REQUESTS.fetch_add(1, Ordering::AcqRel);
         Self {
             request_id,
             state: Arc::clone(state),
             cancellation,
             _permit: permit,
             _busy: state.enter_busy(),
+            _active: ActiveRequest::begin(),
         }
     }
 
@@ -549,7 +551,6 @@ impl Drop for RequestGuard {
         // this was the last holder.
         self.cancellation.store(true, Ordering::Release);
         self.state.in_flight.remove(&self.request_id);
-        ACTIVE_REQUESTS.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
@@ -1451,7 +1452,7 @@ fn spawn_watchdog(state: &Arc<AppState>) {
                 if elapsed_secs < 120 {
                     continue;
                 }
-                let phase = entry.phase.get();
+                let phase = entry.phase.current();
                 let tid = entry.thread_id.load(Ordering::Relaxed);
                 if entry.cancellation.load(Ordering::Acquire) {
                     tracing::error!(

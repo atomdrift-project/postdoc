@@ -201,7 +201,7 @@ impl Flight {
 
     /// The phase the analysis is in, once it has started.
     pub(super) fn phase(&self) -> Option<String> {
-        self.phase.get().map(RequestPhase::get)
+        self.phase.get().map(RequestPhase::current)
     }
 
     /// The key this analysis is shared under.
