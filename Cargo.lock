@@ -308,7 +308,7 @@ dependencies = [
 [[package]]
 name = "atomdrift-scan"
 version = "3.0.0-beta.0"
-source = "git+https://github.com/atomdrift-project/scan.git#36128c90ebb40a8a128bc287e69f66bf89dc3e80"
+source = "git+https://github.com/atomdrift-project/scan.git#c6d8008171ec4d273979631d3b0f63b88ddcbae7"
 dependencies = [
  "anyhow",
  "axum",
@@ -533,8 +533,8 @@ dependencies = [
 
 [[package]]
 name = "binform"
-version = "0.9.0"
-source = "git+https://github.com/atomdrift-project/binform.git#2e9ad27fbc2c39b046b91a56ff093f3f98506b35"
+version = "0.9.1"
+source = "git+https://github.com/atomdrift-project/binform.git#e47c5ee1afa048339f5381e9151ca9c982db710d"
 dependencies = [
  "gimli 0.32.3",
  "iced-x86",
@@ -661,7 +661,7 @@ dependencies = [
 [[package]]
 name = "burton"
 version = "0.1.0"
-source = "git+https://github.com/atomdrift-project/burton.git#953fc2a13f1a6f2c7e9d527566ba9307c76e8c84"
+source = "git+https://github.com/atomdrift-project/burton.git#0cce555cb64fa2f0f81be8856bcbe12cccda6d5a"
 dependencies = [
  "serde",
  "sha2 0.11.1",
@@ -747,9 +747,9 @@ dependencies = [
 
 [[package]]
 name = "cc"
-version = "1.11.0"
+version = "1.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "375989decec1a0fa424442bed520fa12ede43a48475ce8c7417d2c69b32b5f6b"
+checksum = "4ff2a8126fff0f8c839080d619675a585e61720bb12d2baceae45769fd66f155"
 dependencies = [
  "find-msvc-tools",
  "jobserver",
@@ -900,7 +900,7 @@ checksum = "1c133bc6a41be0d194c306b5506d15e6feeea7b1d6604bd3f8310dfb2ca96486"
 [[package]]
 name = "cleave"
 version = "3.0.0-beta.3"
-source = "git+https://github.com/atomdrift-project/cleave.git#e97e7fa857a9b9f699b9a54ffadefba8fac60abe"
+source = "git+https://github.com/atomdrift-project/cleave.git#58a06b80d78d35e2d15e74cf66a77b8632d86f75"
 dependencies = [
  "aes 0.9.4",
  "aes-gcm",
@@ -924,7 +924,7 @@ dependencies = [
  "ctrlc",
  "cu-bincode",
  "data-encoding",
- "des",
+ "des 0.8.1",
  "dirs",
  "dmgwiz",
  "encoding_rs",
@@ -989,7 +989,7 @@ dependencies = [
 [[package]]
 name = "cleave-macros"
 version = "0.1.0"
-source = "git+https://github.com/atomdrift-project/cleave.git#e97e7fa857a9b9f699b9a54ffadefba8fac60abe"
+source = "git+https://github.com/atomdrift-project/cleave.git#58a06b80d78d35e2d15e74cf66a77b8632d86f75"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -1604,6 +1604,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "des"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "916a94e407b54f9034d71dd748234cd1e516ced6284009906ae246f177eafe5a"
+dependencies = [
+ "cipher 0.5.2",
+]
+
+[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1942,7 +1951,7 @@ dependencies = [
  "iced-x86",
  "jpeg-decoder",
  "libc",
- "lzma-rust2",
+ "lzma-rust2 0.24.0",
  "md-5 0.10.6",
  "memchr",
  "p256 0.13.2",
@@ -2032,9 +2041,9 @@ checksum = "b7ac824320a75a52197e8f2d787f6a38b6718bb6897a35142d749af3c0e8f4fe"
 
 [[package]]
 name = "flate2"
-version = "1.1.10"
+version = "1.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6e634e2e0ebac1ee034020da1ca582e17ffe4e0f5e985823721e168928136dcb"
+checksum = "626d4928326b646e70f65ed36fc7cf9f206bdb68a0019ee7c6b4709da4e084c4"
 dependencies = [
  "crc32fast",
  "miniz_oxide 0.9.1",
@@ -2043,15 +2052,13 @@ dependencies = [
 
 [[package]]
 name = "fletch"
-version = "3.0.0"
-source = "git+https://github.com/atomdrift-project/fletch.git#dfb903f7d5c7c6b0d4c9233bf31abe5a049c3d11"
+version = "3.0.0-beta.1"
+source = "git+https://github.com/atomdrift-project/fletch.git#afae6a29b5179b090c56aae3cb81ab9eb0bc0631"
 dependencies = [
- "anyhow",
  "base64 0.22.1",
  "dirs",
  "filefacts",
  "flate2",
- "hex",
  "node-semver",
  "pep440_rs",
  "reqwest 0.12.28",
@@ -2065,7 +2072,6 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tracing",
- "tracing-subscriber",
  "url",
  "xz2",
  "zip",
@@ -3223,6 +3229,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lzma-rust2"
+version = "0.25.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ef1d73c59a56771343712b22ea5615092c612c16ba291c0979e3105dfeec4890"
+dependencies = [
+ "sha2 0.11.1",
+]
+
+[[package]]
 name = "lzma-sys"
 version = "0.1.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3236,7 +3251,7 @@ dependencies = [
 [[package]]
 name = "lzx"
 version = "0.1.0"
-source = "git+https://github.com/atomdrift-project/cleave.git#e97e7fa857a9b9f699b9a54ffadefba8fac60abe"
+source = "git+https://github.com/atomdrift-project/cleave.git#58a06b80d78d35e2d15e74cf66a77b8632d86f75"
 
 [[package]]
 name = "lzxd"
@@ -3376,9 +3391,9 @@ dependencies = [
 
 [[package]]
 name = "mime"
-version = "0.3.17"
+version = "0.3.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6877bb514081ee2a7ff5ef9de3281f14a4dd4bceac4c09388074a6b5df8a139a"
+checksum = "d5848f5a9e8117cf94f2f90faac24a87ff81600ff8628c1e3deaab572e76bfa1"
 
 [[package]]
 name = "mime_guess"
@@ -4253,9 +4268,9 @@ dependencies = [
 
 [[package]]
 name = "psl"
-version = "2.1.247"
+version = "2.1.248"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bcf03dc0cd8c65e109a7848e3b4adf06236a181d937af94bff66966e3876b1aa"
+checksum = "db58c388e851a5e62d8b5373b0f41135edac0bd43009832ba362691089d7367c"
 dependencies = [
  "psl-types",
 ]
@@ -4302,27 +4317,12 @@ dependencies = [
 [[package]]
 name = "pyinstx"
 version = "0.1.0"
-source = "git+https://github.com/atomdrift-project/cleave.git#e97e7fa857a9b9f699b9a54ffadefba8fac60abe"
+source = "git+https://github.com/atomdrift-project/cleave.git#58a06b80d78d35e2d15e74cf66a77b8632d86f75"
 dependencies = [
  "flate2",
  "memchr",
  "thiserror 2.0.21",
  "tracing",
-]
-
-[[package]]
-name = "quanta"
-version = "0.13.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "73be39b77b45d82a4d1a5793fe9a89a5c143ceaa6ad0d8417982566bb0f34e11"
-dependencies = [
- "libc",
- "portable-atomic",
- "raw-cpuid",
- "wasip1",
- "wasip2",
- "web-sys",
- "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4485,15 +4485,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "caa0f4137e1c0a72f4c651489402276c8e8e1cf081f3b0ba156d2cbeef09e86a"
 dependencies = [
  "rand_core 0.10.1",
-]
-
-[[package]]
-name = "raw-cpuid"
-version = "11.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "498cd0dc59d73224351ee52a95fee0f1a617a2eae0e7d9d720cc622c73a54186"
-dependencies = [
- "bitflags",
 ]
 
 [[package]]
@@ -4762,9 +4753,9 @@ dependencies = [
 
 [[package]]
 name = "rsa"
-version = "0.10.0-rc.20"
+version = "0.10.0-rc.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2389407c34c6039d7c8740520ec758090883c5b92df93a5edada2779256bf2e0"
+checksum = "47cf9537fc2210e5db7a35a1cdda9d8d451b9df6fba234ec1cf0cd746c120c35"
 dependencies = [
  "const-oid 0.10.2",
  "crypto-bigint 0.7.10",
@@ -5051,7 +5042,7 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 [[package]]
 name = "scpt"
 version = "0.1.0"
-source = "git+https://github.com/atomdrift-project/cleave.git#e97e7fa857a9b9f699b9a54ffadefba8fac60abe"
+source = "git+https://github.com/atomdrift-project/cleave.git#58a06b80d78d35e2d15e74cf66a77b8632d86f75"
 dependencies = [
  "thiserror 2.0.21",
 ]
@@ -5544,14 +5535,14 @@ checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
 name = "stng"
-version = "3.0.0"
-source = "git+https://github.com/atomdrift-project/stng.git#0cdf49e6471366209d200f38375eb5502bb7c698"
+version = "3.0.0-beta.1"
+source = "git+https://github.com/atomdrift-project/stng.git#3a636791a2d08d409fe124373c6f753c17b3f1e8"
 dependencies = [
  "aho-corasick",
  "base64 0.22.1",
  "binform",
  "data-encoding",
- "des",
+ "des 0.9.0",
  "flate2",
  "goblin",
  "iced-x86",
@@ -5562,18 +5553,10 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
- "stng-process",
+ "sha2 0.11.1",
  "tracing",
  "tree-sitter",
  "tree-sitter-lua",
-]
-
-[[package]]
-name = "stng-process"
-version = "0.1.0"
-source = "git+https://github.com/atomdrift-project/stng.git#0cdf49e6471366209d200f38375eb5502bb7c698"
-dependencies = [
- "libc",
 ]
 
 [[package]]
@@ -5690,7 +5673,7 @@ dependencies = [
 [[package]]
 name = "sysmem"
 version = "0.1.0"
-source = "git+https://github.com/atomdrift-project/cleave.git#e97e7fa857a9b9f699b9a54ffadefba8fac60abe"
+source = "git+https://github.com/atomdrift-project/cleave.git#58a06b80d78d35e2d15e74cf66a77b8632d86f75"
 
 [[package]]
 name = "tap"
@@ -6860,21 +6843,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ccf3ec651a847eb01de73ccad15eb7d99f80485de043efb2f370cd654f4ea44b"
 
 [[package]]
-name = "wasip1"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b5e26842486624357dbeb8f0381cf1fb42f022291fd787d4a816768fec8cc760"
-
-[[package]]
-name = "wasip2"
-version = "1.0.4+wasi-0.2.12"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b67efb37e106e55ce722a510d6b5f9c17f083e5fc79afc2badeb12cc313d9487"
-dependencies = [
- "wit-bindgen",
-]
-
-[[package]]
 name = "wasm-bindgen"
 version = "0.2.130"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7477,15 +7445,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "wit-bindgen"
-version = "0.57.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
-dependencies = [
- "bitflags",
-]
-
-[[package]]
 name = "wnaf"
 version = "0.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7600,7 +7559,7 @@ checksum = "cfe53a6657fd280eaa890a3bc59152892ffa3e30101319d168b781ed6529b049"
 [[package]]
 name = "yara-classify"
 version = "0.1.0"
-source = "git+https://github.com/atomdrift-project/cleave.git#e97e7fa857a9b9f699b9a54ffadefba8fac60abe"
+source = "git+https://github.com/atomdrift-project/cleave.git#58a06b80d78d35e2d15e74cf66a77b8632d86f75"
 
 [[package]]
 name = "yara-x"
@@ -7632,7 +7591,6 @@ dependencies = [
  "ipnet",
  "itertools 0.15.0",
  "js-sys",
- "log",
  "md-5 0.11.0",
  "md2",
  "memchr",
@@ -7646,12 +7604,11 @@ dependencies = [
  "protobuf-codegen",
  "protobuf-parse",
  "psl",
- "quanta",
  "regex",
  "regex-automata",
  "regex-syntax",
  "roxmltree",
- "rsa 0.10.0-rc.20",
+ "rsa 0.10.0-rc.21",
  "rustc-hash 2.1.3",
  "serde",
  "serde_json",
@@ -7837,9 +7794,9 @@ dependencies = [
 
 [[package]]
 name = "zip"
-version = "9.3.0"
+version = "9.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eaeb7f16d2605b49aef586996ded29e65642fab7259a3077e537351df6d80426"
+checksum = "23f17fbc870bfac28c6228aed7d6e6df352e26bf7015c4313727e16a7a01ce5e"
 dependencies = [
  "aes 0.9.4",
  "bzip2 0.6.1",
@@ -7851,7 +7808,7 @@ dependencies = [
  "hmac 0.13.0",
  "indexmap",
  "libc",
- "lzma-rust2",
+ "lzma-rust2 0.25.0",
  "memchr",
  "nix",
  "pbkdf2 0.13.0",
