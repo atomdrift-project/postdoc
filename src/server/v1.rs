@@ -84,10 +84,16 @@ fn affirmative(value: &str) -> bool {
     matches!(value, "1" | "true" | "yes")
 }
 
-fn matching_traits_version(stored: Option<&str>, local: Option<&str>) -> bool {
-    stored
-        .zip(local)
-        .is_some_and(|(stored, local)| stored == local)
+/// Whether hopper's record is a verdict this server would have produced: it was
+/// classified, by these traits. A row held at our version but never classified
+/// has nothing to reuse, and an unknown or blank version matches nothing.
+fn same_analyzer(record: &corpus::CorpusRecord, local: Option<&str>) -> bool {
+    !record.fires_at.is_manual()
+        && record
+            .traits_version
+            .as_deref()
+            .zip(local)
+            .is_some_and(|(stored, local)| !stored.is_empty() && stored == local)
 }
 
 /// `X-Hopper-Fresh`, the header spelling of `?fresh=1`.
@@ -454,9 +460,26 @@ async fn read_body(
     body: axum::body::Body,
     limit: usize,
 ) -> Result<(bytes::Bytes, String), ApiError> {
+    let too_large = || {
+        ApiError::new(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "artifact_too_large",
+            format!("The artifact exceeds the {limit} byte limit."),
+        )
+    };
+    // A declared Content-Length past the limit is refused before a byte is
+    // buffered; the running check below still bounds a body that lies or
+    // declares nothing.
+    let declared = body.size_hint().lower();
+    if declared > limit as u64 {
+        return Err(too_large());
+    }
+    // Sized once from the declared length (bounded by `limit` just above):
+    // grown from empty, a 600 MiB upload doubled into a 1 GiB buffer, copying
+    // as it went and holding the slack until the bytes were staged.
+    let mut buf = bytes::BytesMut::with_capacity(usize::try_from(declared).unwrap_or(0));
     let mut stream = body.into_data_stream();
     let mut digest = Sha256::new();
-    let mut buf = bytes::BytesMut::new();
     loop {
         let next = std::future::poll_fn(|cx| {
             futures_core::Stream::poll_next(std::pin::Pin::new(&mut stream), cx)
@@ -472,16 +495,12 @@ async fn read_body(
             ApiError::bad_request("unreadable_body", "The request body could not be read.")
         })?;
         if buf.len().saturating_add(chunk.len()) > limit {
-            return Err(ApiError::new(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "artifact_too_large",
-                format!("The artifact exceeds the {limit} byte limit."),
-            ));
+            return Err(too_large());
         }
         digest.update(&chunk);
         buf.extend_from_slice(&chunk);
     }
-    Ok((buf.freeze(), format!("{:x}", digest.finalize())))
+    Ok((buf.freeze(), crate::worker::hex(&digest.finalize())))
 }
 
 /// Analyze the bytes a caller sent, rather than a package they named.
@@ -503,8 +522,8 @@ async fn analyze_bytes(
     // by extension.
     let filename = filename
         .map(sanitize_upload_filename)
-        // `""` and `.` name the staging directory itself: staging would fail,
-        // and with it every request sharing this flight.
+        // `""` and `.` are no name at all: they would type the bytes by
+        // nothing and label the report with a blank.
         .filter(|name| !name.is_empty() && name != ".")
         .unwrap_or_else(|| format!("upload-{request_id}"));
     let asked = req.purl.as_ref().map(|(asked, _)| asked.as_str());
@@ -615,16 +634,7 @@ fn repair(state: &AppState, request_id: u64, filename: &str, sha: &str, bytes: b
     state.tasks.spawn(async move {
         let _ = tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            let Some(artifact) = scan::engine::collect_upload_artifacts(
-                std::path::Path::new(&filename),
-                &sha,
-                bytes.len() as u64,
-                scan::engine::upload_collector(),
-                None,
-                None,
-            )
-            .into_iter()
-            .next() else {
+            let Some(artifact) = analyze::upload_artifact(&filename, &sha, bytes.len()) else {
                 return;
             };
             if let Err(error) = uploader.submit_artifact_bytes_durable(artifact, &bytes) {
@@ -644,7 +654,15 @@ fn repair(state: &AppState, request_id: u64, filename: &str, sha: &str, bytes: b
 /// when hopper's verdict is missing or from other traits.
 async fn refresh(state: &Arc<AppState>, req: &V1Analyze) -> Response {
     let request_id = req.request_id;
-    let Some(sha) = req.q.sha256.first().map(|sha| sha.to_ascii_lowercase()) else {
+    // Trimmed as `parse` validated it: the digest becomes a hopper URL path and
+    // is compared against the fetched bytes' digest, so it must be exactly the
+    // 64 hex characters that were checked.
+    let Some(sha) = req
+        .q
+        .sha256
+        .first()
+        .map(|sha| sha.trim().to_ascii_lowercase())
+    else {
         return ApiError::bad_request("missing_sha256", "refresh=1 requires ?sha256=.").v1();
     };
     // The local index is already namespaced by the currently loaded traits
@@ -653,7 +671,7 @@ async fn refresh(state: &Arc<AppState>, req: &V1Analyze) -> Response {
     // prove what Scan already knows.
     if !req.q.full {
         let key = sha.clone();
-        if let Some(verdict) = index_query(move |index| index.get_sha(&key))
+        if let Some(verdict) = index_query(move |index| index.sha(&key))
             .await
             .flatten()
         {
@@ -686,7 +704,7 @@ async fn refresh(state: &Arc<AppState>, req: &V1Analyze) -> Response {
             .await
             .ok()
             .flatten();
-        if matching_traits_version(record.traits_version.as_deref(), local) {
+        if same_analyzer(&record, local) {
             let decided = V1Decision::corpus(&record, Some(&sha), None, req.budget);
             let mut resp = answered(decided, corpus_source(source), req.elapsed_ms());
             if let Some(name) = req.follow.policy.follow_name()
@@ -730,9 +748,33 @@ async fn refresh(state: &Arc<AppState>, req: &V1Analyze) -> Response {
     analyze_bytes(state, req, Some(&filename), sample.bytes, sample.sha256).await
 }
 
-/// Analyze an exact URL, fetched verbatim.
+/// Analyze an exact URL, fetched verbatim, unless what we already know answers
+/// it: the bytes this URL last served, while that alias is fresh.
 async fn analyze_url(state: &Arc<AppState>, req: &V1Analyze, url: String) -> Response {
     let request_id = req.request_id;
+    // The same preflight `analyze_purl` makes, through the same `decide` the
+    // lookup uses: without it every repeat paid a download and an analysis
+    // for an answer the index already held.
+    if !req.q.full && !req.q.force && !req.q.refresh {
+        let key = Key {
+            url: Some(url.clone()),
+            ..Key::default()
+        };
+        let (decided, source) = decide(state, &key, req.budget, req.q.fresh).await;
+        let decided = decided.asked_about_url(Some(&url));
+        if decided.is_answerable() {
+            tracing::info!(
+                id = request_id,
+                url = %url,
+                ms = req.elapsed_ms(),
+                "--> POST /v1/analyze (answered from what we already knew; no slot spent)"
+            );
+            let mut resp = answered(decided, source, req.elapsed_ms());
+            resp.extensions_mut().insert(Subject::url(&url, None));
+            return resp;
+        }
+        tracing::info!(id = request_id, url = %url, "no verdict held; analyzing");
+    }
     if let Err(refusal) = state.admit_request(request_id).await {
         return refusal.v1();
     }
@@ -1531,10 +1573,10 @@ fn held(index: &scan::lookup::Index, key: &Key, corpus: bool) -> Option<scan::lo
     if key.needs_corpus(corpus) {
         return None;
     }
-    let by_purl = || key.purl.as_deref().and_then(|p| index.get_purl(p));
+    let by_purl = || key.purl.as_deref().and_then(|p| index.purl(p));
     match key.sha.as_deref() {
-        Some(sha) => pick_verdict(index.get_sha(sha), by_purl, sha),
-        None => by_purl(),
+        Some(sha) => pick_verdict(index.sha(sha), by_purl, sha),
+        None => by_purl().or_else(|| key.url.as_deref().and_then(|u| index.url(u))),
     }
 }
 
@@ -2053,6 +2095,64 @@ const REPORT_LIMIT: usize = 3;
 mod tests {
     use super::*;
 
+    #[test]
+    fn refresh_reuses_only_a_classified_verdict_at_the_local_traits_version() {
+        let record =
+            |json: &str| -> corpus::CorpusRecord { serde_json::from_str(json).expect("record") };
+        let judged = record(r#"{"fires_at":-1,"traits_version":"abc12"}"#);
+        assert!(same_analyzer(&judged, Some("abc12")));
+        assert!(!same_analyzer(&judged, Some("old00")));
+        assert!(!same_analyzer(&judged, None));
+        assert!(!same_analyzer(&judged, Some("")));
+        assert!(!same_analyzer(&record(r#"{"fires_at":-1}"#), Some("abc12")));
+        assert!(!same_analyzer(&record(r#"{"fires_at":-1}"#), None));
+        assert!(!same_analyzer(
+            &record(r#"{"fires_at":-1,"traits_version":""}"#),
+            Some("")
+        ));
+        // Held at our version but never classified: nothing to reuse.
+        let unclassified = record(r#"{"fires_at":null,"traits_version":"abc12"}"#);
+        assert!(!same_analyzer(&unclassified, Some("abc12")));
+    }
+
+    /// A URL's lookup answers from the bytes it last served, through the same
+    /// `decide` the analyze preflight uses: a registry tarball (an immutable
+    /// PURL) and an ordinary URL alike, while fresh. Unseen URLs stay
+    /// `unanalyzed`.
+    #[tokio::test]
+    async fn a_url_lookup_answers_from_the_bytes_it_last_served() -> anyhow::Result<()> {
+        use scan::lookup::Verdict;
+
+        let (_router, state) = super::super::assemble(super::super::ServerConfig::default())?;
+        let index = scan::lookup::global().expect("verdict index enabled");
+        let sha = "e7".repeat(32);
+        index.put(&Verdict {
+            sha256: sha.clone(),
+            lvl: Level::At(0),
+            eng: "local".into(),
+            at: "2026-10-29T00:00:00Z".into(),
+            purl: None,
+            why: None,
+            hits: Vec::new(),
+        });
+        for url in [
+            "https://registry.npmjs.org/url-alias-test/-/url-alias-test-1.0.0.tgz",
+            "https://example.com/url-alias-test.tgz",
+        ] {
+            index.alias_url(url, &sha);
+            let key = Key::parse(None, None, Some(url)).expect("valid url");
+            let (decided, source) = decide(&state, &key, 25, false).await;
+            assert!(decided.is_answerable(), "{url}: answered from the index");
+            assert_eq!(decided.sha256.as_deref(), Some(sha.as_str()), "{url}");
+            assert_eq!(source, Source::Index, "{url}");
+        }
+        let unseen = Key::parse(None, None, Some("https://example.com/never-analyzed.tgz"))
+            .expect("valid url");
+        let (decided, _) = decide(&state, &unseen, 25, false).await;
+        assert!(!decided.is_answerable(), "an unseen URL is not answered");
+        Ok(())
+    }
+
     #[tokio::test]
     async fn versioned_purl_uses_corpus_even_with_a_clean_local_alias() -> anyhow::Result<()> {
         use super::super::ServerConfig;
@@ -2316,15 +2416,6 @@ mod tests {
             let raw = format!("purl=pkg:npm/left-pad@1.3.0&full={value}");
             assert!(!q(&raw));
         }
-    }
-
-    #[test]
-    fn refresh_reuses_only_an_explicit_matching_traits_version() {
-        assert!(matching_traits_version(Some("abc12"), Some("abc12")));
-        assert!(!matching_traits_version(Some("old00"), Some("abc12")));
-        assert!(!matching_traits_version(None, Some("abc12")));
-        assert!(!matching_traits_version(Some("abc12"), None));
-        assert!(!matching_traits_version(None, None));
     }
 
     /// Several digests are several artifacts: each is kept, in the order

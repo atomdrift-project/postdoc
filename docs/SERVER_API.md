@@ -29,7 +29,7 @@ Environment variables read at startup:
 | Variable               | Effect                                                       |
 | ---------------------- | ------------------------------------------------------------ |
 | `CLEAVE_TRAITS_DIR`    | Traits directory.                                            |
-| `RAYON_NUM_THREADS` | Override global Rayon pool size. Default is available CPU parallelism. |
+| `CLEAVE_RAYON_THREADS` | Override the global analysis pool's width. Default is atomscan's: physical cores, plus half again on a wide x86 SMT host (all logical CPUs below 8 cores). |
 | `SCAN_MODELS_REPO`   | Model repository URL.                                        |
 | `SCAN_WHALE_POOL_THREADS` | Threads in each whale's private pool (below); `0` sends whales to the global pool. Default: a quarter of the physical cores, 2–16. |
 | `SCAN_SMALL_POOL_THREADS` | Threads in a small payload's private pool; `0` keeps small payloads on the global pool. Default: an eighth of the physical cores, 2–8. |
@@ -127,10 +127,8 @@ Four properties are deliberate:
 - **Loopback is not exempt.** A Cloudflare tunnel runs `cloudflared` on the
   host and dials the service over loopback, so every remote request arrives
   with a loopback peer address. Exempting loopback would exempt the internet.
-  For the same reason `--allow-cidr` cannot filter tunnelled traffic, and
-  `/analyze-path`'s loopback-only restriction stops meaning "local" — leave
-  `--allowed-dirs` empty on a tunnelled host, which makes that route reject
-  everything.
+  For the same reason `--allow-cidr` cannot filter tunnelled traffic, and no
+  route grants anything for arriving over loopback.
 - **The token is a file, never an argument or an environment variable.**
   `argv` is world-readable through `ps`, and systemd unit files are
   world-readable in `/etc/systemd/system`. Only the SHA-256 digest is kept in
@@ -295,7 +293,7 @@ afterward. Policy changes can change the verdict, so such a result cannot safely
 replace the deployment's canonical answer.
 
 An `application/json` body names a package; anything else is the artifact
-itself, staged and analyzed under the digest of its bytes. An upload is always
+itself, analyzed in memory under the digest of its bytes. An upload is always
 analyzed: it is a request about *those bytes*, and a `?purl=` sent with it names
 provenance rather than the artifact in hand. The digest is the
 identity, so two callers uploading one artifact share a single analysis exactly
@@ -447,16 +445,26 @@ failing every fetch in two seconds looks idle and fast.
 
 | Code | Cause                                                                   |
 | ---- | ----------------------------------------------------------------------- |
-| 400  | Malformed request body.                                                 |
-| 403  | `/analyze-path` outside `--allowed-dirs`, or non-loopback peer.         |
-| 413  | Body exceeds `--max-size-mb`.                                           |
+| 400  | Malformed request: query, locator, or body.                             |
+| 401  | Missing or invalid bearer token (`--token-file`).                       |
+| 403  | Peer address outside loopback and every `--allow-cidr`.                 |
+| 413  | Body exceeds `--max-size-mb`, or a fetched artifact exceeds the fetch limit (`too_large`). |
 | 415  | Unsupported file, archive, or compression format.                       |
-| 422  | Corrupt, truncated, encrypted-without-password, depth or count limit.   |
+| 422  | Corrupt, truncated, encrypted-without-password, depth or count limit (`invalid_artifact`); or the artifact's source refused it — 403, 404, 410, a non-public address (`unretrievable`). |
 | 500  | Internal error.                                                         |
-| 503  | Starting, failed, overloaded, or at capacity.                           |
+| 503  | Starting, failed, overloaded, or at capacity; or the artifact's source is down, slow, throttling or failing (`fetch_unavailable`) — retry elsewhere. |
 | 504  | Analysis exceeded the per-request watchdog.                             |
 
-`/analyze`, `/analyze-purl`, and `/analyze-path` also set `X-Total-Ms` on the response.
+`/v1/analyze` and `/v1/lookup` also set `X-Total-Ms` and `X-Scan-Source` on the response.
+
+Error messages are fixed text per code; the error chain, which names temp
+paths and internal addresses, stays in the log under the request's id. The
+caller's filename never decides the code.
+
+On `SIGTERM` the server stops accepting, lets open requests finish for 30s,
+then cancels the analyses still running (a streamed caller gets `unavailable`)
+and closes what remains 15s later. A connection that sends no request header
+within 30s is closed; at most 1024 are served at once.
 
 Errors share a single shape:
 
@@ -467,8 +475,8 @@ Errors share a single shape:
 The server writes to stderr (journald under systemd). Every request produces
 exactly one access line when its response is ready:
 
-    INFO scan::server::access: POST /analyze-purl id=9 status=200 dur_ms=10351
-      peer=127.0.0.1 fwd=203.0.113.9 auth="token" req_bytes=33
+    INFO postdoc::server::access: POST /v1/analyze id=9 status=200 dur_ms=10351
+      peer=127.0.0.1 fwd=203.0.113.9 auth="token"
       purl="pkg:npm/left-pad@1.3.0" trace="bl-9f2c" ua="beamline/0.3"
 
 A field with nothing to say is left off the line rather than printed empty.
@@ -480,12 +488,13 @@ A field with nothing to say is left off the line rather than printed empty.
 | `dur_ms`    | Wall time from arrival to response.                                    |
 | `peer`      | Socket peer address. Behind a tunnel this is always loopback.          |
 | `fwd`       | Client address a proxy reported (`CF-Connecting-IP`, `X-Forwarded-For`, `X-Real-IP`). Advisory: logged, never used for access control. |
-| `auth`      | `token`, `open` (no `--token-file`), `anon` (unauthenticated `/_/health`), or a rejection reason: `no-credential`, `malformed-credential`, `bad-token`, `peer-denied`, `loopback-only`, `no-peer-info`. |
+| `auth`      | `token`, `open` (no `--token-file`), `anon` (unauthenticated `/_/health`), or a rejection reason: `no-credential`, `malformed-credential`, `bad-token`, `peer-denied`, `no-peer-info`. |
 | `req_bytes` | Request `Content-Length`, when the client sent one.                    |
-| `shared`    | `true` when this request attached to an analysis already in flight for the same bytes or PURL and replayed its result instead of doing the work. Absent otherwise. |
-| `sha256`    | The artifact the request was about, by digest: the `/lookup?sha256=` key, or the digest of the bytes uploaded to `/analyze`. On a `/lookup?purl=` that hit, the digest that PURL resolved to. |
-| `purl`      | The artifact the request was about, by package locator, in canonical form — `/lookup?purl=` or `/analyze-purl`. A locator that failed to parse is echoed as sent, so a 400 names the typo. |
-| `path`      | The file `/analyze-path` was asked for, as the caller wrote it. Where the canonicalized form differs, a rejection line carries both. |
+| `shared`    | `true` when this request attached to an analysis already in flight for the same bytes, PURL or URL and replayed its result instead of doing the work. Absent otherwise. |
+| `streamed`  | `true` when the answer went out as an NDJSON stream; `status` and `dur_ms` then describe the headers, and the stream logs its own outcome under the same `id`. |
+| `sha256`    | The artifact the request was about, by digest: the `?sha256=` key, or the digest of the bytes uploaded to `/v1/analyze`. |
+| `purl`      | The artifact the request was about, by package locator, in canonical form. A locator that failed to parse is echoed as sent, so a 400 names the typo. |
+| `url`       | The exact URL a `?url=` request named. |
 | `cred_len`  | Length of the rejected bearer credential (`bad-token` only).           |
 | `cred_fp`   | First four bytes of its SHA-256, hex (`bad-token` only). See below.    |
 | `trace`     | The caller's `X-Request-Id`, for correlating with the calling service. |
@@ -496,7 +505,7 @@ A field with nothing to say is left off the line rather than printed empty.
 An analysis that succeeds writes a completion line before its access line, and
 that line ends with where the verdict goes next:
 
-    INFO scan::server::handlers: <-- 200 OK id=45 key=purl:pkg:npm/left-pad@1.3.0
+    INFO postdoc::server::analyze: <-- 200 OK id=45 key=purl:pkg:npm/left-pad@1.3.0
       elapsed_ms=11563 classification=benign analysis="fresh" hopper="queued"
 
 `hopper="queued"` means the verdict was handed to the background uploader;
@@ -634,9 +643,9 @@ The server is built for trusted networks. The defaults reflect that.
 
 - **Bind is loopback.** Do not change `--bind` without thinking about
   what else can now reach it.
-- **No authentication. No TLS.** If the server is reachable from
-  anywhere but localhost, put a reverse proxy in front of it that does
-  both.
+- **Authentication is opt-in; there is no TLS.** Pass `--token-file`
+  whenever anything but this host can reach the socket (a tunnel counts),
+  and terminate TLS in front of it.
 - **No loopback-trusted routes.** `/analyze-path`, `/_/reload` and
   `/_/update` were removed, so tunnel loopback is never treated as
   local trust.

@@ -48,12 +48,14 @@ fn main() -> anyhow::Result<()> {
                 bytes: Some(bytes),
             };
             documents.push(scan::provenance::RegistryProvenance::from_record_sources(
-                fletch::Registry {
-                    ecosystem: "npm".to_string(),
-                    name: "fixture".to_string(),
-                    version: "1.0.0".to_string(),
-                    ..Default::default()
-                },
+                // `Registry` is non-exhaustive and its `Ecosystem` lives in a
+                // crate postdoc does not name, so the fixture record is
+                // decoded the way hopper's documents are.
+                serde_json::from_value(serde_json::json!({
+                    "ecosystem": "npm",
+                    "name": "fixture",
+                    "version": "1.0.0",
+                }))?,
                 &[source],
             ));
         }
@@ -81,7 +83,11 @@ fn main() -> anyhow::Result<()> {
             "documents": documents.len(), "input_bytes": inputs,
             "construct_ms": construct_ms, "upload_ms": upload_ms,
             "total_ms": construct_ms + upload_ms, "retained_rss_kib": retained_rss_kib,
-            "upload_sha256": format!("{:x}", digest.finalize()),
+            "upload_sha256": digest
+                .finalize()
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>(),
         })
     );
     Ok(())

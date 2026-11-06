@@ -113,32 +113,62 @@ impl ApiError {
     /// The answer an analysis failure becomes.
     ///
     /// Typed errors are recognized by type; cleave's are not typed, so the rest
-    /// fall to [`classify_analysis_error`]. A failure about the artifact keeps
-    /// its root cause as the message, because that is what the caller can act
-    /// on; one about us is a bare 500.
+    /// fall to [`classify_analysis_error`]. Every message is fixed text: the
+    /// chain names temp paths and internal addresses, and stays in the log.
     pub(super) fn from_analysis(error: &anyhow::Error) -> Self {
         if let Some(busy) = error.downcast_ref::<scan::analysis::WhaleSlotBusy>() {
             // The same shape admission refuses with before the stream starts,
             // so a router treats both as "full, try the next worker".
             return Self::at_capacity(busy.to_string(), Some("whale"), Some(30));
         }
-        let cause = || error.root_cause().to_string();
         // An artifact that could not be retrieved is answered from the type
         // rather than from any wording, because that verdict is the one this
         // fleet cannot afford to get wrong: see [`scan::fetch::Unretrievable`].
-        if error.downcast_ref::<scan::fetch::Unretrievable>().is_some() {
-            return Self::new(StatusCode::UNPROCESSABLE_ENTITY, "unretrievable", cause());
+        if let Some(fetch) = error.downcast_ref::<scan::fetch::Unretrievable>() {
+            // A source that is down says nothing about the package, and a
+            // healthier server — or the same one shortly — may fetch it: a 503
+            // the router retries, never a 422 that files the package as gone.
+            if infrastructure_failure(&fetch.outcome) {
+                return Self::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "fetch_unavailable",
+                    "Artifact source temporarily unavailable",
+                );
+            }
+            if matches!(
+                fetch.outcome,
+                fletch::fetch::Outcome::Failed(fletch::fetch::FetchError::TooLarge)
+            ) {
+                return Self::new(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "too_large",
+                    "Artifact exceeds the fetch size limit",
+                );
+            }
+            return Self::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "unretrievable",
+                "The artifact could not be retrieved.",
+            );
         }
-        match classify_analysis_error(&format!("{error:#}")) {
+        // Classified on what went wrong, never on the label: the context layer
+        // scan adds names the caller's filename, and an upload named
+        // `corrupt.zip` must not turn an internal failure into a 422.
+        let causes: Vec<String> = error
+            .chain()
+            .map(ToString::to_string)
+            .filter(|cause| !cause.starts_with(ANALYSIS_CONTEXT))
+            .collect();
+        match classify_analysis_error(&causes.join(": ")) {
             StatusCode::UNSUPPORTED_MEDIA_TYPE => Self::new(
                 StatusCode::UNSUPPORTED_MEDIA_TYPE,
                 "unsupported_artifact",
-                cause(),
+                "Unsupported file, archive or compression format.",
             ),
             StatusCode::UNPROCESSABLE_ENTITY => Self::new(
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "invalid_artifact",
-                cause(),
+                "The artifact is corrupt, truncated, encrypted, or past a depth or count limit.",
             ),
             _ => Self::internal(),
         }
@@ -205,6 +235,30 @@ struct V1Detail<'a> {
     message: &'a str,
 }
 
+/// The context scan wraps every analysis failure in, ahead of the caller's
+/// label. Mirrors scan's crate-private `analysis::ANALYSIS_CONTEXT`; keep the
+/// two in step, or a filename could choose its own error class again.
+const ANALYSIS_CONTEXT: &str = "cleave analysis of ";
+
+/// Whether a fetch ended for want of infrastructure — a transport fault, a
+/// timeout, a throttle or server error upstream, or this server's own fetch
+/// budget — rather than for anything about the package. Mirrors scan's
+/// `Unretrievable::infrastructure_failure`, which the pinned scan keeps
+/// crate-private; keep the two in step.
+fn infrastructure_failure(outcome: &fletch::fetch::Outcome) -> bool {
+    use fletch::fetch::{FetchError, Outcome};
+    matches!(
+        outcome,
+        Outcome::BudgetExceeded
+            | Outcome::Failed(
+                FetchError::Transport(_)
+                    | FetchError::Timeout
+                    | FetchError::Internal(_)
+                    | FetchError::Status(408 | 429 | 500..=599)
+            )
+    )
+}
+
 /// The status an untyped analysis failure gets, read off its whole error chain.
 ///
 /// An upstream limitation, kept in this one place: cleave reports every
@@ -228,7 +282,6 @@ pub(super) fn classify_analysis_error(chain: &str) -> StatusCode {
         || normalized.contains("corrupt")
         || normalized.contains("unexpected end of")
         || normalized.contains("too small")
-        || normalized.contains("out of bounds")
         || normalized.contains("empty package.json")
         || normalized.contains("maximum archive depth")
         || normalized.contains("maximum decode depth")
@@ -361,15 +414,96 @@ mod tests {
         let body = body_of(ApiError::from_analysis(&fault).into_response()).await;
         assert_eq!(body, serde_json::json!({ "error": "Internal error" }));
 
-        // A failure about the artifact keeps its root cause, and only that.
-        let corrupt = Err::<(), _>(anyhow::anyhow!("corrupt deflate stream"))
+        // A failure about the artifact names its class, never its chain.
+        let corrupt = Err::<(), _>(anyhow::anyhow!("corrupt deflate stream at /tmp/scan-x1y2"))
             .context("cleave analysis of /tmp/scan-x1y2/a.tgz")
             .unwrap_err();
-        let body = body_of(ApiError::from_analysis(&corrupt).into_response()).await;
-        assert_eq!(
-            body,
-            serde_json::json!({ "error": "corrupt deflate stream" })
+        let body = body_of(ApiError::from_analysis(&corrupt).v1()).await;
+        assert_eq!(body["error"]["code"], "invalid_artifact");
+        assert!(
+            !body.to_string().contains("/tmp"),
+            "the error chain leaked: {body}"
         );
+    }
+
+    /// The label is the caller's text: an upload named for a failure class
+    /// must not make an internal failure read as that class.
+    #[tokio::test]
+    async fn a_filename_cannot_choose_the_error_class() {
+        use anyhow::Context as _;
+
+        let fault = Err::<(), _>(anyhow::anyhow!("model evaluation failed"))
+            .context("cleave analysis of corrupt-truncated.zip")
+            .unwrap_err();
+        let body = body_of(ApiError::from_analysis(&fault).v1()).await;
+        assert_eq!(body["error"]["code"], "internal");
+    }
+
+    /// A panic message is a bug of ours, not a malformed upload.
+    #[test]
+    fn an_index_out_of_bounds_is_ours() {
+        assert_eq!(
+            classify_analysis_error("index out of bounds: the len is 3 but the index is 7"),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+
+    /// A source that is down, slow, throttling or failing says nothing about
+    /// the package: a 503 a router retries elsewhere, with no internal detail.
+    #[test]
+    fn retrieval_infrastructure_failures_are_503_and_keep_internal_detail_private() {
+        use anyhow::Context as _;
+        use fletch::fetch::{FetchError, Outcome};
+
+        for outcome in [
+            Outcome::Failed(FetchError::Transport(
+                "lookup pypi.org: no such host".into(),
+            )),
+            Outcome::Failed(FetchError::Timeout),
+            Outcome::Failed(FetchError::Internal("parser fault".into())),
+            Outcome::Failed(FetchError::Status(408)),
+            Outcome::Failed(FetchError::Status(429)),
+            Outcome::Failed(FetchError::Status(500)),
+            Outcome::Failed(FetchError::Status(503)),
+            Outcome::Failed(FetchError::Status(599)),
+            Outcome::BudgetExceeded,
+        ] {
+            let error = Err::<(), _>(anyhow::Error::new(scan::fetch::Unretrievable {
+                target: "https://pypi.org/pypi/x/1.0/json".into(),
+                outcome,
+            }))
+            .context("analyzing package")
+            .unwrap_err();
+            let refusal = ApiError::from_analysis(&error);
+            assert_eq!(refusal.status, StatusCode::SERVICE_UNAVAILABLE, "{error:#}");
+            assert!(!refusal.message.contains("pypi"), "{}", refusal.message);
+        }
+    }
+
+    /// What the package's source said about the package stays a package error.
+    #[test]
+    fn permanent_retrieval_failures_stay_package_errors() {
+        use fletch::fetch::{FetchError, Outcome};
+        for (error, expected) in [
+            (FetchError::Status(403), StatusCode::UNPROCESSABLE_ENTITY),
+            (FetchError::Status(404), StatusCode::UNPROCESSABLE_ENTITY),
+            (FetchError::Status(410), StatusCode::UNPROCESSABLE_ENTITY),
+            (
+                FetchError::Refused("private address".into()),
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+            (FetchError::TooLarge, StatusCode::PAYLOAD_TOO_LARGE),
+        ] {
+            let error = anyhow::Error::new(scan::fetch::Unretrievable {
+                target: "https://example.test/package".into(),
+                outcome: Outcome::Failed(error),
+            });
+            assert_eq!(
+                ApiError::from_analysis(&error).status,
+                expected,
+                "{error:#}"
+            );
+        }
     }
 
     /// One error, two shapes: the legacy routes keep their string, `/v1` its

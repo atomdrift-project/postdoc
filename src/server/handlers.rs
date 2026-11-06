@@ -14,7 +14,7 @@ use super::analyze::index_query;
 use super::error::ApiError;
 use super::flight::FlightKey;
 
-/// The name an upload is staged and reported under.
+/// The name an upload is typed, offered to hopper and reported under.
 ///
 /// Every character outside `[A-Za-z0-9_.-]` becomes `_`, `..` collapses to
 /// `__`, and the result keeps its last 63 bytes so the extension survives —
@@ -53,10 +53,17 @@ pub(super) fn sanitize_upload_filename(raw: &str) -> String {
 }
 
 /// Canonical `pkg:…` form, or a 400 message. Same prefixing rule as `atomscan purl`.
+///
+/// A raw control character is refused, as [`valid_http_url`] refuses one: a
+/// PURL percent-encodes anything outside its grammar, and the normalized form
+/// is logged, stored and echoed in a response header.
 pub(super) fn normalize_pkg_purl(raw: &str) -> Result<String, &'static str> {
     let raw = raw.trim();
     if raw.is_empty() {
         return Err("missing purl");
+    }
+    if raw.chars().any(char::is_control) {
+        return Err("not a package URL");
     }
     let prefixed = if raw.starts_with("pkg:") {
         raw.to_string()
@@ -153,6 +160,11 @@ pub(super) async fn status(
     {
         return lookup_error(StatusCode::BAD_REQUEST, "invalid url");
     }
+    if let Some(sha) = sha
+        && burton::parse_sha256_hex(sha).is_none()
+    {
+        return lookup_error(StatusCode::BAD_REQUEST, "invalid sha256");
+    }
     if sha.is_none() && raw.is_none() && raw_url.is_none() {
         return lookup_error(
             StatusCode::BAD_REQUEST,
@@ -196,10 +208,10 @@ pub(super) async fn status(
     let complete = index_query(move |index| {
         key_purl
             .as_deref()
-            .is_some_and(|p| index.get_purl(p).is_some())
+            .is_some_and(|p| index.purl(p).is_some())
             || key_sha
                 .as_deref()
-                .is_some_and(|s| index.get_sha(s).is_some())
+                .is_some_and(|s| index.sha(s).is_some())
     })
     .await
     .unwrap_or(false);
@@ -275,6 +287,8 @@ mod tests {
         );
         assert!(normalize_pkg_purl("").is_err());
         assert!(normalize_pkg_purl("not a purl").is_err());
+        assert!(normalize_pkg_purl("pkg:npm/a\nINFO forged@1.0.0").is_err());
+        assert!(normalize_pkg_purl("pkg:npm/a\u{85}b@1.0.0").is_err());
     }
 }
 

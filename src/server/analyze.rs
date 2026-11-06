@@ -1,14 +1,13 @@
 //! One analysis on behalf of a request: claiming capacity, running it on a
 //! blocking thread, and filing what it found.
 //!
-//! Every analyze route goes through here — the single-flight routes through
-//! [`lead`], `/analyze-path` through [`RequestGuard::run`] and [`record`]
-//! directly — so admission, the `/_/requests` entry, the timeout, the
-//! completion log and the `/_/stats` figures are one code path, not five
+//! Every analysis goes through [`lead`] — uploaded bytes, a PURL and an exact
+//! URL alike — so admission, the `/_/requests` entry, the timeout, the
+//! completion log and the `/_/stats` figures are one code path, not three
 //! copies that drift.
 
 use std::fmt::Display;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -31,34 +30,10 @@ pub(super) struct RequestFollow {
     pub(super) refresh: bool,
 }
 
-/// Bytes a request uploaded, staged on disk and waiting to be analyzed.
-#[derive(Debug)]
-pub(super) struct Upload {
-    /// Owns the directory holding [`Self::path`]: dropping it deletes the file.
-    pub(super) _dir: tempfile::TempDir,
-    /// The staged file, named so cleave can detect its type from the extension.
-    pub(super) path: PathBuf,
-    /// Sanitized upload filename, used as the display path.
-    pub(super) filename: String,
-}
-
-impl Upload {
-    /// A temp directory holding `bytes` under `filename`. Blocking.
-    fn stage(filename: &str, bytes: &[u8]) -> std::io::Result<Self> {
-        let dir = tempfile::Builder::new().prefix("scan-").tempdir()?;
-        let path = dir.path().join(filename);
-        std::fs::write(&path, bytes)?;
-        Ok(Self {
-            _dir: dir,
-            path,
-            filename: filename.to_owned(),
-        })
-    }
-}
-
 /// What a flight's leader analyzes.
 pub(super) enum Job {
-    /// Bytes in memory, staged on the analysis thread (`/v1/analyze`).
+    /// Bytes a caller uploaded (`/v1/analyze`), analyzed where they are.
+    /// `filename` is the sanitized name cleave types them by.
     Bytes {
         filename: String,
         bytes: bytes::Bytes,
@@ -230,10 +205,7 @@ impl Leader {
             let deps_for_upload = uploader.is_some();
             match job {
                 Job::Bytes { filename, bytes } => {
-                    let upload = Upload::stage(&filename, &bytes)
-                        .map_err(|e| anyhow::anyhow!("staging the upload: {e}"))?;
-                    drop(bytes);
-                    classify_upload(&upload, analysis, uploader.as_deref())
+                    classify_upload(&filename, bytes, analysis, uploader.as_deref())
                 }
                 Job::Purl(purl) => classify_purl(
                     &purl,
@@ -278,9 +250,10 @@ impl Leader {
     async fn file(&self, mut result: Box<ScanResult>) -> Outcome {
         let state = Arc::clone(&self.state);
         let purl = self.flight.key().purl().map(str::to_owned);
+        let url = self.flight.key().url().map(str::to_owned);
         let refresh = self.follow.refresh;
         let filed = tokio::task::spawn_blocking(move || {
-            index_verdict(&result, purl.as_deref(), refresh);
+            index_verdict(&result, purl.as_deref(), url.as_deref(), refresh);
             if let Some(uploader) = &state.uploader {
                 renew(uploader, &mut result, purl);
             }
@@ -386,7 +359,15 @@ fn llm_source(interpretation: Option<&scan::interpret::Interpretation>) -> Optio
 /// Record what an analysis found, so a later lookup of the same artifact is
 /// answerable without re-running it. Blocking: the index is files.
 /// Best-effort — a lookup that misses is a normal answer.
-pub(super) fn index_verdict(result: &ScanResult, purl: Option<&str>, refresh: bool) {
+///
+/// A URL is aliased to the digest it served, so `/v1/lookup?url=` and a repeat
+/// `/v1/analyze?url=` answer from it instead of fetching and analyzing again.
+pub(super) fn index_verdict(
+    result: &ScanResult,
+    purl: Option<&str>,
+    url: Option<&str>,
+    refresh: bool,
+) {
     let Some(index) = scan::lookup::global() else {
         return;
     };
@@ -395,6 +376,10 @@ pub(super) fn index_verdict(result: &ScanResult, purl: Option<&str>, refresh: bo
         index.replace(&verdict);
     } else {
         index.put(&verdict);
+    }
+    // After the verdict, so the alias never points at a record not yet there.
+    if let Some(url) = url {
+        index.alias_url(url, &result.sha256);
     }
 }
 
@@ -433,44 +418,68 @@ fn renew(uploader: &Uploader, result: &mut ScanResult, purl: Option<String>) {
     uploader.submit(sha, purl, result.to_envelope());
 }
 
-/// Analyze staged bytes, then offer them to hopper.
+/// Analyze uploaded bytes in memory, then offer them to hopper.
+///
+/// In memory, as the PURL and URL routes and the pull worker's downloads are:
+/// cleave adopts the buffer without a copy, and a payload past the whale
+/// threshold gets its own lane like any other. Staging to disk first cost a
+/// full write and read of the upload on the critical path, and a second copy
+/// for hopper.
 ///
 /// Offered after analysis, not on receipt, so hopper never carries a claimable
 /// bytes-with-no-verdict row for longer than it takes the uploader to drain
-/// its queue; and durably, because the caller deletes the staged directory,
-/// on this same blocking thread, once this returns. A failure to stage the
-/// offer is logged: the verdict stands.
+/// its queue; and durably — written once to the uploader's own staging — so
+/// its queue never holds the upload in memory. A failure to stage the offer is
+/// logged: the verdict stands.
 fn classify_upload(
-    upload: &Upload,
+    filename: &str,
+    bytes: bytes::Bytes,
     template: Analysis<'_>,
     uploader: Option<&Uploader>,
 ) -> anyhow::Result<ScanResult> {
-    let result = scan::analysis::classify_file(
-        &upload.path,
+    // Held past the analysis only when hopper needs the bytes; otherwise they
+    // go as soon as cleave is done with them.
+    let offered = uploader.is_some().then(|| bytes.clone());
+    let result = scan::analysis::classify_bytes(
+        bytes,
         Analysis {
-            label: &upload.filename,
+            label: filename,
             ..template
         },
     )?;
-    if let Some(uploader) = uploader
-        && let Err(error) =
-            uploader.submit_artifacts_durable(scan::engine::collect_upload_artifacts(
-                &upload.path,
-                &result.sha256,
-                result.size_bytes,
-                scan::engine::upload_collector(),
-                None,
-                None,
-            ))
+    if let (Some(uploader), Some(bytes)) = (uploader, offered)
+        && let Some(artifact) = upload_artifact(filename, &result.sha256, bytes.len())
+        && let Err(error) = uploader.submit_artifact_bytes_durable(artifact, &bytes)
     {
         tracing::error!(
             sha256 = %result.sha256,
-            file = %upload.filename,
+            file = %filename,
             %error,
             "upload: could not stage artifact for hopper; the verdict stands",
         );
     }
     Ok(result)
+}
+
+/// The hopper offer for `size` uploaded bytes named `filename`, before the
+/// bytes are attached. There is never a file behind the name — the caller
+/// hands the bytes to [`Uploader::submit_artifact_bytes_durable`] — and an
+/// upload claims no provenance, so there is exactly one artifact or none.
+pub(super) fn upload_artifact(
+    filename: &str,
+    sha256: &str,
+    size: usize,
+) -> Option<scan::upload::UploadArtifact> {
+    scan::engine::collect_upload_artifacts(
+        Path::new(filename),
+        sha256,
+        size as u64,
+        scan::engine::upload_collector(),
+        None,
+        None,
+    )
+    .into_iter()
+    .next()
 }
 
 /// Fetch the PURL's artifact (and its registry record), then classify. Scan
@@ -798,20 +807,17 @@ mod tests {
         );
     }
 
-    /// Staging writes the bytes under the caller's name, so cleave types the
-    /// file by its extension, and the directory goes when the upload does.
+    /// An upload is offered under the caller's name and its own digest, with
+    /// no file behind it: nothing reads the name from disk, and the bytes go
+    /// with the offer.
     #[test]
-    fn a_staged_upload_keeps_its_name_and_cleans_up() {
-        let upload = Upload::stage("left-pad-1.3.0.tgz", b"bytes").expect("stage");
-        assert!(upload.path.ends_with("left-pad-1.3.0.tgz"));
-        assert_eq!(std::fs::read(&upload.path).expect("read"), b"bytes");
-        let dir = upload
-            .path
-            .parent()
-            .expect("staged in a directory")
-            .to_path_buf();
-        drop(upload);
-        assert!(!dir.exists(), "the staged directory outlived its upload");
+    fn an_upload_is_offered_under_its_name() {
+        let sha = "ab".repeat(32);
+        let artifact = upload_artifact("left-pad-1.3.0.tgz", &sha, 5).expect("artifact");
+        assert_eq!(artifact.filename, "left-pad-1.3.0.tgz");
+        assert_eq!(artifact.sha256, sha);
+        assert_eq!(artifact.size, 5);
+        assert!(!artifact.backfill, "a bare upload claims no provenance");
     }
 
     /// A fetched root's bytes live in fletch's blob cache, keyed by locator —

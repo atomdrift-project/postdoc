@@ -712,7 +712,9 @@ fn sha256_file(path: &Path) -> Result<[u8; 32]> {
     let mut file =
         fs::File::open(path).with_context(|| format!("opening local file {}", path.display()))?;
     let mut hasher = Sha256::new();
-    let mut buf = [0u8; 8192];
+    // 64 KiB: with hardware SHA-256 the hash outruns 8 KiB reads, and the
+    // syscalls cost ~10% of a large file's time (measured, 600 MiB warm).
+    let mut buf = vec![0u8; 64 * 1024];
     loop {
         let n = file
             .read(&mut buf)
@@ -1803,7 +1805,37 @@ impl SpoolReservation {
             spool: Arc::clone(spool),
         })
     }
+
+    /// Extend the reservation to cover `written` bytes, or explain why the
+    /// spool cannot hold them.
+    ///
+    /// The size reserved up front is hopper's claim, or a guess on the reroute
+    /// path, and neither is the body that actually arrives. Growing as it
+    /// streams keeps the spool budget and the free-disk headroom true to what
+    /// is on disk. A step past `written` keeps the free-space probe off the
+    /// per-chunk path; a spool too full for the step still takes exactly what
+    /// was written, so the step never refuses a body the budget can hold.
+    fn cover(&mut self, written: u64) -> Result<()> {
+        if written <= self.size {
+            return Ok(());
+        }
+        let stepped = written
+            .saturating_add(SPOOL_GROW_STEP)
+            .min(MAX_JOB_BYTES.max(written));
+        let target = if self.spool.try_reserve(stepped - self.size).is_ok() {
+            stepped
+        } else {
+            self.spool.try_reserve(written - self.size)?;
+            written
+        };
+        self.size = target;
+        Ok(())
+    }
 }
+
+/// How far a spool reservation grows past the bytes written when a body
+/// outruns it. See [`SpoolReservation::cover`].
+const SPOOL_GROW_STEP: u64 = 64 * 1024 * 1024;
 
 impl Drop for SpoolReservation {
     fn drop(&mut self) {
@@ -2838,8 +2870,8 @@ async fn finish_job(
         tracing::warn!(
             worker_id = slot,
             sha256 = %job.sha256,
-            file = %job.path,
-            file_type = %job.file_type,
+            file = ?job.path,
+            file_type = ?job.file_type,
             size = job.size_bytes,
             error = %e,
             "analysis failed",
@@ -3115,7 +3147,7 @@ impl SummaryTicker {
                 sha256 = %entry.sha,
                 file = %entry.file,
                 size_bytes = entry.size_bytes,
-                file_type = %entry.file_type,
+                file_type = ?entry.file_type,
                 thread_id = entry.thread_id.load(Ordering::Relaxed),
                 stuck_for_ms = scan::duration_ms(now.duration_since(entry.started)),
                 stage,
@@ -3407,7 +3439,7 @@ impl SummaryTicker {
                     sha256 = %entry.sha,
                     file = %entry.file,
                     size_bytes = entry.size_bytes,
-                    file_type = %entry.file_type,
+                    file_type = ?entry.file_type,
                     thread_id,
                     stuck_for_ms = scan::duration_ms(total_elapsed),
                     stage,
@@ -3421,7 +3453,7 @@ impl SummaryTicker {
                     sha256 = %entry.sha,
                     file = %entry.file,
                     size_bytes = entry.size_bytes,
-                    file_type = %entry.file_type,
+                    file_type = ?entry.file_type,
                     thread_id,
                     elapsed_ms = scan::duration_ms(total_elapsed),
                     stage,
@@ -3696,7 +3728,17 @@ async fn prefetch_loop(shared: Arc<WorkerShared>, tx: mpsc::UnboundedSender<Pref
                 }
                 shared.stop.sleep(shared.poll_interval).await;
             }
-            Ok(Some(jobs)) => {
+            Ok(Some(mut jobs)) => {
+                // Hopper is asked for `count`; more than that would be queued
+                // past `target_depth`, one staging task each.
+                if jobs.len() > count {
+                    tracing::warn!(
+                        asked = count,
+                        claimed = jobs.len(),
+                        "hopper returned more jobs than asked for; dropping the excess",
+                    );
+                    jobs.truncate(count);
+                }
                 shared
                     .poll_state
                     .last_claim
@@ -3820,8 +3862,8 @@ async fn stage_payload(
     // a bad digest never becomes good.
     if sha256_from_hex(&job.sha256).is_none() {
         tracing::warn!(
-            sha256 = %job.sha256,
-            path = %job.path,
+            sha256 = ?job.sha256,
+            path = ?job.path,
             "refusing job: sha256 is not 64 hex characters",
         );
         return Err(PrefetchError::Refused(Refusal::MalformedSha256(
@@ -3840,7 +3882,7 @@ async fn stage_payload(
     if size > MAX_JOB_BYTES {
         tracing::warn!(
             sha256 = %job.sha256,
-            path = %job.path,
+            path = ?job.path,
             size_bytes = job.size_bytes,
             max_job_bytes = MAX_JOB_BYTES,
             "skipping oversized job; reporting error to hopper",
@@ -3885,10 +3927,10 @@ async fn fetch_payload(
             Ok(bytes) => return Ok(PrefetchData::Memory(bytes)),
             Err(e) if e.to_string().contains(DOWNLOAD_LIMIT_EXCEEDED) => {
                 let reserve = size.max(spool.mem_threshold_bytes as u64 + 1);
-                let reservation = SpoolReservation::new(spool, reserve)
+                let mut reservation = SpoolReservation::new(spool, reserve)
                     .with_context(|| format!("cannot spool oversize payload for {}", job.sha256))?;
                 let path = hopper
-                    .download_to_spool(spool, &job.sha256, &job.path)
+                    .download_to_spool(&mut reservation, &job.sha256, &job.path)
                     .await?;
                 return Ok(PrefetchData::Spooled(SpooledPayload {
                     path,
@@ -3899,10 +3941,10 @@ async fn fetch_payload(
             Err(e) => return Err(e),
         }
     }
-    let reservation = SpoolReservation::new(spool, size)
+    let mut reservation = SpoolReservation::new(spool, size)
         .with_context(|| format!("cannot spool {size}-byte payload for {}", job.sha256))?;
     let path = hopper
-        .download_to_spool(spool, &job.sha256, &job.path)
+        .download_to_spool(&mut reservation, &job.sha256, &job.path)
         .await?;
     Ok(PrefetchData::Spooled(SpooledPayload {
         path,
@@ -4003,12 +4045,12 @@ async fn run_job(
     let payload = match (&local, prefetched) {
         (Some(_), _) | (None, Ok(PrefetchData::Local)) => None,
         (None, Ok(data)) => {
-            tracing::debug!(sha256 = %job.sha256, file = %label, size = job.size_bytes, "using prefetched data");
+            tracing::debug!(sha256 = %job.sha256, file = ?label, size = job.size_bytes, "using prefetched data");
             Some(data)
         }
         (None, Err(PrefetchError::Refused(refusal))) => return Err(JobError::Refused(refusal)),
         (None, Err(PrefetchError::Transient(e))) => {
-            tracing::warn!(sha256 = %job.sha256, file = %label, error = %format!("{e:#}"), "prefetch failed, downloading directly");
+            tracing::warn!(sha256 = %job.sha256, file = ?label, error = %format!("{e:#}"), "prefetch failed, downloading directly");
             Some(fetch_payload(&shared.hopper, &shared.spool, job).await?)
         }
     };
@@ -4053,7 +4095,7 @@ async fn run_job(
     tracing::debug!(
         analysis_id,
         sha256 = %sha_short,
-        file = %label,
+        file = ?label,
         source,
         size = input_size,
         "analysis starting",
@@ -4085,7 +4127,7 @@ async fn run_job(
     if gate_wait >= Duration::from_secs(1) {
         tracing::info!(
             sha256 = %sha_short,
-            file = %job.path,
+            file = ?job.path,
             wait_ms = scan::duration_ms(gate_wait),
             small_lane,
             "analysis admitted to cleave after waiting for nested-work gate",
@@ -4119,7 +4161,7 @@ async fn run_job(
             tracing::info!(
                 analysis_id,
                 sha256 = %sha_short,
-                file = %label,
+                file = ?label,
                 thread_id,
                 inflight_blocking = started
                     .saturating_sub(shared.blocking_finished.load(Ordering::Relaxed)),
@@ -4213,7 +4255,7 @@ async fn run_job(
                     tracing::warn!(
                         analysis_id,
                         sha256 = %sha_short,
-                        file = %label,
+                        file = ?label,
                         phase = stage_name(&current),
                         limit_s = limit.as_secs(),
                         "analysis exceeded its deadline (SCAN_ANALYSIS_TIMEOUT); cancelling",
@@ -4272,7 +4314,7 @@ async fn locate(
         Some(path) => tracing::debug!(
             sha256 = %job.sha256,
             path = %path.display(),
-            file_type = %job.file_type,
+            file_type = ?job.file_type,
             size = job.size_bytes,
             "analyzing local file"
         ),
@@ -4284,11 +4326,11 @@ async fn locate(
                 .unwrap_or("");
             tracing::warn!(
                 sha256 = %job.sha256,
-                requested_path = %job.path,
+                requested_path = ?job.path,
                 data_root = %root.display(),
                 parent_dir = %parent,
-                basename = %label,
-                file_type = %job.file_type,
+                basename = ?label,
+                file_type = ?job.file_type,
                 size = job.size_bytes,
                 indexed = shared.local_index.get().is_some(),
                 "local file not found under --data; downloading from hopper"
@@ -4452,7 +4494,6 @@ enum Post {
 
 /// The hopper this worker claims from and posts to, and how it introduces
 /// itself there.
-#[derive(Debug)]
 struct Hopper {
     /// Shared by every request; 120 s per request.
     client: reqwest::Client,
@@ -4469,6 +4510,20 @@ struct Hopper {
     input_budget: Option<Arc<InputBudget>>,
 }
 
+/// Written out so the bearer token can never reach a log line or a panic
+/// message through a `{:?}`.
+impl std::fmt::Debug for Hopper {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Hopper")
+            .field("base", &self.base.as_str())
+            .field("worker", &self.worker)
+            .field("tools", &self.tools)
+            .field("token", &self.token.map(|_| "<redacted>"))
+            .field("input_budget", &self.input_budget)
+            .finish_non_exhaustive()
+    }
+}
+
 impl Hopper {
     fn new(base: &str, worker: &str) -> Result<Self> {
         let base = Url::parse(base).with_context(|| format!("hopper URL {base:?}"))?;
@@ -4480,8 +4535,14 @@ impl Hopper {
         // enough that a wedged hopper can't pin the worker indefinitely —
         // without a timeout the default is "no timeout", which defeats graceful
         // shutdown.
+        // Hopper serves every route itself and never redirects. Following one
+        // would let whoever answers as hopper point this worker at its own
+        // network (cloud metadata, loopback admin ports) and read the reply
+        // back through the failure it posts, and reqwest keeps the bearer
+        // token on a same-host scheme downgrade.
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(120))
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .context("building the hopper HTTP client")?;
         Ok(Self {
@@ -4617,20 +4678,18 @@ impl Hopper {
         }
         if !resp.status().is_success() {
             let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
+            let body = error_excerpt(resp).await;
             anyhow::bail!(
-                "poll request returned non-success: url={url} status={status} body={}",
-                body_excerpt(&body),
+                "poll request returned non-success: url={url} status={status} body={body}"
             );
         }
-        let body = resp
-            .text()
+        let body = read_capped(resp, MAX_CLAIM_BODY)
             .await
             .with_context(|| format!("read claim body: url={url}"))?;
-        let claim: ClaimResponse = serde_json::from_str(&body).with_context(|| {
+        let claim: ClaimResponse = serde_json::from_slice(&body).with_context(|| {
             format!(
                 "parse claim response: url={url} body={}",
-                body_excerpt(&body),
+                body_excerpt(&String::from_utf8_lossy(&body)),
             )
         })?;
         Ok(Some(claim.jobs).filter(|jobs| !jobs.is_empty()))
@@ -4752,14 +4811,14 @@ impl Hopper {
                 Ok(resp) => {
                     let status = resp.status();
                     let elapsed_ms = scan::duration_ms(post_start.elapsed());
-                    let body = resp.text().await.unwrap_or_default();
+                    let body = error_excerpt(resp).await;
                     // Resending a payload hopper refused for good can never
                     // succeed, so retrying would just burn 20 minutes.
                     if hopper::is_permanent(status) {
-                        tracing::error!(sha256 = %sha256, %status, body = %body_excerpt(&body), elapsed_ms, attempt, "post result: rejected by server; not retrying");
+                        tracing::error!(sha256 = %sha256, %status, body = %body, elapsed_ms, attempt, "post result: rejected by server; not retrying");
                         return;
                     }
-                    tracing::warn!(sha256 = %sha256, %status, body = %body_excerpt(&body), elapsed_ms, attempt, "post result: non-success response");
+                    tracing::warn!(sha256 = %sha256, %status, body = %body, elapsed_ms, attempt, "post result: non-success response");
                 }
                 Err(e) => {
                     tracing::warn!(sha256 = %sha256, error = %hopper::error_chain(&e), elapsed_ms = scan::duration_ms(post_start.elapsed()), attempt, "post result: send failed");
@@ -4939,7 +4998,7 @@ impl Hopper {
     /// reserves and releases spool budget.
     async fn download_to_spool(
         &self,
-        spool: &SpoolState,
+        reservation: &mut SpoolReservation,
         sha256: &str,
         path: &str,
     ) -> Result<tempfile::TempPath> {
@@ -4958,6 +5017,7 @@ impl Hopper {
         let start = Instant::now();
         let (mut resp, route) = self.download_response(sha256, path).await?;
         let url = resp.url().to_string();
+        let spool = Arc::clone(&reservation.spool);
 
         // Re-create the spool dir if an OS temp sweep removed it since startup;
         // otherwise every large payload fails here for the life of the process.
@@ -4983,6 +5043,9 @@ impl Hopper {
                     "download exceeded per-job cap of {MAX_JOB_BYTES} bytes: path={path} sha256={sha256}",
                 );
             }
+            reservation.cover(written).with_context(|| {
+                format!("spooled body outgrew its reservation: path={path} sha256={sha256}")
+            })?;
             file.write_all(&chunk)
                 .await
                 .with_context(|| format!("spool write failed: sha256={sha256}"))?;
@@ -5026,11 +5089,7 @@ impl Hopper {
             return Ok((resp, "/data/"));
         }
         let data_status = resp.status();
-        let data_body = resp
-            .text()
-            .await
-            .map(|body| body_excerpt(&body))
-            .unwrap_or_else(|e| format!("failed to read error body: {e}"));
+        let data_body = error_excerpt(resp).await;
 
         // /data/ failed — fall back to /api/file/{sha256}, which looks the
         // sample up by hash, so it works even when the relative path doesn't
@@ -5043,11 +5102,7 @@ impl Hopper {
         })?;
         if !resp.status().is_success() {
             let api_status = resp.status();
-            let api_body = resp
-                .text()
-                .await
-                .map(|body| body_excerpt(&body))
-                .unwrap_or_else(|e| format!("failed to read error body: {e}"));
+            let api_body = error_excerpt(resp).await;
             anyhow::bail!(
                 "download failed: path={path} sha256={sha256}; /data/ url={data_url} status={data_status} body={data_body}; /api/file/ url={api_url} status={api_status} body={api_body}",
             );
@@ -5077,10 +5132,10 @@ impl Hopper {
             tracing::debug!(sha256 = %sha256, status = %resp.status(), "no provenance");
             return None;
         }
-        let body = match resp.bytes().await {
+        let body = match read_capped(resp, MAX_PROVENANCE_BODY).await {
             Ok(body) => body,
             Err(e) => {
-                tracing::debug!(sha256 = %sha256, error = %e, "provenance body read failed");
+                tracing::debug!(sha256 = %sha256, error = %format!("{e:#}"), "provenance body read failed");
                 return None;
             }
         };
@@ -5119,6 +5174,73 @@ pub(crate) fn body_excerpt(body: &str) -> String {
     out
 }
 
+/// Largest `/api/next` claim body accepted. A claim is a few hundred bytes a
+/// job; this leaves room for any `count` the worker asks for and still stops
+/// a peer from streaming until the worker runs out of memory.
+const MAX_CLAIM_BODY: usize = 64 * 1024 * 1024;
+
+/// Largest provenance document accepted. Registry documents for packages with
+/// thousands of versions run to tens of megabytes; this is a ceiling against
+/// an unbounded stream, not a size policy.
+const MAX_PROVENANCE_BODY: usize = 512 * 1024 * 1024;
+
+/// How much of an error body is read before the rest is discarded. Only
+/// [`body_excerpt`]'s 512 characters of it are ever kept.
+const MAX_ERROR_BODY: usize = 64 * 1024;
+
+/// Read a response body of at most `max` bytes. A body past the cap is an
+/// error rather than a truncation, so a caller never acts on part of a
+/// document.
+///
+/// `reqwest`'s `text`, `bytes` and `json` buffer the whole body, however long
+/// it is; the request timeout is the only bound they have, and a fast link
+/// fills memory long before it fires.
+pub(crate) async fn read_capped(mut resp: reqwest::Response, max: usize) -> Result<bytes::Bytes> {
+    let declared = resp.content_length().unwrap_or(0);
+    if declared > max as u64 {
+        anyhow::bail!("response body exceeds the {max} byte limit");
+    }
+    let mut body = bytes::BytesMut::with_capacity(usize::try_from(declared).unwrap_or(0));
+    while let Some(chunk) = resp.chunk().await? {
+        if body.len().saturating_add(chunk.len()) > max {
+            anyhow::bail!("response body exceeds the {max} byte limit");
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body.freeze())
+}
+
+/// The first [`MAX_ERROR_BODY`] bytes of an error response, as a
+/// [`body_excerpt`]. The rest is never read.
+async fn error_excerpt(mut resp: reqwest::Response) -> String {
+    let mut body = Vec::new();
+    loop {
+        match resp.chunk().await {
+            Ok(Some(chunk)) => {
+                let room = MAX_ERROR_BODY - body.len();
+                body.extend_from_slice(&chunk[..chunk.len().min(room)]);
+                if body.len() >= MAX_ERROR_BODY {
+                    break;
+                }
+            }
+            Ok(None) => break,
+            Err(e) => return format!("failed to read error body: {e}"),
+        }
+    }
+    body_excerpt(&String::from_utf8_lossy(&body))
+}
+
+/// Lowercase hex of `bytes`, as digests are spelled on the wire and in logs.
+pub(crate) fn hex(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        out.push(char::from(DIGITS[usize::from(b >> 4)]));
+        out.push(char::from(DIGITS[usize::from(b & 0x0f)]));
+    }
+    out
+}
+
 fn verify_download_digest(
     actual: [u8; 32],
     expected_hex: &str,
@@ -5134,11 +5256,7 @@ fn verify_download_digest(
     if actual == expected {
         return Ok(());
     }
-    let actual_hex: String = actual.iter().fold(String::with_capacity(64), |mut out, b| {
-        use std::fmt::Write as _;
-        let _ = write!(out, "{b:02x}");
-        out
-    });
+    let actual_hex = hex(&actual);
     tracing::error!(
         expected_sha256 = %expected_hex,
         actual_sha256 = %actual_hex,
@@ -5306,7 +5424,7 @@ mod tests {
     fn sha256_hex(data: &[u8]) -> String {
         let mut hasher = Sha256::new();
         hasher.update(data);
-        format!("{:x}", hasher.finalize())
+        hex(&hasher.finalize())
     }
 
     #[test]
@@ -5771,8 +5889,13 @@ mod tests {
             mem_threshold_bytes: 0,
             disk_headroom_bytes: 0,
         };
+        // Built directly: `SpoolReservation::new` would create the spool dir.
+        let mut reservation = SpoolReservation {
+            size: 0,
+            spool: Arc::new(spool),
+        };
         let err = test_hopper("http://127.0.0.1:1")
-            .download_to_spool(&spool, "../../escape", "samples/x.bin")
+            .download_to_spool(&mut reservation, "../../escape", "samples/x.bin")
             .await
             .expect_err("a malformed digest must not name a spool file")
             .to_string();
@@ -6558,13 +6681,44 @@ mod tests {
         });
         let expected = sha256_hex(b"expected spooled bytes");
         let err = test_hopper(&format!("http://{addr}"))
-            .download_to_spool(&test_spool(0), &expected, "incoming/sample.bin")
+            .download_to_spool(
+                &mut SpoolReservation {
+                    size: 0,
+                    spool: test_spool(0),
+                },
+                &expected,
+                "incoming/sample.bin",
+            )
             .await
             .expect_err("mismatched spooled bytes must fail")
             .to_string();
         assert!(err.contains("sha256 mismatch"), "{err}");
         assert!(err.contains(&sha256_hex(PAYLOAD)), "{err}");
         server.await.unwrap();
+    }
+
+    /// A body longer than its reservation is charged to the spool as it
+    /// arrives, so neither an understated claim nor the reroute guess lets a
+    /// download outrun the budget.
+    #[test]
+    fn spool_reservation_grows_with_the_body_and_stops_at_the_budget() {
+        let spool = Arc::new(SpoolState {
+            dir: std::env::temp_dir(),
+            budget_bytes: 100,
+            used: AtomicU64::new(0),
+            mem_threshold_bytes: 0,
+            disk_headroom_bytes: 0,
+        });
+        let mut reservation = SpoolReservation::new(&spool, 10).unwrap();
+        reservation.cover(10).unwrap();
+        assert_eq!(spool.used.load(Ordering::Acquire), 10, "within: no growth");
+        // The step does not fit a 100-byte budget; exactly what was written does.
+        reservation.cover(50).unwrap();
+        assert_eq!(spool.used.load(Ordering::Acquire), 50);
+        assert!(reservation.cover(101).is_err(), "past the budget");
+        assert_eq!(spool.used.load(Ordering::Acquire), 50);
+        drop(reservation);
+        assert_eq!(spool.used.load(Ordering::Acquire), 0);
     }
 
     #[test]

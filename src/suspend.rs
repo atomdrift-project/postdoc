@@ -45,6 +45,9 @@ use std::process::{Child, Command};
 pub(crate) struct Idle {
     child: Child,
     control: imp::Control,
+    /// Set once [`Idle::exited`] has reaped the worker. Its pid is then free
+    /// for the OS to hand to an unrelated process, so nothing may signal it.
+    reaped: bool,
     /// Parent-owned: SIGKILL cannot bypass cleanup when the worker is retired.
     /// Fields drop after our Drop kills and reaps the process tree.
     _scratch: crate::temp_space::Scratch,
@@ -63,6 +66,7 @@ impl Idle {
             Ok(child) => Ok(Self {
                 child,
                 control,
+                reaped: false,
                 _scratch: scratch,
             }),
             Err(e) => {
@@ -81,17 +85,26 @@ impl Idle {
     /// Suspend the worker and every descendant. Returns once the kernel has
     /// accepted the request; no core is running its work after that.
     pub(crate) fn freeze(&self) -> io::Result<()> {
+        if !self.signalable() {
+            return Ok(());
+        }
         imp::freeze(&self.control, self.child.id())
     }
 
     /// Resume everything [`Idle::freeze`] suspended.
     pub(crate) fn thaw(&self) -> io::Result<()> {
+        if !self.signalable() {
+            return Ok(());
+        }
         imp::thaw(&self.control, self.child.id())
     }
 
     /// Kill the worker and every descendant. For a worker that has stopped
     /// making progress; the request path uses [`Idle::freeze`].
     pub(crate) fn kill(&self) -> io::Result<()> {
+        if !self.signalable() {
+            return Ok(());
+        }
         imp::kill(&self.control, self.child.id())
     }
 
@@ -100,7 +113,17 @@ impl Idle {
     /// Also reaps it, so a worker that died on its own does not linger as a
     /// zombie until the server exits.
     pub(crate) fn exited(&mut self) -> io::Result<Option<std::process::ExitStatus>> {
-        self.child.try_wait()
+        let status = self.child.try_wait()?;
+        self.reaped |= status.is_some();
+        Ok(status)
+    }
+
+    /// Whether the worker may still be signalled. Linux addresses the cgroup,
+    /// which outlives the worker and still holds any descendant it left; every
+    /// other platform addresses the worker's pid, which is not ours once it
+    /// has been reaped.
+    fn signalable(&self) -> bool {
+        cfg!(target_os = "linux") || !self.reaped
     }
 }
 

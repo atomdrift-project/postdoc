@@ -81,6 +81,14 @@ impl FlightKey {
         }
     }
 
+    /// The exact URL this analysis was requested by, when it was.
+    pub(super) fn url(&self) -> Option<&str> {
+        match self {
+            Self::Url(url) | Self::UrlFollow(url, _) => Some(url),
+            Self::Sha(_) | Self::ShaFollow(_, _) | Self::Purl(_) | Self::PurlFollow(_, _) => None,
+        }
+    }
+
     /// The package this analysis was requested by, when it was requested by
     /// one. Uploads carry a digest and a filename, never a locator.
     pub(super) fn purl(&self) -> Option<&str> {

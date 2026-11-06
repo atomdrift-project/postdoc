@@ -93,9 +93,11 @@ The worker is designed to share a host with other work.
   `memoryuse`, cgroup, etc.) that already enforces a hard cap.
 - **Concurrency.** `--workers` is the hard limit on simultaneous
   analyses. There is no queue beyond hopper itself.
-- **Rayon pool.** The global analysis pool uses Rayon's default sizing and
-  stacks. Set `RAYON_NUM_THREADS` before startup to override its width.
-  Use the same pool settings in throughput benchmarks and deployment.
+- **Rayon pool.** The global analysis pool is atomscan's: physical cores
+  (plus half again on a wide x86 SMT host), 256 MB stacks, threads one
+  scheduling notch below normal. Set `CLEAVE_RAYON_THREADS` before startup to
+  override its width. Use the same pool settings in throughput benchmarks and
+  deployment.
 
 ## Operations
 

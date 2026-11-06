@@ -4,8 +4,7 @@
 //! Two gates run in order on every request:
 //!
 //! 1. **Peer IP.** Loopback connections pass. Every other peer must match one
-//!    of the configured `--allow-cidr` networks, and may never reach a
-//!    [`LOOPBACK_ONLY_ROUTES`] entry.
+//!    of the configured `--allow-cidr` networks.
 //! 2. **Bearer token.** When a token is configured, every route except
 //!    [`HEALTH_ROUTE`] requires `Authorization: Bearer <token>`. Loopback is
 //!    deliberately *not* exempt: the server is meant to sit behind a
@@ -13,14 +12,8 @@
 //!    service over loopback, so every remote request arrives with a loopback
 //!    peer address. Exempting loopback would exempt the entire internet.
 //!
-//! That same property makes [`LOOPBACK_ONLY_ROUTES`] defence in depth rather
-//! than a guarantee: behind a tunnel, "loopback" means "local *or* tunnelled".
-//! `/analyze-path` stays on that list, but the real protection is an empty
-//! `--allowed-dirs`, which makes it reject every request.
-//!
-//! The admin routes ([`ADMIN_ROUTES`]) change what the server runs. With a
-//! token configured they need it like every other route; without one they are
-//! loopback-only, so `--allow-cidr` grants analysis and never administration.
+//! For the same reason no route is granted anything for arriving over
+//! loopback: behind a tunnel, "loopback" means "local *or* tunnelled".
 //!
 //! Requests clearing both gates carry a [`Trusted`] marker, which handlers use
 //! to decide whether a response may include privileged diagnostic detail.
@@ -144,12 +137,6 @@ fn is_token68_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~' | b'+' | b'/')
 }
 
-/// SHA-256 of the bearer token the server requires.
-///
-/// The plaintext token is hashed at construction and never stored, so it
-/// cannot surface in a log line, a `Debug` dump, or a core file. `Debug`
-/// redacts the digest as well: it is preimage-resistant, but there is no
-/// reason to print it either.
 /// Distinct byte values in `token`. A generated hex/base64 credential of
 /// 16+ bytes has many; a hand-typed or repeated-byte string has few.
 fn token_variety(token: &str) -> usize {
@@ -160,6 +147,12 @@ fn token_variety(token: &str) -> usize {
     seen.iter().filter(|&&s| s).count()
 }
 
+/// SHA-256 of the bearer token the server requires.
+///
+/// The plaintext token is hashed at construction and never stored, so it
+/// cannot surface in a log line, a `Debug` dump, or a core file. `Debug`
+/// redacts the digest as well: it is preimage-resistant, but there is no
+/// reason to print it either.
 #[derive(Clone, Copy)]
 pub(crate) struct TokenDigest([u8; 32]);
 
@@ -299,6 +292,9 @@ pub(super) struct Trusted;
 /// diagnostic body; see [`Trusted`].
 pub(super) const HEALTH_ROUTE: &str = "/_/health";
 
+/// How long a presented-but-wrong bearer token waits before its answer.
+const BAD_TOKEN_DELAY: std::time::Duration = std::time::Duration::from_millis(200);
+
 fn forbidden(message: &str, auth: Auth) -> Response {
     tag(
         (
@@ -363,25 +359,31 @@ pub(super) async fn acl(
         None => Auth::Open,
         Some(digest) => match bearer_credential(req.headers()) {
             Presented::Bearer(credential) if digest.matches(credential) => Auth::Token,
+            Presented::Bearer(credential) => {
+                // Online guessing gets no oracle (identical 401) and no
+                // speed: a fixed delay caps attempts per connection far
+                // below any plausible token search. Valid tokens never
+                // pay it. The health route pays it too — its body differs
+                // for a valid token, so without the delay it would be the
+                // fast oracle every other route refuses to be.
+                tokio::time::sleep(BAD_TOKEN_DELAY).await;
+                if auth_exempt {
+                    Auth::Anonymous
+                } else {
+                    return tag(
+                        unauthorized(),
+                        Auth::BadToken {
+                            len: credential.len(),
+                            fp: fingerprint(credential),
+                        },
+                    );
+                }
+            }
             _ if auth_exempt => Auth::Anonymous,
             // The response is identical in all three cases — only the log
             // distinguishes them, so the endpoint stays useless as an oracle.
             Presented::None => return tag(unauthorized(), Auth::NoCredential),
             Presented::Malformed => return tag(unauthorized(), Auth::MalformedCredential),
-            Presented::Bearer(credential) => {
-                // Online guessing gets no oracle (identical 401) and no
-                // speed: a fixed delay caps attempts per connection far
-                // below any plausible token search. Valid tokens never
-                // pay it.
-                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                return tag(
-                    unauthorized(),
-                    Auth::BadToken {
-                        len: credential.len(),
-                        fp: fingerprint(credential),
-                    },
-                );
-            }
         },
     };
     if auth != Auth::Anonymous {
@@ -582,7 +584,7 @@ mod tests {
     #[test]
     fn fingerprint_is_the_sha256_prefix() {
         let rendered = fingerprint(b"x-isotope-scan").to_string();
-        let expected: String = format!("{:x}", Sha256::digest(b"x-isotope-scan"))
+        let expected: String = crate::worker::hex(&Sha256::digest(b"x-isotope-scan"))
             .chars()
             .take(8)
             .collect();

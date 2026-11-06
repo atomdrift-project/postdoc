@@ -63,6 +63,13 @@ const LAG_TTL: Duration = Duration::from_secs(30);
 /// without an operator doing anything.
 const REST: Duration = Duration::from_secs(10);
 
+/// Largest corpus record accepted. A record is a verdict and a handful of
+/// findings — kilobytes; this stops a peer streaming until memory runs out.
+const MAX_RECORD_BODY: usize = 16 * 1024 * 1024;
+
+/// Largest `/_/replica` status accepted: one number in a JSON object.
+const MAX_STATUS_BODY: usize = 64 * 1024;
+
 /// What hopper said about an artifact.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Reached {
@@ -200,8 +207,13 @@ impl Corpus {
         }
         // No fallback to `Client::default()`: it has no timeout, and it panics
         // on the same TLS-backend failure that failed this build.
+        //
+        // Hopper never redirects. Following one would let whoever answers as
+        // hopper aim this server at its own network, and reqwest keeps the
+        // bearer token on a same-host scheme downgrade.
         let client = reqwest::Client::builder()
             .timeout(READ_TIMEOUT)
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .inspect_err(|e| {
                 tracing::error!(error = %e, "cannot build the corpus HTTP client; lookups answer from the local index alone");
@@ -269,7 +281,15 @@ impl Corpus {
             {
                 return Err(format!("Hopper sample exceeds the {max_bytes} byte limit"));
             }
-            let mut body = bytes::BytesMut::new();
+            // The length was checked against `max_bytes` just above, so it
+            // sizes the buffer once instead of doubling into one up to twice
+            // the sample.
+            let mut body = bytes::BytesMut::with_capacity(
+                response
+                    .content_length()
+                    .and_then(|length| usize::try_from(length).ok())
+                    .unwrap_or(0),
+            );
             let mut digest = sha2::Sha256::new();
             let mut complete = false;
             loop {
@@ -297,7 +317,7 @@ impl Corpus {
                 self.note_at(base, true, Instant::now());
                 return Ok(Sample {
                     bytes: body.freeze(),
-                    sha256: format!("{:x}", digest.finalize()),
+                    sha256: crate::worker::hex(&digest.finalize()),
                 });
             }
         }
@@ -494,7 +514,10 @@ impl Corpus {
         if !response.status().is_success() {
             return None;
         }
-        let status = response.json::<Status>().await.ok()?;
+        let body = crate::worker::read_capped(response, MAX_STATUS_BODY)
+            .await
+            .ok()?;
+        let status = serde_json::from_slice::<Status>(&body).ok()?;
         status
             .lag_seconds
             .filter(|secs| *secs >= 0)
@@ -572,13 +595,20 @@ impl Corpus {
                 continue;
             }
             return match status {
-                200 => match response.json::<CorpusRecord>().await {
+                200 => match crate::worker::read_capped(response, MAX_RECORD_BODY)
+                    .await
+                    .and_then(|body| Ok(serde_json::from_slice::<CorpusRecord>(&body)?))
+                {
                     Ok(record) => Some((Reached::Record(Box::new(record)), source)),
-                    // Reachable, but not speaking our protocol. Not a reason to try
-                    // the other endpoint, which is running the same build.
+                    // Reachable, but not speaking our protocol — a proxy's error
+                    // page, a schema we do not know, a body past the cap. Not a
+                    // reason to try the other endpoint, which is running the
+                    // same build; but no answer either, so never `Nothing`,
+                    // which would tell a gate the artifact was never analyzed
+                    // and let it fail open.
                     Err(error) => {
-                        tracing::warn!(endpoint = %base, %error, "corpus record did not parse");
-                        Some((Reached::Nothing, source))
+                        tracing::warn!(endpoint = %base, error = %format!("{error:#}"), "corpus record did not parse; answering unavailable");
+                        Some((Reached::Unreachable, source))
                     }
                 },
                 // 404 is "nothing stored"; 202 is "held, nobody has looked at it".
@@ -1042,6 +1072,20 @@ mod tests {
                 .await
                 .0,
             Reached::Nothing,
+        );
+    }
+
+    /// A 200 that is not a record — a proxy's error page — answered nothing.
+    /// Reading it as `Nothing` would tell a gate the artifact was never
+    /// analyzed, which is exactly the fail-open an outage must not cause.
+    #[tokio::test]
+    async fn an_unreadable_record_is_unavailable_not_unknown() {
+        let c = corpus(&endpoint("200 OK", "<html>gateway error</html>"));
+        assert_eq!(
+            c.known_with_source(None, Some("pkg:npm/left-pad@1.3.0"))
+                .await
+                .0,
+            Reached::Unreachable,
         );
     }
 

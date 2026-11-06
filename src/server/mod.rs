@@ -37,7 +37,7 @@ pub(crate) use acl::{Cidr, TokenDigest, parse_cidr_list};
 use scan::analysis::{ACTIVE_REQUESTS, ModelResources, RequestPhase};
 
 use axum::Router;
-use axum::extract::DefaultBodyLimit;
+use axum::extract::{ConnectInfo, DefaultBodyLimit};
 use axum::middleware;
 use axum::routing::{get, post};
 use std::future::Future;
@@ -97,8 +97,8 @@ pub(crate) struct ServerConfig {
     /// `hopper`). Kept as a count because `--idle-worker-slots` has always
     /// been one; the worker sizes itself.
     pub(crate) idle_worker_slots: usize,
-    /// Peer networks besides loopback allowed to connect. `/analyze-path` is
-    /// loopback-only regardless.
+    /// Peer networks besides loopback allowed to connect. Behind a tunnel
+    /// every peer is loopback, so this filters direct connections only.
     pub(crate) allow_cidrs: Vec<Cidr>,
     /// Digest of the bearer token required on every route but `/_/health`;
     /// `None` leaves the API open. Loopback is not exempt: behind a Cloudflare
@@ -796,8 +796,9 @@ enum Readiness {
 /// the same artifact repairs it instead.
 const MAX_REPAIRS: usize = 4;
 
-/// How long shutdown waits for analyses no client is waiting on.
-/// Comfortably inside systemd's default 90-second stop timeout.
+/// How long shutdown waits for open connections to finish on their own, and
+/// later for analyses no client is waiting on. Twice this plus
+/// [`CANCEL_GRACE`] is still inside systemd's default 90-second stop timeout.
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Longest an upload may go without delivering a byte. An idle bound, not a
@@ -1072,14 +1073,25 @@ impl AppState {
         Err(ApiError::overloaded())
     }
 
-    /// Stop background work, cancel what no client is waiting on, and wait a
-    /// bounded time for it to wind down — so an analysis that finished as the
-    /// server stopped still files its verdict.
-    async fn drain(&self) {
+    /// Stop background work and cancel every analysis in flight.
+    ///
+    /// Called once the drain window passes with connections still open, not
+    /// only after they close: a streamed answer holds its connection open
+    /// until its analysis ends, so waiting for connections alone waited out
+    /// every analysis — up to the analysis timeout — and the supervisor's kill
+    /// came before any of it.
+    fn stop(&self) {
         self.shutdown.send_replace(true);
         for entry in &self.in_flight {
             entry.cancellation.store(true, Ordering::Release);
         }
+    }
+
+    /// Stop, then wait a bounded time for owned background work to wind down —
+    /// so an analysis that finished as the server stopped still files its
+    /// verdict.
+    async fn drain(&self) {
+        self.stop();
         if tokio::time::timeout(DRAIN_TIMEOUT, self.tasks.drained())
             .await
             .is_err()
@@ -1547,23 +1559,132 @@ pub(crate) async fn run(config: ServerConfig) -> anyhow::Result<()> {
         );
     }
 
-    // ConnectInfo<SocketAddr> is required by the ACL middleware so it can
-    // see the peer IP. Tests inject ConnectInfo manually on each Request.
     let stopping = Arc::clone(&state);
-    axum::serve(
+    let cancelling = Arc::clone(&state);
+    serve(
         listener,
-        app.into_make_service_with_connect_info::<SocketAddr>(),
+        app,
+        async move {
+            shutdown_signal().await;
+            // Background work stops now; answers in progress get the drain
+            // window to finish.
+            stopping.shutdown.send_replace(true);
+        },
+        // A streamed answer holds its connection until its analysis ends, which
+        // can be the whole analysis timeout: past the window, cancel it.
+        move || cancelling.stop(),
     )
-    .with_graceful_shutdown(async move {
-        shutdown_signal().await;
-        // Background tasks stop now; open requests finish first.
-        stopping.shutdown.send_replace(true);
-    })
-    .await?;
+    .await;
 
     state.drain().await;
     tracing::info!("server shut down");
     Ok(())
+}
+
+/// Most connections served at once. Past it, accepting waits: idle sockets
+/// cannot exhaust file descriptors, and each analysis holds a slot of its own.
+const MAX_CONNECTIONS: usize = 1024;
+
+/// How long a client has to send its request headers. A peer that connects and
+/// trickles a header (or nothing) holds a connection slot for no longer.
+const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How long connections get to close once their analyses are cancelled.
+/// cleave honors cancellation between archive members, so unwinding is not
+/// instant: measured at 17s for a 37 MiB archive cancelled mid-run.
+const CANCEL_GRACE: Duration = Duration::from_secs(15);
+
+/// Accept connections and serve `app` on them until `stop` resolves; then let
+/// open connections finish for up to [`DRAIN_TIMEOUT`], call `overrun` to
+/// cancel whatever is still running, and give them [`CANCEL_GRACE`] more.
+///
+/// An answer that lands inside the window is delivered rather than thrown
+/// away, and one that would not is cancelled rather than left to the
+/// supervisor's kill — so shutdown is bounded however long an analysis runs.
+///
+/// Hand-rolled over hyper rather than `axum::serve` for what that one does not
+/// offer: a bound on connections, a deadline on request headers, and that
+/// drain. Each request carries its peer address as [`ConnectInfo`], which the
+/// ACL reads.
+async fn serve(
+    listener: tokio::net::TcpListener,
+    app: Router,
+    stop: impl Future<Output = ()>,
+    overrun: impl FnOnce(),
+) {
+    use hyper_util::rt::{TokioIo, TokioTimer};
+    use tower::ServiceExt as _;
+
+    let connections = Arc::new(Semaphore::new(MAX_CONNECTIONS));
+    let graceful = hyper_util::server::graceful::GracefulShutdown::new();
+    let mut stop = std::pin::pin!(stop);
+    loop {
+        // Held across the accept below: that is what makes a full server stop
+        // accepting. The semaphore is never closed, so `Err` cannot happen.
+        let permit = tokio::select! {
+            permit = Arc::clone(&connections).acquire_owned() => match permit {
+                Ok(permit) => permit,
+                Err(_closed) => break,
+            },
+            () = &mut stop => break,
+        };
+        let (stream, peer) = tokio::select! {
+            accepted = listener.accept() => match accepted {
+                Ok(accepted) => accepted,
+                Err(error) => {
+                    // Out of descriptors, most likely; spinning would not help.
+                    drop(permit);
+                    tracing::warn!(%error, "accept failed");
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    continue;
+                }
+            },
+            () = &mut stop => break,
+        };
+        // Progress frames and short answers go out as written rather than
+        // waiting on Nagle for an ACK the peer may be delaying.
+        if let Err(error) = stream.set_nodelay(true) {
+            tracing::debug!(%peer, %error, "could not disable Nagle on a connection");
+        }
+        let service = app
+            .clone()
+            .map_request(move |mut req: axum::http::Request<_>| {
+                req.extensions_mut().insert(ConnectInfo(peer));
+                req
+            });
+        let conn = hyper::server::conn::http1::Builder::new()
+            .timer(TokioTimer::new())
+            .header_read_timeout(HEADER_READ_TIMEOUT)
+            .serve_connection(
+                TokioIo::new(stream),
+                hyper_util::service::TowerToHyperService::new(service),
+            );
+        let conn = graceful.watch(conn);
+        tokio::spawn(async move {
+            let _permit = permit;
+            if let Err(error) = conn.await {
+                tracing::debug!(%peer, %error, "connection ended");
+            }
+        });
+    }
+    drop(listener);
+    let mut closed = std::pin::pin!(graceful.shutdown());
+    if tokio::time::timeout(DRAIN_TIMEOUT, closed.as_mut())
+        .await
+        .is_err()
+    {
+        tracing::warn!(
+            "shutdown: connections still open after {}s; cancelling their analyses",
+            DRAIN_TIMEOUT.as_secs()
+        );
+        overrun();
+        if tokio::time::timeout(CANCEL_GRACE, closed).await.is_err() {
+            tracing::warn!(
+                "shutdown: connections still open {}s after cancelling; closing them",
+                CANCEL_GRACE.as_secs()
+            );
+        }
+    }
 }
 
 async fn shutdown_signal() {

@@ -361,6 +361,12 @@ fn main() -> ExitCode {
         spool.cleanup_abandoned();
     }
 
+    // The global analysis pool atomscan runs on: its measured width (SMT-aware;
+    // `CLEAVE_RAYON_THREADS` overrides), 256 MB stacks for cleave's nested
+    // archive recursion, threads demoted a scheduling notch and registered for
+    // the thread dump. Before anything touches rayon, or its defaults win:
+    // every logical CPU and 2 MiB stacks.
+    scan::runtime::install_rayon_pool();
     // Crash and thread dumps: a wedged worker has to be diagnosable in place,
     // and this must follow the signal mask `runtime::install` set.
     scan::runtime::install_diagnostics();
@@ -454,10 +460,9 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                 },
             }
             .resolve()?;
+            publish_bloom_filters(cli.global.mode);
 
-            let runtime = tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()?;
+            let runtime = daemon_runtime()?;
             // A stalled worker exits EX_TEMPFAIL so its supervisor restarts it.
             let exit = runtime.block_on(worker::run(config))?;
             Ok(ExitCode::from(exit.code()))
@@ -504,13 +509,36 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                 },
             }
             .resolve()?;
+            publish_bloom_filters(cli.global.mode);
 
-            let runtime = tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()?;
+            let runtime = daemon_runtime()?;
             runtime.block_on(server::run(config))?;
             Ok(ExitCode::SUCCESS)
         }
+    }
+}
+
+/// The runtime both daemons run on, with the analysis pool's stack depth.
+///
+/// An analysis alone on the box runs inline on the `spawn_blocking` thread that
+/// called it — cleave recurses there before any rayon worker is involved — so
+/// tokio's 2 MiB default is the stack a nested archive gets. atomscan's daemons
+/// have always sized it like the pool. Stacks are address space; only touched
+/// pages are committed.
+fn daemon_runtime() -> std::io::Result<tokio::runtime::Runtime> {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_stack_size(scan::RAYON_STACK_MB * 1024 * 1024)
+        .build()
+}
+
+/// Load the known-good/known-bad and NSRL filters the startup refresh installed
+/// and publish them process-wide, as `atomscan serve` does: `/v1/lookup`
+/// answers a bless without the hopper round trip, and a followed dependency the
+/// filters vouch for is not fetched and analyzed. `--mode slow` consults none.
+fn publish_bloom_filters(mode: scan::Mode) {
+    if mode != scan::Mode::Slow {
+        scan::bloom_repo::set_global(std::sync::Arc::new(scan::bloom_repo::Lookup::load()));
     }
 }
 

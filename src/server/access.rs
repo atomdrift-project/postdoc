@@ -9,7 +9,7 @@
 //! rather than a warning there and a mystery here.
 //!
 //! Fields, in order: `id`, `status`, `dur_ms`, `peer`, `fwd`, `auth`,
-//! `req_bytes`, `shared`, `streamed`, `sha256`, `purl`, `url`, `path`,
+//! `req_bytes`, `shared`, `streamed`, `sha256`, `purl`, `url`,
 //! `cred_len`, `cred_fp`, `trace`, `ua`. Everything that reaches the line
 //! is either generated here or parsed/bounded before it is printed, so a
 //! hostile header cannot shape the log. A field with nothing to say is left
@@ -217,12 +217,30 @@ fn loggable(headers: &HeaderMap, name: header::HeaderName, max_len: usize) -> Op
 
 /// Drop control characters and bound the length. The one gate every piece of
 /// caller-supplied text passes through before it reaches a log line.
+///
+/// Decoded query values are Unicode, so ASCII controls are not the whole set:
+/// C1 controls (U+0085 NEL is a line break to many log viewers), the Unicode
+/// line and paragraph separators, and the bidi overrides that make a line read
+/// differently from how it is stored are all dropped too.
 fn sanitize(raw: &str, max_len: usize) -> String {
     raw.chars()
-        .filter(|c| !c.is_ascii_control())
+        .filter(|&c| !is_unloggable(c))
         .take(max_len)
         .collect()
 }
+
+/// Whether `c` could break or disguise a log line.
+fn is_unloggable(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c,
+            '\u{200E}' | '\u{200F}' | '\u{2028}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
+        )
+}
+
+/// Longest request path echoed onto the access line. The HTTP parser already
+/// refuses control characters in a path, but not length.
+const MAX_PATH_LEN: usize = 200;
 
 /// The originating client address a fronting proxy reported, if any.
 ///
@@ -264,7 +282,7 @@ pub(super) async fn access_log(
     req.extensions_mut().insert(RequestId(id));
 
     let method = req.method().clone();
-    let path = req.uri().path().to_owned();
+    let path = sanitize(req.uri().path(), MAX_PATH_LEN);
     let peer = req
         .extensions()
         .get::<ConnectInfo<std::net::SocketAddr>>()
@@ -395,6 +413,17 @@ mod tests {
 
         let flood = Subject::sha256(&"a".repeat(MAX_SUBJECT_LEN * 4));
         assert_eq!(flood.sha256.map(|s| s.len()), Some(MAX_SUBJECT_LEN));
+    }
+
+    /// A decoded query value is Unicode: a C1 line break, a Unicode line
+    /// separator, or a bidi override must not reach the line either.
+    #[test]
+    fn subject_drops_unicode_line_breaks_and_bidi_controls() {
+        let forged = Subject::purl(
+            "pkg:npm/a\u{85}b\u{2028}c\u{2029}d\u{202e}e\u{2066}f\u{200f}g",
+            None,
+        );
+        assert_eq!(forged.purl.as_deref(), Some("pkg:npm/abcdefg"));
     }
 
     fn headers(pairs: &[(&'static str, &str)]) -> HeaderMap {
