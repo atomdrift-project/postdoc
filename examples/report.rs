@@ -73,7 +73,7 @@ fn main() -> Fallible {
 
     let engines = Engines {
         postdoc: postdoc::VERSION.to_owned(),
-        scan: scan::engine::ENGINE_VERSION.to_owned(),
+        scan: scan::VERSION.to_owned(),
         cleave: cleave_version(),
         isomer: isomer::VERSION.to_owned(),
         traits: scanned

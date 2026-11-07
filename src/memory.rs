@@ -126,16 +126,6 @@ pub(crate) fn worker_memory_basis() -> WorkerMemoryBasis {
     }
 }
 
-fn worker_max_rss_gb(policy: MaxRssPolicy) -> u64 {
-    match policy {
-        MaxRssPolicy::Disabled => 0,
-        // 85% of the cgroup-aware memory basis, with a one-GiB floor. Slot
-        // count scales with cores, so larger hosts need a proportionate ceiling.
-        MaxRssPolicy::Auto => std::cmp::max(1, (worker_memory_basis().bytes * 85 / 100) / GIB),
-        MaxRssPolicy::Explicit(gb) => gb.get(),
-    }
-}
-
 /// Raw cgroup-v2 memory files for this process's own cgroup, for diagnostics.
 #[derive(Debug, Default)]
 pub(crate) struct CgroupMemoryDiagnostics {

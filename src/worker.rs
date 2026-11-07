@@ -4244,7 +4244,7 @@ async fn run_job(
                 let now = Instant::now();
                 ran += now.duration_since(last_tick).min(2 * JOB_TICK);
                 last_tick = now;
-                let current = phase.get();
+                let current = phase.current();
                 slow.observe(&current, ran, analysis_id, &sha_short, &label);
                 if let Some(limit) = deadline
                     && ran >= limit
