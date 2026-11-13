@@ -1088,7 +1088,9 @@ mod tests {
     /// Held bytes nobody has analyzed are no verdict, and nothing is wrong.
     #[tokio::test]
     async fn a_pending_record_is_nothing() {
-        let c = corpus(&endpoint("200 OK", r#"{"sha256":"abc","state":"pending"}"#));
+        // Bound, so the fixture outlives the lookup.
+        let pending = endpoint("200 OK", r#"{"sha256":"abc","state":"pending"}"#);
+        let c = corpus(&pending);
         assert_eq!(
             c.known_with_source(None, Some("pkg:npm/left-pad@1.3.0"))
                 .await

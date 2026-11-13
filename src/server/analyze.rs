@@ -858,7 +858,7 @@ mod tests {
     /// into its queryable `purl_base` column is filled only when the locator
     /// carries the `pkg:` prefix. Beamline forwards the canonical form, so this
     /// holds today; if that ever changes, the artifact still uploads but
-    /// `/api/sample?purl=` stops finding it, which is exactly the silent gap
+    /// `/v1/lookup?purl=` stops finding it, which is exactly the silent gap
     /// this whole path exists to close.
     #[test]
     fn fetched_root_offers_cached_bytes_and_its_purl() {
