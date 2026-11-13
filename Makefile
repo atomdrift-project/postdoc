@@ -204,12 +204,13 @@ install-precommit:
 # the allocator tuning FreeBSD needs in its unit because it uses libc's
 # jemalloc rather than the one linked into the binary.
 
-.PHONY: worker deploy-worker deploy-server check-server-hopper test-deploy rollout
+.PHONY: worker deploy-worker deploy-server check-server-hopper test-deploy rollout scanners
 
 deploy-worker deploy-server: export POSTDOC_DEPLOY_BUILD := 1
 
 test-deploy:
 	python3 scripts/test-deploy-deps.py
+	python3 scripts/test-deploy-scanners.py
 	python3 scripts/test-deploy.py
 	python3 scripts/test-rollout.py
 	@if command -v pwsh >/dev/null 2>&1; then pwsh -NoLogo -NoProfile -File scripts/test-deploy-windows.ps1; fi
@@ -223,6 +224,12 @@ worker: release
 	  echo "error: no hopper token at ~/.tok/hopper; every claim would 401" >&2; exit 1; }
 	SCAN_LLM="$(LLM)" $(if $(LLM_MODEL),SCAN_LLM_MODEL="$(LLM_MODEL)",) \
 	  ./target/release/$(BINARY) worker --url "$(URL)"
+
+## scanners: install and start the scanners postdoc runs by default — ClamAV,
+##           malcontent, GuardDog — on this host (macOS, Linux, FreeBSD).
+##           Deploys do this themselves; SCANNERS=clamav,guarddog picks a subset.
+scanners:
+	./scripts/deploy-scanners.sh
 
 ## deploy-worker: install and start a worker here (URL=<hopper url>)
 deploy-worker: release

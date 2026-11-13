@@ -1,9 +1,8 @@
 //! HTTP API server for litmus malware classification.
 //!
 //! Accepts artifacts — uploaded bytes, a package URL, an exact URL, or a local
-//! path — runs cleave static analysis and the model, and answers with the
-//! classification: the full scan envelope on the legacy routes, a decision on
-//! `/v1`.
+//! path — runs cleave static analysis and the model, and answers with a
+//! decision, or with the full result (`/v1/analyze?full=1`).
 //!
 //! Routes:
 //!   GET  /_/health      — liveness (public; detail only when trusted)
@@ -13,7 +12,8 @@
 //!   GET  /status        — whether an analysis of an artifact is running
 //!                       (kept for beamline's reconnect routing)
 //!   GET  /v1/lookup     — decisions for one or many artifacts (no slot)
-//!   POST /v1/analyze    — a decision, streamed if the analysis is slow
+//!   POST /v1/analyze    — a decision (the full result with `?full=1`),
+//!                       streamed if the analysis is slow
 //!
 //! [`ServerConfig`] is plain data: [`Startup::resolve`] builds it from a
 //! command line, and [`build_app`] validates it before anything starts.
@@ -120,6 +120,9 @@ pub(crate) struct ServerConfig {
     /// Class-aware admission (`SCAN_SLOT_LANES=1`): payloads at or below this
     /// many bytes take the small lane. `None` keeps flat admission.
     pub(crate) slot_lanes: Option<u64>,
+    /// Third-party scanners run on every analyzed artifact, and handed to the
+    /// companion idle worker.
+    pub(crate) scanners: Arc<postdoc::scanners::Scanners>,
 }
 
 impl Default for ServerConfig {
@@ -144,6 +147,7 @@ impl Default for ServerConfig {
             hopper: None,
             zip_passwords: scan::ArchivePasswords::default(),
             slot_lanes: None,
+            scanners: Arc::default(),
         }
     }
 }
@@ -199,6 +203,8 @@ pub(crate) struct Startup {
     pub(crate) idle_worker_slots: Option<usize>,
     /// Per-request analysis timeout in seconds. Zero disables.
     pub(crate) analysis_timeout_secs: u64,
+    /// The third-party scanners every artifact is also run through.
+    pub(crate) scanners: postdoc::scanners::Settings,
     /// Rules, model and analysis settings, shared with the pull worker.
     /// Fetching is off by default: a server driving outbound fetches is an
     /// SSRF-shaped exposure, so turning it on is an operator decision.
@@ -216,6 +222,10 @@ impl Startup {
     /// purpose: an operator who asked for authentication must never get an
     /// open server because a file went away.
     pub(crate) fn resolve(self) -> anyhow::Result<ServerConfig> {
+        // Before the rules, which take minutes: a scanner named but not
+        // answering should fail the start at once.
+        let scanners = postdoc::scanners::Scanners::start(self.scanners)
+            .map_err(|e| anyhow::anyhow!("third-party scanners: {e:#}"))?;
         let rules = self.rules.resolve()?;
 
         let workers = self
@@ -286,17 +296,15 @@ impl Startup {
                         mb.saturating_mul(1024 * 1024)
                     })
             }),
+            scanners: Arc::new(scanners),
         };
         config.validate()?;
         Ok(config)
     }
 }
 
-/// Default per-request analysis timeout: 34 minutes. Covers cold cleave scans
-/// of large archives — and fetch-enabled scans whose dependency analysis can
-/// far outlast the sample's own — while still preventing a pathological input
-/// from pinning a slot forever. Override with `--analysis-timeout`.
-pub(crate) const DEFAULT_ANALYSIS_TIMEOUT_SECS: u64 = 2040;
+/// Analyses have no wall-clock deadline unless the operator explicitly opts in.
+pub(crate) const DEFAULT_ANALYSIS_TIMEOUT_SECS: u64 = 0;
 
 #[cfg(test)]
 mod cpu_busy_tests {
@@ -1241,6 +1249,7 @@ fn assemble(config: ServerConfig) -> anyhow::Result<(Router, Arc<AppState>)> {
             config.hopper(),
             &scan::upload::default_worker_name(),
             config.idle_worker_slots,
+            &config.scanners,
             &busy,
             shutdown.subscribe(),
         )

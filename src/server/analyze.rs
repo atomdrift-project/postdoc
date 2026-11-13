@@ -17,6 +17,7 @@ use super::corpus::{Corpus, Reached};
 use super::error::ApiError;
 use super::flight::{Flight, FlightKey, Outcome};
 use super::{AnalysisOutcome, AnalysisPermit, AppState, InFlightRequest, RequestGuard};
+use postdoc::scanners::{Input, Scanners};
 use scan::analysis::{Analysis, ModelResources, RequestPhase};
 use scan::engine::{HopperRoute, ScanResult};
 use scan::upload::Uploader;
@@ -190,6 +191,7 @@ impl Leader {
         let policy = self.follow.policy;
         let uploader = self.state.uploader.clone();
         let corpus = self.state.corpus.clone();
+        let scanners = Arc::clone(&self.state.config.scanners);
         // Captured here, on the runtime, for the one corpus call the PURL
         // fallback makes from the blocking thread.
         let runtime = Handle::current();
@@ -199,31 +201,29 @@ impl Leader {
                 cancellation: Some(&cancellation),
                 phase: Some(&tracker),
                 follow: policy,
+                // Every analysis can be asked for its full result (the body
+                // hopper is sent), whether or not there is a hopper, because
+                // requests asking for different shapes share one analysis.
+                upload: true,
+                // Every job renews its verdict on hopper, when there is one,
+                // and its fetched dependencies with it. A dependency hopper
+                // already holds a current verdict for is adopted by the
+                // corpus precheck, not graded or uploaded again.
+                deps_for_upload: uploader.is_some(),
                 ..Analysis::new("", &resources, slow_rule_ms)
             };
-            // Fetched dependencies ride the hopper renewal, when there is one.
-            let deps_for_upload = uploader.is_some();
             match job {
                 Job::Bytes { filename, bytes } => {
-                    classify_upload(&filename, bytes, analysis, uploader.as_deref())
+                    classify_upload(&filename, bytes, analysis, uploader.as_deref(), &scanners)
                 }
                 Job::Purl(purl) => classify_purl(
                     &purl,
-                    Analysis {
-                        deps_for_upload,
-                        ..analysis
-                    },
+                    analysis,
                     uploader.as_deref(),
                     corpus.as_deref().map(|corpus| (corpus, &runtime)),
+                    &scanners,
                 ),
-                Job::Url(url) => classify_url(
-                    &url,
-                    Analysis {
-                        deps_for_upload,
-                        ..analysis
-                    },
-                    uploader.as_deref(),
-                ),
+                Job::Url(url) => classify_url(&url, analysis, uploader.as_deref(), &scanners),
             }
         };
         let outcome = RequestGuard::new(&self.state, self.request_id, entry, permit)
@@ -415,7 +415,7 @@ fn renew(uploader: &Uploader, result: &mut ScanResult, purl: Option<String>) {
         HopperRoute::Redirect(sha) => sha.clone(),
         HopperRoute::Normal => result.sha256.clone(),
     };
-    uploader.submit(sha, purl, result.to_envelope());
+    uploader.submit(sha, purl, result);
 }
 
 /// Analyze uploaded bytes in memory, then offer them to hopper.
@@ -436,18 +436,28 @@ fn classify_upload(
     bytes: bytes::Bytes,
     template: Analysis<'_>,
     uploader: Option<&Uploader>,
+    scanners: &Scanners,
 ) -> anyhow::Result<ScanResult> {
-    // Held past the analysis only when hopper needs the bytes; otherwise they
-    // go as soon as cleave is done with them.
-    let offered = uploader.is_some().then(|| bytes.clone());
-    let result = scan::analysis::classify_bytes(
+    // Held past the analysis only when hopper or a scanner needs the bytes;
+    // otherwise they go as soon as cleave is done with them.
+    let kept = (uploader.is_some() || !scanners.is_empty()).then(|| bytes.clone());
+    let mut result = scan::analysis::classify_bytes(
         bytes,
         Analysis {
             label: filename,
             ..template
         },
     )?;
-    if let (Some(uploader), Some(bytes)) = (uploader, offered)
+    if let Some(bytes) = &kept {
+        scanners.run(
+            &mut result,
+            Input::Bytes {
+                bytes,
+                name: filename,
+            },
+        );
+    }
+    if let (Some(uploader), Some(bytes)) = (uploader, kept)
         && let Some(artifact) = upload_artifact(filename, &result.sha256, bytes.len())
         && let Err(error) = uploader.submit_artifact_bytes_durable(artifact, &bytes)
     {
@@ -492,6 +502,7 @@ fn classify_purl(
     template: Analysis<'_>,
     uploader: Option<&Uploader>,
     corpus: Option<(&Corpus, &Handle)>,
+    scanners: &Scanners,
 ) -> anyhow::Result<ScanResult> {
     use fletch::RefLocator;
 
@@ -561,14 +572,24 @@ fn classify_purl(
 
     mark("purl:payload");
     let (bytes, name, rec) = fetched?;
-    let result = scan::analysis::classify_bytes(
-        bytes::Bytes::from(bytes),
+    let bytes = bytes::Bytes::from(bytes);
+    let mut result = scan::analysis::classify_bytes(
+        bytes.clone(),
         Analysis {
             label: &name,
             root_registry: registry_provenance.as_ref(),
             ..template
         },
     )?;
+    // Not on the registry fallback above: that is the registry's document,
+    // not the artifact, and its verdict is redirected or suppressed.
+    scanners.run(
+        &mut result,
+        Input::Bytes {
+            bytes: &bytes,
+            name: &name,
+        },
+    );
 
     // Offer the artifact — bytes, registry record, and fetch provenance —
     // before its verdict, exactly as the CLI (`scan purl --hopper`) and the
@@ -599,6 +620,7 @@ fn classify_url(
     url: &str,
     template: Analysis<'_>,
     uploader: Option<&Uploader>,
+    scanners: &Scanners,
 ) -> anyhow::Result<ScanResult> {
     use fletch::RefLocator;
 
@@ -609,13 +631,21 @@ fn classify_url(
     // `Display`, which drops the chain and with it the `Unretrievable` a URL
     // fetch failure has to be recognized by.
     let (bytes, name, rec) = scan::fetch::fetch_one(RefLocator::Url(url.to_owned()), false)?;
-    let result = scan::analysis::classify_bytes(
-        bytes::Bytes::from(bytes),
+    let bytes = bytes::Bytes::from(bytes);
+    let mut result = scan::analysis::classify_bytes(
+        bytes.clone(),
         Analysis {
             label: &name,
             ..template
         },
     )?;
+    scanners.run(
+        &mut result,
+        Input::Bytes {
+            bytes: &bytes,
+            name: &name,
+        },
+    );
     // See `classify_purl` on why this waits for the verdict.
     if let Some(uploader) = uploader {
         uploader.submit_artifacts(scan::engine::collect_upload_artifacts(

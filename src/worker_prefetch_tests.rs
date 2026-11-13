@@ -1,5 +1,5 @@
 // Protocol tests for overlapping claim bursts. The server can hold early
-// response bodies without holding the later /api/next endpoint.
+// response bodies without holding the later /v1/work/next endpoint.
 struct DelayedDownloadHopper {
     shared: Arc<WorkerShared>,
     rx: mpsc::UnboundedReceiver<PrefetchedJob>,
@@ -60,11 +60,11 @@ impl DelayedDownloadHopper {
                     let next = Arc::clone(&next);
                     let payloads = Arc::clone(&payloads);
                     requests.spawn(async move {
-                        let Some(target) = read_target(&mut stream).await else {
+                        let Some((target, body)) = read_request(&mut stream).await else {
                             return;
                         };
-                        if target.starts_with("/api/next") {
-                            let count = parse_count(&target);
+                        if target == "/v1/work/next" {
+                            let count = parse_count(&body);
                             let start = next.fetch_add(count, Ordering::AcqRel);
                             // Make the overlap/concurrency checks independent
                             // of task launch order: the later claim may return
@@ -75,7 +75,7 @@ impl DelayedDownloadHopper {
                                 }
                             }
                             if start >= payloads.len() {
-                                respond(&mut stream, "204 No Content", b"").await;
+                                respond(&mut stream, "200 OK", br#"{"jobs":[]}"#).await;
                                 return;
                             }
                             let jobs: Vec<_> = (start..(start+count).min(payloads.len())).map(|id| {

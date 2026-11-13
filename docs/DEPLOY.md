@@ -79,6 +79,43 @@ host: tool availability is cached by the analysis engines.
 Run `make test-deploy` to exercise the Unix prerequisite installer with mock
 package managers. These tests do not install software or change host services.
 
+## Third-party scanners
+
+postdoc runs ClamAV, malcontent and GuardDog on every artifact by default,
+and refuses to start without one it was asked for. Linux and FreeBSD deploys
+install and start them after creating the service user, before the service
+starts (`scripts/deploy-scanners.sh`); `make scanners` does the same on its
+own, on macOS too. A scanner that already answers is left alone.
+
+| Scanner | Linux | FreeBSD | macOS |
+| --- | --- | --- | --- |
+| ClamAV | the distro's clamd and freshclam packages (apt, dnf/yum, zypper, pacman; EPEL on RHEL), configured with a local socket, started with systemd | `clamav` from pkg, enabled in rc.conf | Homebrew's `clamav`, clamd started with `sudo brew services` |
+| malcontent | built from source against yara-x (`scripts/build-malcontent.sh`; Go, Rust and cargo-c, ~12 minutes the first time) into `/usr/local/bin/mal` | the same | Homebrew's `malcontent` |
+| GuardDog | a virtualenv in `/usr/local/lib/postdoc-guarddog` on Python 3.10–3.13 (`python3.13` is installed when no Python fits), linked into `/usr/local/bin` | the same, built against `yara` and `libgit2` from pkg and a stub for its sandbox library, which has no FreeBSD build (`scripts/nono-stub-wheel.py`); postdoc passes `--no-sandbox` there | the same, under Homebrew's prefix |
+
+ClamAV is configured, not just installed: a disabled sample configuration is
+enabled, a `LocalSocket` (mode 666) is set where none is, the signature
+databases are fetched before clamd starts (clamd will not start without
+them, and loading them can take minutes), and the service user joins the
+socket's group when the package keeps it to one. Its `StreamMaxLength`,
+`MaxFileSize` and `MaxScanSize` are raised to 1024M (`CLAMD_MAX`), postdoc's
+own body limit: packages ship 25-100M, past which clamd refuses the stream
+and the artifact goes unscanned. clamd is restarted when that changes them,
+and the deploy waits until it answers `PING`, not merely until its socket
+exists (systemd may hold the socket while clamd loads its databases). Homebrew schedules no
+signature updates on macOS; run `freshclam` from time to time.
+
+GuardDog stops at Python 3.13: the `pygit2` it pins has no wheels for 3.14
+or later, and building it there from source fails. The installer takes the
+first Python in range (on macOS, Homebrew's `python3`, then `python3.13`
+down to `python3.10`, installing `python@3.13` when none fits).
+
+`SCANNERS=clamav,guarddog` (or `none`) picks which are installed, and is
+passed to the service as `--scanners` and kept in its manifest for later
+rollouts. The deploy fails if a scanner it was asked for cannot be installed
+or does not answer; the service then checks each again every time it starts.
+Windows deploys install none, and postdoc there runs none by default.
+
 ## Deployment parity fixes
 
 The 2026-10-18 audit findings are now covered by the deploy paths and tests:

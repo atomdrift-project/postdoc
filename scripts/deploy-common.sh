@@ -3,6 +3,7 @@
 
 DEPLOY_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 . "$DEPLOY_DIR/deploy-deps.sh"
+. "$DEPLOY_DIR/deploy-scanners.sh"
 DEPLOY_CHANGED=0
 DEPLOY_TMP=$(mktemp -d)
 TMP_BIN=""

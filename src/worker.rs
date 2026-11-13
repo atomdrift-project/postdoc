@@ -34,6 +34,7 @@ use tokio::sync::{Mutex as AsyncMutex, Notify, OwnedSemaphorePermit, Semaphore, 
 use tokio::task::JoinSet;
 
 use crate::admission::MemoryAdmission;
+use postdoc::scanners::Input;
 use scan::analysis::{ModelResources, classify_bytes, classify_file};
 use scan::cli::Refresh;
 use scan::explain::ShapImportance;
@@ -97,9 +98,9 @@ static NEXT_ANALYSIS_ID: AtomicU64 = AtomicU64::new(1);
 /// How often a running worker pulls rule and model updates.
 const RESOURCE_RENEWAL_INTERVAL: Duration = Duration::from_secs(10 * 60);
 
-/// Cadence for the dedicated `/api/heartbeat` check-in. Fixed and independent of
+/// Cadence for the dedicated `/v1/work/heartbeat` check-in. Fixed and independent of
 /// the work-claim poll so a busy worker — prefetch buffer full, never polling
-/// `/api/next` — still reports liveness, RSS, load, and queue depth on time.
+/// `/v1/work/next` — still reports liveness, RSS, load, and queue depth on time.
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
 
 /// Upper bound on how long [`run`] waits for in-flight analyses to drain after
@@ -796,6 +797,8 @@ pub(crate) struct Startup {
     pub(crate) nice: i32,
     /// A sample tree this worker can read directly, skipping the download.
     pub(crate) data_dir: Option<PathBuf>,
+    /// The third-party scanners every sample is also run through.
+    pub(crate) scanners: postdoc::scanners::Settings,
     /// Where the rules and the model come from.
     pub(crate) rules: RulesStartup,
 }
@@ -840,6 +843,10 @@ impl Startup {
             nice: self.nice,
         });
 
+        // Before the rules, which take minutes: a scanner named but not
+        // answering should fail the start at once.
+        let scanners =
+            postdoc::scanners::Scanners::start(self.scanners).context("third-party scanners")?;
         let renew_rules = self.rules.refresh != Refresh::Skip;
         let rules = self.rules.resolve()?;
         rules
@@ -860,6 +867,7 @@ impl Startup {
             renew_rules,
             nice: self.nice,
             rules,
+            scanners: Arc::new(scanners),
             tuning,
         })
     }
@@ -1006,6 +1014,8 @@ pub(crate) struct WorkerConfig {
     pub(crate) nice: i32,
     /// The rules and model every job analyzes with.
     pub(crate) rules: Rules,
+    /// The third-party scanners every job also runs.
+    pub(crate) scanners: Arc<postdoc::scanners::Scanners>,
     /// Operator knobs from the `SCAN_*` environment.
     pub(crate) tuning: WorkerTuning,
 }
@@ -1145,10 +1155,8 @@ impl Default for WorkerTuning {
             breadcrumb_every: None,
             stuck_warn_after: Duration::from_secs(300),
             stall_warn_after: Duration::from_secs(15 * 60),
-            stall_abort_after: Some(Duration::from_secs(30 * 60)),
-            analysis_timeout: Some(Duration::from_secs(
-                crate::server::DEFAULT_ANALYSIS_TIMEOUT_SECS,
-            )),
+            stall_abort_after: None,
+            analysis_timeout: None,
         }
     }
 }
@@ -1579,7 +1587,7 @@ struct ClaimJob {
     #[serde(default)]
     file_type: String,
     /// Whether hopper holds registry-metadata provenance for this sample. When
-    /// set, the worker fetches it (`/api/provenance/{sha256}`) and reasons over
+    /// set, the worker fetches it (`/v1/files/{sha256}/provenance`) and reasons over
     /// the same registry facts a live `pkg`/`url` scan would — without a
     /// refetch. A second round-trip is wasted when absent, so hopper flags it
     /// here on the claim it already has to send.
@@ -2317,6 +2325,8 @@ struct WorkerShared {
     max_jobs: Option<u64>,
     exit_if_empty: bool,
     slow_rule_ms: u64,
+    /// Third-party scanners run on every sample after scan's analysis.
+    scanners: Arc<postdoc::scanners::Scanners>,
     /// `--data-dir`: samples read in place.
     data_root: Option<PathBuf>,
     /// Built in the background from `data_root`. Until it lands, jobs resolve
@@ -2491,6 +2501,7 @@ impl WorkerShared {
             max_jobs: config.max_jobs,
             exit_if_empty: config.exit_if_empty,
             slow_rule_ms: config.rules.slow_rule_ms,
+            scanners: Arc::clone(&config.scanners),
             data_root: config.data_dir.clone(),
             local_index: OnceLock::new(),
             target_depth,
@@ -2888,7 +2899,7 @@ async fn finish_job(
                 .is_some()
                 .then(|| (out.result.clone(), out.elapsed));
             let verdict = Verdict {
-                envelope: out.result.into_envelope(),
+                result: out.result,
                 deps: out.deps,
                 elapsed: out.elapsed,
             };
@@ -3541,7 +3552,7 @@ fn log_breadcrumbs(message: &'static str, level: tracing::Level) {
 /// what it last asked hopper for, what it got, and how long since it asked.
 #[derive(Default)]
 struct PollState {
-    /// `WorkerMetrics::start`-relative seconds of the last `/api/next` attempt.
+    /// `WorkerMetrics::start`-relative seconds of the last `/v1/work/next` attempt.
     /// A `poll_age` far past the poll cadence means the loop is wedged.
     last_poll_secs: AtomicU64,
     /// Jobs requested on the last poll.
@@ -3567,7 +3578,7 @@ struct HeartbeatReport {
     /// Memory ceiling that throttles intake (resolved `--max-rss-gb`), in MiB;
     /// 0 = gate disabled. This is the worker's RAM limit.
     mem_ceiling_mb: u64,
-    /// Time since the prefetcher last polled `/api/next` (large = stalled).
+    /// Time since the prefetcher last polled `/v1/work/next` (large = stalled).
     poll_age: Duration,
     /// Jobs requested and returned on the last poll, and current free buffer room.
     last_want: usize,
@@ -3580,7 +3591,7 @@ struct HeartbeatReport {
 }
 
 impl WorkerShared {
-    /// Time since the prefetcher last polled `/api/next`.
+    /// Time since the prefetcher last polled `/v1/work/next`.
     fn poll_age(&self) -> Duration {
         let last = Duration::from_secs(self.poll_state.last_poll_secs.load(Ordering::Acquire));
         self.metrics.start.elapsed().saturating_sub(last)
@@ -3603,15 +3614,16 @@ impl WorkerShared {
     }
 }
 
-/// Dedicated check-in. The claim loop only contacts hopper via `/api/next`
+/// Dedicated check-in. The claim loop only contacts hopper via `/v1/work/next`
 /// when the prefetch buffer has room, so a saturated worker can go long
-/// stretches without reporting. This pings `/api/heartbeat` on a fixed cadence
+/// stretches without reporting. This pings `/v1/work/heartbeat` on a fixed cadence
 /// regardless of buffer state, carrying live RSS, load, and an accurate queue
 /// depth (staged backlog + running slots).
 async fn heartbeat_loop(shared: Arc<WorkerShared>) {
     while !shared.stop.sleep(HEARTBEAT_INTERVAL).await {
-        let url = shared.hopper.heartbeat_url(&shared.heartbeat_report());
-        match shared.hopper.get(url).send().await {
+        let url = shared.hopper.url(["v1", "work", "heartbeat"]);
+        let form = shared.hopper.heartbeat_form(&shared.heartbeat_report());
+        match shared.hopper.post_form(url, form).send().await {
             Ok(resp) if resp.status().is_success() => {}
             Ok(resp) => {
                 tracing::debug!(status = %resp.status(), "heartbeat: non-success response");
@@ -3675,14 +3687,14 @@ async fn prefetch_loop(shared: Arc<WorkerShared>, tx: mpsc::UnboundedSender<Pref
         // Cap a single response to `slots`; the shared download gate also
         // bounds active requests across overlapping claim bursts.
         let count = room.min(shared.slots);
-        let url = shared.hopper.poll_url(count, shared.slots);
+        let form = shared.hopper.poll_form(count, shared.slots);
         // Stamp the poll so the heartbeat can report poll age and want/claim.
         shared
             .poll_state
             .last_poll_secs
             .store(shared.metrics.start.elapsed().as_secs(), Ordering::Release);
         shared.poll_state.last_want.store(count, Ordering::Release);
-        match shared.hopper.claim(&url).await {
+        match shared.hopper.claim(form.clone()).await {
             Ok(None) => {
                 shared.poll_state.last_claim.store(0, Ordering::Release);
                 consecutive_errors = 0;
@@ -3772,7 +3784,7 @@ async fn prefetch_loop(shared: Arc<WorkerShared>, tx: mpsc::UnboundedSender<Pref
                 consecutive_errors += 1;
                 let backoff = backoff_duration(consecutive_errors);
                 tracing::warn!(
-                    url = %url,
+                    form = %form,
                     error = %format!("{e:#}"),
                     backoff_secs = backoff.as_secs(),
                     consecutive_errors,
@@ -4195,15 +4207,34 @@ async fn run_job(
                 phase: Some(&phase),
                 root_registry: root_registry.as_ref(),
                 deps_for_upload: true,
+                upload: true,
                 cpu_lease,
                 ..scan::analysis::Analysis::new(&label, &resources, shared.slow_rule_ms)
             };
+            // The third-party scanners read the same bytes, after scan, so
+            // their opinions ride the upload and any LLM amendment of it.
+            let scanned = |mut result: scan::engine::ScanResult, input| {
+                shared.scanners.run(&mut result, input);
+                result
+            };
             let result = match (payload, local.as_ref()) {
                 (Some(PrefetchData::Memory(data)), _) => {
-                    classify_bytes(data.into_analysis(), analysis)
+                    let bytes = data.into_analysis();
+                    classify_bytes(bytes.clone(), analysis).map(|result| {
+                        scanned(
+                            result,
+                            Input::Bytes {
+                                bytes: &bytes,
+                                name: &label,
+                            },
+                        )
+                    })
                 }
-                (Some(PrefetchData::Spooled(spooled)), _) => classify_file(&spooled.path, analysis),
-                (_, Some(path)) => classify_file(path, analysis),
+                (Some(PrefetchData::Spooled(spooled)), _) => classify_file(&spooled.path, analysis)
+                    .map(|result| scanned(result, Input::Path(&spooled.path))),
+                (_, Some(path)) => {
+                    classify_file(path, analysis).map(|result| scanned(result, Input::Path(path)))
+                }
                 (None | Some(PrefetchData::Local), None) => Err(anyhow::anyhow!(
                     "no downloaded bytes and no local path for {label}"
                 )),
@@ -4463,7 +4494,7 @@ async fn second_opinion(
     if let Ok(Some(result)) = amended {
         shared.llm_reposted.fetch_add(1, Ordering::Relaxed);
         let verdict = Verdict {
-            envelope: result.into_envelope(),
+            result,
             deps: Vec::new(),
             elapsed,
         };
@@ -4474,15 +4505,26 @@ async fn second_opinion(
     }
 }
 
+/// Why an analysis produced no verdict, in the version 7 form hopper still
+/// takes for failures.
+#[derive(serde::Serialize)]
+struct Failure<'a> {
+    sha256: &'a str,
+    worker: &'a str,
+    error: &'a str,
+    duration_ms: u64,
+}
+
 /// A verdict ready to post.
 struct Verdict {
-    envelope: scan::engine::ScanResultEnvelope,
+    /// Classified for upload: the body posted is its version 8 encoding.
+    result: scan::engine::ScanResult,
     /// Fetched dependencies to mirror into hopper once the result is stored.
     deps: Vec<scan::engine::DepResult>,
     elapsed: Duration,
 }
 
-/// What a job posts to `/api/result`.
+/// What a job posts to `/v1/work/result`.
 enum Post {
     /// The ML verdict, as soon as the analysis is done.
     Verdict(Verdict),
@@ -4504,7 +4546,7 @@ struct Hopper {
     /// The analyzer tools this host has, comma-separated, so hopper routes it
     /// only work it can finish.
     tools: String,
-    /// Bearer token; hopper requires it on all of `/api/*` and `/data/`, and
+    /// Bearer token; hopper requires it on all of `/v1/*` and `/data/`, and
     /// does not exempt loopback. See [`scan::hopper::token`].
     token: Option<&'static str>,
     input_budget: Option<Arc<InputBudget>>,
@@ -4600,23 +4642,32 @@ impl Hopper {
         pairs
     }
 
-    /// The `/api/next` URL for a claim of `count` jobs. `max_bytes` keeps
+    /// POST `form`, already encoded, to `url` as a form body.
+    fn post_form(&self, url: Url, form: String) -> reqwest::RequestBuilder {
+        self.authed(self.client.post(url))
+            .header(
+                reqwest::header::CONTENT_TYPE,
+                "application/x-www-form-urlencoded",
+            )
+            .body(form)
+    }
+
+    /// The `/v1/work/next` form for a claim of `count` jobs. `max_bytes` keeps
     /// hopper from handing out files no worker here would analyze.
-    fn poll_url(&self, count: usize, slots: usize) -> Url {
-        let mut url = self.url(["api", "next"]);
-        url.query_pairs_mut()
+    fn poll_form(&self, count: usize, slots: usize) -> String {
+        form_urlencoded::Serializer::new(String::new())
             .extend_pairs([
                 ("count", count.to_string()),
                 ("slots", slots.to_string()),
                 ("max_bytes", MAX_JOB_BYTES.to_string()),
             ])
-            .extend_pairs(self.identity());
-        url
+            .extend_pairs(self.identity())
+            .finish()
     }
 
-    /// The `/api/heartbeat` URL: the poll's identity plus this worker's queue
-    /// view and recent metrics. It claims no work.
-    fn heartbeat_url(&self, report: &HeartbeatReport) -> Url {
+    /// The `/v1/work/heartbeat` form: the poll's identity plus this worker's
+    /// queue view and recent metrics. It claims no work.
+    fn heartbeat_form(&self, report: &HeartbeatReport) -> String {
         let metrics = &report.metrics;
         let mut pairs: Vec<(&'static str, String)> = vec![
             ("slots", report.slots.to_string()),
@@ -4624,7 +4675,7 @@ impl Hopper {
             ("queue", report.queue.to_string()),
         ];
         // In-progress sha256s so hopper renews their claim leases. Bounded by
-        // the slot count, so the query stays short.
+        // the slot count, so the form stays short.
         if !report.active_shas.is_empty() {
             let joined: Vec<&str> = report.active_shas.iter().map(AsRef::as_ref).collect();
             pairs.push(("active_shas", joined.join(",")));
@@ -4641,7 +4692,7 @@ impl Hopper {
         pairs.push(("errs", metrics.errors_recent.to_string()));
         if let Some((age, msg)) = &metrics.last_error {
             pairs.push(("err_age_s", age.as_secs().to_string()));
-            // Trimmed to keep the URL bounded; hopper shows a short summary.
+            // Trimmed to keep the form bounded; hopper shows a short summary.
             pairs.push(("err", msg.chars().take(200).collect()));
         }
         // Why the worker is (or isn't) claiming. `mem_ceiling_mb` is the RAM
@@ -4655,27 +4706,29 @@ impl Hopper {
             ("last_claim", report.last_claim.to_string()),
             ("buffer_room", report.buffer_room.to_string()),
         ]);
-        let mut url = self.url(["api", "heartbeat"]);
-        url.query_pairs_mut()
+        form_urlencoded::Serializer::new(String::new())
             .extend_pairs(pairs)
-            .extend_pairs(self.identity());
-        url
+            .extend_pairs(self.identity())
+            .finish()
     }
 
-    /// Poll `/api/next` once. `Ok(None)` means no work is available now.
-    async fn claim(&self, url: &Url) -> Result<Option<Vec<ClaimJob>>> {
-        let resp = self.get(url.clone()).send().await.map_err(|e| {
-            let error_text = e.to_string();
-            let is_connect = e.is_connect();
-            anyhow::Error::new(e).context(poll_request_context(
-                url.as_str(),
-                &error_text,
-                is_connect,
-            ))
-        })?;
-        if resp.status() == reqwest::StatusCode::NO_CONTENT {
-            return Ok(None);
-        }
+    /// Poll `/v1/work/next` once with a [`Self::poll_form`] body. `Ok(None)`
+    /// means no work is available now: hopper answers an empty `jobs` list.
+    async fn claim(&self, form: String) -> Result<Option<Vec<ClaimJob>>> {
+        let url = self.url(["v1", "work", "next"]);
+        let resp = self
+            .post_form(url.clone(), form)
+            .send()
+            .await
+            .map_err(|e| {
+                let error_text = e.to_string();
+                let is_connect = e.is_connect();
+                anyhow::Error::new(e).context(poll_request_context(
+                    url.as_str(),
+                    &error_text,
+                    is_connect,
+                ))
+            })?;
         if !resp.status().is_success() {
             let status = resp.status();
             let body = error_excerpt(resp).await;
@@ -4697,80 +4750,83 @@ impl Hopper {
 
     /// Post a result, retrying transient failures. A posted verdict's fetched
     /// dependencies are then mirrored into hopper as their own samples.
+    ///
+    /// A verdict is scan's version 8 body. A failure has no version 8 form
+    /// hopper can classify yet, so it is sent as version 7's error object,
+    /// which hopper reads as missing, timed out, unsupported or failed.
     async fn post_result(&self, sha256: &str, post: Post) {
         let (verdict, amended) = match post {
             Post::Verdict(verdict) => (verdict, false),
             Post::Amended(verdict) => (verdict, true),
             Post::Failed(error) => {
-                let payload = scan::upload::ResultPayload {
-                    sha256: sha256.to_string(),
-                    worker: self.worker.clone(),
-                    error: Some(error),
+                let failure = Failure {
+                    sha256,
+                    worker: &self.worker,
+                    error: &error,
                     duration_ms: 0,
-                    envelope: None,
                 };
-                self.send_result(sha256, payload, None).await;
+                match serde_json::to_vec(&failure) {
+                    Ok(body) => {
+                        self.send_result(sha256, body, "application/json", None, None)
+                            .await;
+                    }
+                    Err(e) => {
+                        tracing::error!(sha256 = %sha256, error = %e, "post result: failure could not be encoded");
+                    }
+                }
                 return;
             }
         };
         let Verdict {
-            envelope,
+            result,
             deps,
             elapsed,
         } = verdict;
-        // v7 envelope no longer carries `class` on the wire; the verdict is
-        // encoded in `lvl` (clean = benign, anything else = hostile). The
-        // suspicious band is consumer-side and not visible here.
-        let class = if envelope.ml.level == scan::model::Level::Clean {
-            "benign"
-        } else {
-            "hostile"
-        };
+        let class = result.classification;
+        let ms = scan::duration_ms(elapsed);
         if amended {
-            tracing::info!(sha256 = %sha256, verdict = class, "LLM amended the posted verdict");
+            tracing::info!(sha256 = %sha256, verdict = %class, "LLM amended the posted verdict");
         } else {
-            tracing::info!(sha256 = %sha256, duration_ms = scan::duration_ms(elapsed), verdict = class, "analysis complete");
+            tracing::info!(sha256 = %sha256, duration_ms = ms, verdict = %class, "analysis complete");
         }
-        let deps = (!deps.is_empty()).then(|| {
-            (
-                deps,
-                envelope.ml.version.clone(),
-                envelope.ml.analyzed_at.clone(),
-            )
-        });
-        let payload = scan::upload::ResultPayload {
-            sha256: sha256.to_string(),
-            worker: self.worker.clone(),
-            error: None,
-            duration_ms: i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX),
-            envelope: Some(envelope),
+        let deps =
+            (!deps.is_empty()).then(|| (deps, result.version.clone(), result.analyzed_at.clone()));
+        // Encoded and compressed once, off the async threads, by the same
+        // code as `atomscan --hopper`, so both send hopper the same body.
+        let encoded = {
+            let sha256 = sha256.to_owned();
+            let worker = self.worker.clone();
+            tokio::task::spawn_blocking(move || {
+                scan::upload::encode_result_body(&result, &sha256, &worker, Some(ms))
+            })
+            .await
         };
-        self.send_result(sha256, payload, deps).await;
+        // `None` means the body could not be written; it is logged there.
+        let Ok(Some((body, encoding))) = encoded else {
+            return;
+        };
+        self.send_result(
+            sha256,
+            body,
+            scan::upload::RESULT_CONTENT_TYPE,
+            encoding,
+            deps,
+        )
+        .await;
     }
 
-    /// POST one result body to `/api/result`, retrying transient failures,
+    /// POST one result body to `/v1/work/result`, retrying transient failures,
     /// then mirror `deps` once it is stored.
     async fn send_result(
         &self,
         sha256: &str,
-        payload: scan::upload::ResultPayload,
+        body: Vec<u8>,
+        content_type: &'static str,
+        encoding: Option<&'static str>,
         deps: Option<(Vec<scan::engine::DepResult>, String, String)>,
     ) {
-        // Serialize and compress once, off the async threads (cleave reports
-        // are large, repetitive JSON that zstd shrinks 3-5x), then reuse the
-        // bytes across retries. Shared with the local `scan path --hopper`
-        // uploader so both speak hopper's `/api/result` byte-identically.
-        let encoded = {
-            let sha256 = sha256.to_owned();
-            tokio::task::spawn_blocking(move || scan::upload::encode_result_body(payload, &sha256))
-                .await
-        };
-        // `None` means serialization failed unrecoverably; it is logged there.
-        let Ok(Some((body, encoding))) = encoded else {
-            return;
-        };
         let body = bytes::Bytes::from(body);
-        let url = self.url(["api", "result"]);
+        let url = self.url(["v1", "work", "result"]);
 
         // Retry with the same exponential-backoff-with-jitter schedule as poll
         // failures (2s, 4s, 8s, 16s, 32s, then capped at ~60s) for up to
@@ -4791,7 +4847,7 @@ impl Hopper {
             let post_start = Instant::now();
             let mut request = self
                 .authed(self.client.post(url.clone()))
-                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .header(reqwest::header::CONTENT_TYPE, content_type)
                 .body(body.clone());
             if let Some(enc) = encoding {
                 request = request.header(reqwest::header::CONTENT_ENCODING, enc);
@@ -4870,7 +4926,7 @@ impl Hopper {
 
     /// Download file bytes from hopper, verifying their SHA-256. Tries the
     /// fast `/data/{path}` endpoint first (static file serving, no DB query),
-    /// falling back to `/api/file/{sha256}` for older hopper versions.
+    /// falling back to `/v1/files/{sha256}` for older hopper versions.
     // Retained as the MAX_JOB_BYTES-capped entry point; production staging
     // goes through `download_bytes_with_limit` with the tighter RAM limit.
     #[allow(dead_code)]
@@ -5091,12 +5147,12 @@ impl Hopper {
         let data_status = resp.status();
         let data_body = error_excerpt(resp).await;
 
-        // /data/ failed — fall back to /api/file/{sha256}, which looks the
+        // /data/ failed — fall back to /v1/files/{sha256}, which looks the
         // sample up by hash, so it works even when the relative path doesn't
         // match hopper's data root (a different symlink resolution or a data
         // root migration).
-        let api_url = self.url(["api", "file", sha256]);
-        tracing::debug!(sha256 = %sha256, url = %api_url, "downloading via /api/file/ (fallback)");
+        let api_url = self.url(["v1", "files", sha256]);
+        tracing::debug!(sha256 = %sha256, url = %api_url, "downloading via /v1/files/ (fallback)");
         let resp = self.get(api_url.clone()).send().await.with_context(|| {
             format!("download fallback failed: path={path} sha256={sha256} url={api_url}")
         })?;
@@ -5104,15 +5160,16 @@ impl Hopper {
             let api_status = resp.status();
             let api_body = error_excerpt(resp).await;
             anyhow::bail!(
-                "download failed: path={path} sha256={sha256}; /data/ url={data_url} status={data_status} body={data_body}; /api/file/ url={api_url} status={api_status} body={api_body}",
+                "download failed: path={path} sha256={sha256}; /data/ url={data_url} status={data_status} body={data_body}; /v1/files/ url={api_url} status={api_status} body={api_body}",
             );
         }
-        Ok((resp, "/api/file/ (fallback)"))
+        Ok((resp, "/v1/files/ (fallback)"))
     }
 
     /// Fetch the registry-metadata provenance hopper holds for `sha256`,
     /// preserving the complete JSON document alongside its normalized registry
-    /// record. Best-effort by design: an absent record (HTTP 204), an
+    /// record. Best-effort by design: an absent record (HTTP 404, error code
+    /// `no_provenance`, or `unknown_artifact` for a file hopper lacks), an
     /// unreachable hopper, or a malformed body all yield `None` — registry
     /// provenance enriches a scan but must never fail one, exactly as a live
     /// scan fails open when a registry lookup can't be made.
@@ -5120,7 +5177,7 @@ impl Hopper {
         &self,
         sha256: &str,
     ) -> Option<scan::provenance::RegistryProvenance> {
-        let url = self.url(["api", "provenance", sha256]);
+        let url = self.url(["v1", "files", sha256, "provenance"]);
         let resp = match self.get(url).send().await {
             Ok(resp) => resp,
             Err(e) => {
@@ -5139,7 +5196,7 @@ impl Hopper {
                 return None;
             }
         };
-        // 204 No Content (no stored provenance) arrives as an empty success body.
+        // An empty body carries no provenance.
         if body.is_empty() {
             return None;
         }
@@ -5174,7 +5231,7 @@ pub(crate) fn body_excerpt(body: &str) -> String {
     out
 }
 
-/// Largest `/api/next` claim body accepted. A claim is a few hundred bytes a
+/// Largest `/v1/work/next` claim body accepted. A claim is a few hundred bytes a
 /// job; this leaves room for any `count` the worker asks for and still stops
 /// a peer from streaming until the worker runs out of memory.
 const MAX_CLAIM_BODY: usize = 64 * 1024 * 1024;
@@ -5381,6 +5438,7 @@ mod tests {
                 fetch: scan::fetch::FetchPolicy::default(),
                 zip_passwords: scan::ArchivePasswords::default(),
             },
+            scanners: Arc::default(),
             tuning: WorkerTuning::default(),
         }
     }
@@ -5684,7 +5742,7 @@ mod tests {
     #[test]
     fn poll_request_context_hints_for_https_to_http_mismatch() {
         let context = poll_request_context(
-            "https://10.9.8.5:8081/api/next",
+            "https://10.9.8.5:8081/v1/work/next",
             "client error (Connect): received corrupt message of type InvalidContentType",
             true,
         );
@@ -5695,36 +5753,59 @@ mod tests {
     #[test]
     fn poll_request_context_avoids_hint_for_other_errors() {
         let context = poll_request_context(
-            "https://10.9.8.5:8081/api/next",
+            "https://10.9.8.5:8081/v1/work/next",
             "dns error: failed to lookup address information",
             true,
         );
         assert!(!context.contains("Try http://"));
     }
 
-    // Minimal in-process hopper: serves `/api/next` (returning exactly the
+    // Minimal in-process hopper: serves `/v1/work/next` (returning exactly the
     // requested `count` of distinct jobs, an unlimited supply) and `/data/...`
     // (a fixed payload). Zero extra dependencies — just tokio, already in tree.
     async fn read_target(stream: &mut tokio::net::TcpStream) -> Option<String> {
+        read_request(stream).await.map(|(target, _)| target)
+    }
+
+    /// The request target and its body. The body is read to its
+    /// `Content-Length`, so a fixture that answers and closes never leaves a
+    /// POST form unread, which would reset the connection under the client.
+    async fn read_request(stream: &mut tokio::net::TcpStream) -> Option<(String, String)> {
         use tokio::io::AsyncReadExt;
         let mut buf = Vec::new();
         let mut tmp = [0u8; 1024];
-        loop {
+        let header_end = loop {
+            if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                break pos + 4;
+            }
+            if buf.len() > 16 * 1024 {
+                break buf.len();
+            }
+            let n = stream.read(&mut tmp).await.ok()?;
+            if n == 0 {
+                break buf.len();
+            }
+            buf.extend_from_slice(&tmp[..n]);
+        };
+        let head = String::from_utf8_lossy(&buf[..header_end]).into_owned();
+        let target = head.lines().next()?.split_whitespace().nth(1)?.to_string();
+        let length: usize = head
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse().ok())?
+            })
+            .unwrap_or(0);
+        while buf.len() < header_end + length {
             let n = stream.read(&mut tmp).await.ok()?;
             if n == 0 {
                 break;
             }
             buf.extend_from_slice(&tmp[..n]);
-            if buf.windows(4).any(|w| w == b"\r\n\r\n") {
-                break;
-            }
-            if buf.len() > 16 * 1024 {
-                break;
-            }
         }
-        let text = String::from_utf8_lossy(&buf);
-        let line = text.lines().next()?;
-        line.split_whitespace().nth(1).map(str::to_string)
+        let body = String::from_utf8_lossy(&buf[header_end..]).into_owned();
+        Some((target, body))
     }
 
     async fn respond(stream: &mut tokio::net::TcpStream, status: &str, body: &[u8]) {
@@ -5770,7 +5851,7 @@ mod tests {
             let target = read_target(&mut stream).await.expect("request target");
             assert_eq!(
                 target,
-                "/api/provenance/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                "/v1/files/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/provenance"
             );
             respond(&mut stream, "200 OK", body).await;
         });
@@ -5784,9 +5865,9 @@ mod tests {
         server.await.expect("mock hopper task");
     }
 
-    fn parse_count(target: &str) -> usize {
-        target
-            .split(['?', '&'])
+    /// The `count` a `/v1/work/next` form body asks for.
+    fn parse_count(form: &str) -> usize {
+        form.split('&')
             .find_map(|kv| kv.strip_prefix("count="))
             .and_then(|v| v.parse().ok())
             .unwrap_or(0)
@@ -6074,7 +6155,7 @@ mod tests {
         }
     }
 
-    /// Spawn a hopper that always answers `/api/next` with "no work", and run a
+    /// Spawn a hopper that always answers `/v1/work/next` with "no work", and run a
     /// prefetcher against it until `done` says stop. Returns whatever was logged.
     async fn run_against_empty_hopper(exit_if_empty: bool, done: &str) -> CapturedLog {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -6083,8 +6164,8 @@ mod tests {
             while let Ok((mut stream, _)) = listener.accept().await {
                 tokio::spawn(async move {
                     if read_target(&mut stream).await.is_some() {
-                        // 204: hopper is up and has nothing for this worker.
-                        respond(&mut stream, "204 No Content", b"").await;
+                        // An empty list: hopper is up and has nothing for this worker.
+                        respond(&mut stream, "200 OK", br#"{"jobs":[]}"#).await;
                     }
                 });
             }
@@ -6762,12 +6843,12 @@ mod tests {
                     let api_calls = Arc::clone(&api_calls);
                     let next_id = Arc::clone(&next_id);
                     tokio::spawn(async move {
-                        let Some(target) = read_target(&mut stream).await else {
+                        let Some((target, body)) = read_request(&mut stream).await else {
                             return;
                         };
-                        if target.starts_with("/api/next") {
+                        if target == "/v1/work/next" {
                             api_calls.fetch_add(1, Ordering::Relaxed);
-                            let count = parse_count(&target);
+                            let count = parse_count(&body);
                             let jobs: Vec<_> = (0..count)
                                 .map(|_| {
                                     let id = next_id.fetch_add(1, Ordering::Relaxed);
@@ -7460,11 +7541,10 @@ mod tests {
     }
 
     #[test]
-    fn the_default_analysis_deadline_is_the_servers() {
-        assert_eq!(
-            WorkerTuning::default().analysis_timeout,
-            Some(secs(crate::server::DEFAULT_ANALYSIS_TIMEOUT_SECS))
-        );
+    fn analyses_and_stalls_have_no_default_deadline() {
+        assert_eq!(crate::server::DEFAULT_ANALYSIS_TIMEOUT_SECS, 0);
+        assert_eq!(WorkerTuning::default().analysis_timeout, None);
+        assert_eq!(WorkerTuning::default().stall_abort_after, None);
     }
 
     /// Each sample-path segment is encoded on its own, so a path can neither
@@ -7479,21 +7559,22 @@ mod tests {
         );
         let prefixed = test_hopper("https://hops.example/hopper/");
         assert_eq!(
-            prefixed.url(["api", "next"]).as_str(),
-            "https://hops.example/hopper/api/next"
+            prefixed.url(["v1", "work", "next"]).as_str(),
+            "https://hops.example/hopper/v1/work/next"
         );
     }
 
     #[test]
-    fn poll_and_heartbeat_urls_carry_the_routing_signals() {
+    fn poll_and_heartbeat_forms_carry_the_routing_signals() {
         let hopper = test_hopper("http://hopper.test");
-        let poll = hopper.poll_url(3, 8);
-        assert_eq!(poll.path(), "/api/next");
-        let keys: HashSet<String> = poll.query_pairs().map(|(k, _)| k.into_owned()).collect();
+        let poll = hopper.poll_form(3, 8);
+        let keys: HashSet<String> = form_urlencoded::parse(poll.as_bytes())
+            .map(|(k, _)| k.into_owned())
+            .collect();
         for key in ["count", "slots", "max_bytes", "worker", "version", "tools"] {
-            assert!(keys.contains(key), "poll URL lacks {key}: {poll}");
+            assert!(keys.contains(key), "poll form lacks {key}: {poll}");
         }
-        assert!(poll.query_pairs().any(|(k, v)| k == "count" && v == "3"));
+        assert!(form_urlencoded::parse(poll.as_bytes()).any(|(k, v)| k == "count" && v == "3"));
 
         let report = HeartbeatReport {
             slots: 8,
@@ -7514,10 +7595,8 @@ mod tests {
                 last_error: Some((secs(7), "boom & bust".to_string())),
             },
         };
-        let beat = hopper.heartbeat_url(&report);
-        assert_eq!(beat.path(), "/api/heartbeat");
-        let pairs: HashMap<String, String> = beat
-            .query_pairs()
+        let beat = hopper.heartbeat_form(&report);
+        let pairs: HashMap<String, String> = form_urlencoded::parse(beat.as_bytes())
             .map(|(k, v)| (k.into_owned(), v.into_owned()))
             .collect();
         assert_eq!(pairs["active_shas"], "aa,bb");
@@ -7588,6 +7667,27 @@ mod tests {
         assert!(
             cancel.load(Ordering::Acquire),
             "abort must raise the cancel flag"
+        );
+    }
+
+    /// A failure goes to hopper in version 7's error shape, the only one it
+    /// classifies a failure from.
+    #[test]
+    fn a_failure_is_sent_in_the_shape_hopper_classifies() {
+        let failure = Failure {
+            sha256: "ab",
+            worker: "w1",
+            error: "analysis exceeded its deadline",
+            duration_ms: 0,
+        };
+        assert_eq!(
+            serde_json::to_value(&failure).expect("serializes"),
+            serde_json::json!({
+                "sha256": "ab",
+                "worker": "w1",
+                "error": "analysis exceeded its deadline",
+                "duration_ms": 0,
+            })
         );
     }
 }

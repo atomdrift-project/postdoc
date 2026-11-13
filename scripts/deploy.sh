@@ -162,6 +162,8 @@ fi
 $SUDO install -d -m0750 -o "$SERVICE_USER" -g "$SERVICE_USER" "$STATE_HOME"
 $SUDO install -d -m0700 -o "$SERVICE_USER" -g "$SERVICE_USER" "$STATE_HOME/.tok"
 
+# The scanners postdoc checks at startup, installed and running before it is.
+ensure_scanners Linux "$SERVICE_USER"
 install_credentials
 
 # ProtectControlGroups=true blocks the cgroup delegation `serve` needs to

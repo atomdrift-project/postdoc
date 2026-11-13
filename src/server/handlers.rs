@@ -206,12 +206,8 @@ pub(super) async fn status(
 
     let (key_purl, key_sha) = (purl.clone(), sha.clone());
     let complete = index_query(move |index| {
-        key_purl
-            .as_deref()
-            .is_some_and(|p| index.purl(p).is_some())
-            || key_sha
-                .as_deref()
-                .is_some_and(|s| index.sha(s).is_some())
+        key_purl.as_deref().is_some_and(|p| index.purl(p).is_some())
+            || key_sha.as_deref().is_some_and(|s| index.sha(s).is_some())
     })
     .await
     .unwrap_or(false);

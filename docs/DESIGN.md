@@ -22,39 +22,53 @@ trait floor rule is scan's. The firing level is azoth's, read through scan.
 The per-file LLM blend, including whether and how far it may loosen, is
 scan's interpreter. The differential severity, its band mapping, and the
 diff LLM's authority are isomer's. postdoc owns two things only: the order
-the judges run in and the `max` that folds the two engines' outcomes. It has
+the engines run in and the `max` that folds the two engines' outcomes. It has
 no thresholds, no trait lists, no prompts, and no opinion about LLMs.
 
-## Judges
+## Jurors
 
-A judge is one engine with one opinion. Five run:
+A juror is one engine with one opinion. Five can speak on an artifact:
 
-| Key        | Engine                        | Opinion                                     | Folded by |
-|------------|-------------------------------|---------------------------------------------|-----------|
-| `cleave`   | cleave traits + scan's floor  | floor: hostile / suspicious / none          | scan      |
-| `ml`       | azoth via scan                | firing level (`fires_at`)                   | scan      |
-| `llm`      | scan's per-file interpreter   | benign / suspicious / hostile, scan's bound | scan      |
-| `diff`     | isomer over (baseline, new)   | isomer severity, mapped to a band by isomer | isomer    |
-| `diff_llm` | isomer's per-diff interpreter | benign / suspicious / malicious             | isomer    |
+| Key         | Engine                        | Opinion                                     | Folded by |
+|-------------|-------------------------------|---------------------------------------------|-----------|
+| `ml`        | azoth via scan                | firing level (`fires_at`)                   | scan      |
+| `floor`     | cleave traits + scan's floor  | floor: hostile / suspicious / none          | scan      |
+| `llm`       | scan's per-file interpreter   | benign / suspicious / hostile, scan's bound | scan      |
+| `drift_heuristic`  | isomer over (baseline, new)   | isomer severity, mapped to a band by isomer | isomer    |
+| `drift_llm` | isomer's per-diff interpreter | benign / suspicious / hostile               | isomer    |
 
-`cleave` is the rule scan today calls the trait floor (`apply_trait_floor` in
-scan's engine): a model-benign file is raised to hostile when confident
-crit-5 traits are corroborated across enough trait families, or to suspicious
-when confident crit-4 traits span enough families. postdoc surfaces it as its
-own judge instead of leaving it folded silently into the ML level.
+The first three are scan's, written by scan's upload document exactly as
+`atomscan --hopper` writes them (scan's `JSON_PLAN.md`, "Jurors"). postdoc
+adds the two drift jurors with `UploadDoc::set_juror`, only on the artifact's
+own line and only when there was a baseline ([JSON.md](JSON.md)).
+
+`floor` is the rule scan calls the trait floor (`apply_trait_floor` in scan's
+engine): a model-benign file is raised to hostile when confident crit-5
+traits are corroborated across enough trait families, or to suspicious when
+confident crit-4 traits span enough families.
 
 `ml` is the raw azoth decision, before the floor. Its `fires_at` is the
 tightest false-positive budget per 100M benign files at which the file grades
-hostile, `-1` when it never fires, `null` in manual-threshold mode. This is
-the number beamline, scan's `/v1/lookup`, and hopper's `/v1/lookup` already
-gate on.
+hostile, `-1` when it never fires. This is the number beamline, scan's
+`/v1/lookup`, and hopper's `/v1/lookup` already gate on.
 
-`diff` runs only when a baseline exists (see Baseline). Isomer already maps
-model classes onto its five-level scale (`Risk::model_severity`: suspicious
-is High, hostile is Critical); the inverse mapping, Critical to hostile and
-High to suspicious, is added to isomer and postdoc calls it.
+`drift_heuristic` runs only when a baseline exists (see Baseline). Isomer maps its
+five-level scale onto scan's three bands; postdoc reads that mapping
+(`engine::isomer_severity`) and does not choose it.
 
-`llm` and `diff_llm` share one endpoint configuration, one circuit breaker,
+Third-party scanners are not jurors. Both `worker` and `serve` (and the
+server's companion idle worker, which is handed the scanners the server
+found) run ClamAV, malcontent and GuardDog on the same bytes after scan, by
+default, and record each opinion with `UploadDoc::set_scanner` under
+`scanners` ([JSON.md](JSON.md#other-scanners)). Each is checked at startup,
+and postdoc refuses to start without one it was asked for: results that
+silently lacked a scanner would read, in hopper, as that scanner having had
+nothing to say. They never move the verdict; what they
+add up to is hopper's lookup rule. Hopper treats a scanner a body leaves out
+as no statement, so `atomscan --hopper`, or a host without clamd, never
+erases another host's finding.
+
+`llm` and `drift_llm` share one endpoint configuration, one circuit breaker,
 and one concurrency budget. What each may do to a verdict is its engine's
 rule, not postdoc's: scan's interpreter moves its outcome by at most one
 band in either direction, and isomer's interpreter does whatever isomer
@@ -71,18 +85,22 @@ Two engines each produce one outcome, and postdoc keeps the worse:
 1. **scan's outcome** is the per-file verdict as scan's engine already
    computes it: the azoth decision, raised by the trait floor, then blended
    with the interpreter under scan's own bound. This is `Interpretation.
-   outcome` when the interpreter ran and the floored decision otherwise. The
-   `cleave`, `ml`, and `llm` judge objects show the pieces; scan folds them.
+   outcome` when the interpreter ran and the floored decision otherwise: the
+   artifact's `verdict` in scan's body. The `ml`, `floor`, and `llm` jurors
+   show the pieces; scan folds them.
 2. **isomer's outcome** is `Report.verdict.severity` mapped through
    `Severity::band`, with isomer's interpreter already applied by isomer's
-   rules. The `diff` and `diff_llm` judge objects show the pieces; isomer
+   rules. The `drift_heuristic` and `drift_llm` jurors show the pieces; isomer
    folds them. When there is no baseline there is no isomer outcome.
-3. `final = max(scan, isomer)`. The level is the outcome's `fires_at`; a
-   band that came from isomer takes its level from scan's `interpreted_level`,
-   the function scan's interpreter uses to place a verdict inside a band.
+3. `final = max(scan, isomer)`, and within one band the tighter level. A
+   band that came from isomer takes its level from scan's
+   `synthesized_level`, the function scan uses to place an interpreted
+   verdict inside a band.
 
-`decided_by` lists the judges whose severity equals the final one, so a
-reader can tell a model verdict from a floor verdict from a diff verdict.
+The verdict's `by` names the one juror that decided it, so a reader can tell
+a model verdict from a floor verdict from a diff verdict. When scan's outcome
+stands, `by` is scan's; when isomer's wins, it is `drift_llm` if isomer's
+interpreter moved isomer to the final band, and `drift_heuristic` otherwise.
 
 ## Baseline
 
@@ -99,9 +117,8 @@ triage code gives: there is no version grammar shared across ecosystems, and
 arrival order answers the question without inventing one.
 
 A convicted predecessor is a valid baseline. Isomer already handles the case
-where the old side is itself hostile, and the baseline's label and level are
-in the judge output so a reader can see it. When no baseline exists, `diff`
-and `diff_llm` are `skipped` with reason `no_baseline`.
+where the old side is itself hostile. The drift jurors name the baseline by
+digest (`base`). When no baseline exists, neither drift juror is present.
 
 The registry is not consulted for a predecessor in this version. Hopper is
 the corpus; a registry fallback can be added later without changing the wire
@@ -109,72 +126,13 @@ shape.
 
 ## Result JSON
 
-One object per analyzed sample. Every judge key is always present. A judge
-that did not run is `{"status": "skipped", "reason": "..."}`; one that failed
-is `{"status": "error", "reason": "..."}`. Consumers write one code path.
-
-```json
-{
-  "v": "1",
-  "sha256": "…",
-  "purl": "pkg:npm/left-pad@1.3.1",
-  "baseline": { "sha256": "…", "purl": "…", "version": "1.3.0",
-                "label": "good", "fires_at": -1 },
-  "verdict": {
-    "severity": "hostile",
-    "fires_at": 25,
-    "reason": "postinstall fetches and executes a remote script",
-    "findings": [ { "id": "…", "crit": 5, "desc": "…", "file": "…" } ],
-    "decided_by": ["ml", "diff"],
-    "engines": { "postdoc": "0.1.0", "scan": "2.12.0", "cleave": "2.12.0",
-                 "isomer": "0.5.0", "traits": "abc12345", "model": "…" },
-    "analyzed_at": "2026-09-15T12:00:00Z",
-    "duration_ms": 4120
-  },
-  "cleave":   { "status": "ok", "severity": "benign", "fires_at": null,
-                "duration_ms": 900, "version": "abc12345",
-                "raw": { …cleave CompactReport… } },
-  "ml":       { "status": "ok", "severity": "hostile", "fires_at": 25,
-                "confidence": 0.93, "duration_ms": 80, "version": "…",
-                "raw": { …scan MlSection… } },
-  "llm":      { "status": "ok", "severity": "hostile", "confidence": 0.95,
-                "duration_ms": 2100, "version": "qwen3-…",
-                "raw": { …scan Interpretation… } },
-  "diff":     { "status": "ok", "severity": "hostile", "fires_at": 25,
-                "duration_ms": 1300, "version": "0.5.0",
-                "raw": { …isomer envelope… } },
-  "diff_llm": { "status": "skipped", "reason": "no_baseline" }
-}
-```
-
-The judge envelope is the same for all five: `status`, `reason` (only when
-not ok), `severity` in postdoc's three bands, `fires_at`, `confidence` (0..1
-where the engine has one), `duration_ms`, `version`, and `raw`. `raw` is the
-engine's native output, verbatim and untrimmed: the cleave `CompactReport`,
-scan's `MlSection` and `Interpretation`, isomer's `Report` and
-`Interpretation`. No judge carries anything beside `raw`: the baseline sits at the top level
-of the result, because it describes what was analyzed rather than what any
-engine concluded.
-
-Raw output lives inside the judge that produced it. That is the right
-placement: each judge object is self-describing, a consumer learns one rule
-("the summary is the envelope, the evidence is `raw`") instead of matching
-top-level keys to judges, and no top-level field has ambiguous provenance.
-The cleave report is also the input to `ml` and `llm`, but it is cleave's
-output, and that is where it sits. The cost is that hopper's result parser
-reads `cleave.raw` instead of `raw`; hopper is changing anyway.
-
-`verdict` is scan's `V1Decision` without `decision`. `decision`
-(allow/block/unanalyzed/unavailable) depends on the caller's false-positive
-budget, so `/v1/lookup` computes it at answer time exactly as today and it is
-never stored. `verdict.findings` follows scan's existing rule (crit 4 and up,
-worst first, at most three) and `verdict.reason` is the interpreter's
-sentence, so beamline no longer has to reconstruct either from `raw`.
-
-Size is governed by `full=1`, the flag beamline already sends: without it the
-serve routes strip every `raw`; with it they return the whole object. Posts
-to hopper always carry everything, under hopper's existing body cap, and
-when over it postdoc drops `cleave.raw` first, as scan's worker does today.
+postdoc has no result shape of its own. It sends scan's version 8 body, built
+by scan's upload document, with the drift jurors added and the verdict
+folded: [JSON.md](JSON.md) lists exactly what postdoc changes, and scan's
+`JSON_PLAN.md` specifies the rest. An earlier draft of this design had a
+postdoc result object with five judge envelopes, `decided_by` and a `/v2`;
+the version 8 body carries the same opinions as jurors, so that object was
+never built.
 
 ## Modes
 
@@ -213,19 +171,12 @@ code calling a route has not shown that nobody does. More importantly, a
 drop-in cannot be a subset: the point of the swap is that nothing else has to
 change at the same time.
 
-**`/v1` does not move.** It is scan's contract and postdoc inherits it
-unchanged. New fields may appear — a JSON consumer ignores what it does not
-know, and beamline spreads the object it receives — but no field changes
-meaning, changes type, or disappears. `/v1/analyze?full=1` keeps returning
-`{ml, llm, raw}`, because beamline tests for `ml.eng` and `raw` to decide
-whether it holds a full envelope.
-
-**`/v2` is where the result object lives.** The five judges, the baseline,
-`decided_by` and everything else this design adds are a different shape, not
-an extension of the old one, so they get a different version. `/v2/lookup`
-and `/v2/analyze` answer with it. Nothing is obliged to move: `/v1` stays as
-long as it has callers, and `/v2` is opt-in per caller rather than a
-migration with a date on it.
+**`/v1` is scan's.** It is scan's contract and postdoc follows it: the same
+decision on `/v1/lookup` and `/v1/analyze`, and on `/v1/analyze?full=1` the
+full result, the version 8 body without the worker name, streamed like a
+decision: progress frames, then the body's lines. Beamline's `isFullEnvelope` still
+tests for the old `{ml, llm, raw}` envelope and needs to read the version 8
+body instead.
 
 This changes how the server gets built. The earlier draft had postdoc writing
 a small server against the `Analyzer` API. Byte-compatibility with `/v1` is
@@ -252,13 +203,10 @@ There is no one-shot CLI. `atomscan` and `isomer` remain the tools for that.
 2. **`GET /api/baseline?purl=`** answers the same query for one PURL, for
    serve-mode analyses that arrive by PURL rather than by claim. 200 with the
    baseline object, 204 when none.
-3. **`POST /api/result` takes the result object.** The body is the object
-   above with `worker` and `error` added. Hopper reads `verdict` for its
-   level, engine, timestamp, and reason; reads `cleave.raw` where it reads
-   `raw` today, with the same depth-0 `sha` check; and stores `verdict` and
-   the five judge objects in two new columns, `verdict JSONB` and
-   `judges JSONB`. The legacy `{ml, llm, raw}` body keeps working for as
-   long as scan workers post it; readers prefer `verdict` when present.
+3. **`POST /api/result` takes the version 8 body**, as it does from
+   `atomscan --hopper` (hopper's `scanresult` package). The drift jurors
+   are two more juror rows. A failed analysis is still posted as version
+   7's error object until version 8 has a failure form hopper can classify.
 
 `/v1/lookup` on hopper is unchanged. `litmus.go` gains the binary name as a
 setting; the argv does not change.
@@ -266,10 +214,9 @@ setting; the argv does not change.
 ## Beamline changes
 
 Beamline's `isFullEnvelope`, `llmWhy`, and `topHits` read `ml.eng`,
-`llm.interpretation`, and `raw.files[].traits`. With the result object they
-become reads of `verdict.engines`, `verdict.reason`, and `verdict.findings`,
-which is less code and drops beamline's own copy of the findings filter.
-Nothing else in beamline's use of scan changes.
+`llm.interpretation`, and `raw.files[].traits` from a `full=1` answer. That
+answer is now the version 8 body, so they become reads of its header
+(`scan.engine`), the artifact's `verdict` and `llm`, and its report lines.
 
 ## Scan changes
 
@@ -325,13 +272,10 @@ postdoc/
                         reqwest, serde, serde_json, anyhow, clap, tracing
   src/main.rs           clap: serve | worker
   src/lib.rs
-  src/report.rs         wire types: Result, Verdict, Judge<R>, Status
-  src/judge/mod.rs      run all judges for one Subject; combine()
-  src/judge/cleave.rs
-  src/judge/ml.rs
-  src/judge/llm.rs      shared LLM breaker and budget live here
-  src/judge/diff.rs     baseline bytes → temp pair → isomer::judge
-  src/judge/diff_llm.rs
+  src/report.rs         the two scales: Severity and Level
+  src/combine.rs        the fold: the worse of scan's and isomer's outcomes
+  src/engine.rs         reading each engine's types onto those scales
+  src/judge.rs          isomer's opinions into scan's upload as drift jurors
   src/baseline.rs       hopper baseline client (claim field or /api/baseline)
   src/server/mod.rs     router, state, config
   src/server/lookup.rs  /v1/lookup
@@ -339,7 +283,7 @@ postdoc/
   src/server/ops.rs     /_/stats, /_/health
   src/worker.rs         the postdoc backend for scan::worker::run
   docs/DESIGN.md
-  docs/JSON.md          field-by-field reference for the result object
+  docs/JSON.md          what postdoc adds to scan's version 8 body
 ```
 
 Lints mirror scan's `[workspace.lints]` plus isomer's `unsafe_code = "deny"`.
@@ -437,9 +381,10 @@ No file over 2000 lines.
      to abstract: phase 2 posts the legacy body, which is scan's own
      behaviour, so a trait would have one implementation and no second
      caller. It arrives in phase 3, where the posted body actually differs.
-3. **Judges and the worker's new body.** The worker posts the result object;
-   hopper accepts it and adds `verdict` and `judges`. No server involved, so
-   nothing beamline calls changes yet.
+3. **Jurors and the worker's new body.** The worker posts scan's version 8
+   body, as `atomscan --hopper` does, with `scan.worker` and `scan.ms` in its
+   header; failures stay on version 7's error object. The postdoc result
+   object this phase first planned was dropped for it.
 4. **The server moves.** Scan's server modules come over intact and `/v1`
    answers byte-for-byte as it does now, proved by replaying recorded
    requests against both binaries. This is the step that lets a deployment
@@ -466,22 +411,21 @@ No file over 2000 lines.
    - not started — moving the server's source out of scan. Nothing needs it
      until `/v2`, and while both binaries call one implementation there is
      nothing to drift.
-5. **`/v2`.** `/v2/lookup` and `/v2/analyze` answer with the result object.
-   Beamline adopts it when it wants the judges; until then it keeps reading
-   `/v1` and nothing has to move.
-6. **Diff.** Hopper: `purl` and `baseline` on claims, `/api/baseline`.
-   postdoc: `diff` and `diff_llm` judges.
+5. **`/v2`.** Dropped: `/v1/analyze?full=1` answers with the version 8 body,
+   which carries every juror.
+6. **Drift.** Hopper: `purl` and `baseline` on claims, `/api/baseline`.
+   postdoc: isomer run in the worker, its opinions sent as the `drift_heuristic`
+   and `drift_llm` jurors (`judge`, done; the worker wiring waits on the
+   baseline in claims).
 
 Retiring scan's serve and worker modes is separate work, after postdoc has
 rolled out.
 
 ## Testing
 
-- `combine()` is a table test over every (scan outcome, isomer outcome)
-  band pair, including the no-baseline and skipped-judge cases, and checks
-  `decided_by` and the level placement for each.
-- A golden test pins the result object's field order and the
-  every-key-present rule, the way isomer's `envelope_shape_is_stable` does.
+- `combine::verdict` is a table test over (scan outcome, isomer outcome)
+  band pairs, including the no-baseline case, and `judge` checks which juror
+  is credited for each.
 - `/v1` compatibility is proved by replay, not by reading: the same recorded
   requests go to `atomscan serve` and `postdoc serve`, and the responses are
   compared body and header. Reading two implementations and agreeing they

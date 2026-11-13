@@ -15,12 +15,13 @@
 //!
 //! It speaks the HTTP surface a real hopper exposes to workers:
 //!
-//! - `GET /api/next?...&count=N` → up to `N` distinct jobs (one per dataset
-//!   file, each with the file's *real* sha256 so the worker's local-file and
-//!   download integrity checks pass); `204 No Content` once every file has been
-//!   handed out. Stop the worker once every result has been received.
+//! - `POST /v1/work/next` with a form body carrying `count=N` → up to `N`
+//!   distinct jobs (one per dataset file, each with the file's *real* sha256 so
+//!   the worker's local-file and download integrity checks pass); an empty
+//!   `jobs` list once every file has been handed out. Stop the worker once
+//!   every result has been received.
 //! - `GET /data/{url-encoded path}` → file bytes, streamed from disk.
-//! - `POST /api/result` → tallied (and optionally dumped for parity diffing).
+//! - `POST /v1/work/result` → tallied (and optionally dumped for parity diffing).
 //!
 //! It is also the benchmark's *measurement point*: it stamps each job at claim
 //! and at result, so per-job sojourn (claim → result, covering download + queue
@@ -258,7 +259,7 @@ struct Handle {
 }
 
 impl Handle {
-    /// Number of `/api/result` posts received so far.
+    /// Number of `/v1/work/result` posts received so far.
     fn results_received(&self) -> usize {
         self.server.results.load(Ordering::Relaxed)
     }
@@ -360,13 +361,13 @@ impl BenchHopper {
 
     fn handle(&self, mut stream: TcpStream) -> io::Result<()> {
         let (method, target, body) = read_request(&mut stream)?;
-        if method == "GET" && target.starts_with("/api/next") {
-            self.serve_next(&mut stream, &target)
+        if method == "POST" && target == "/v1/work/next" {
+            self.serve_next(&mut stream, &body)
         } else if method == "GET" && target.starts_with("/data/") {
             self.serve_data(&mut stream, &target)
-        } else if method == "POST" && target.starts_with("/api/result") {
+        } else if method == "POST" && target == "/v1/work/result" {
             self.serve_result(&mut stream, &body)
-        } else if target.starts_with("/api/heartbeat") {
+        } else if method == "POST" && target == "/v1/work/heartbeat" {
             // The worker checks in here; accept and ignore.
             respond_body(&mut stream, "200 OK", b"{}")
         } else {
@@ -374,14 +375,14 @@ impl BenchHopper {
         }
     }
 
-    fn serve_next(&self, stream: &mut TcpStream, target: &str) -> io::Result<()> {
-        let count = query_param(target, "count")
+    fn serve_next(&self, stream: &mut TcpStream, form: &[u8]) -> io::Result<()> {
+        let count = form_param(&String::from_utf8_lossy(form), "count")
             .and_then(|v| v.parse().ok())
             .unwrap_or(1);
         let start = self.cursor.fetch_add(count, Ordering::SeqCst);
         if start >= self.jobs.len() {
-            // Drained: the real hopper returns 204 when no work remains.
-            return respond_head(stream, "204 No Content", 0);
+            // Drained: the real hopper answers an empty list when no work remains.
+            return respond_body(stream, "200 OK", br#"{"jobs":[]}"#);
         }
         let end = (start + count).min(self.jobs.len());
         {
@@ -794,9 +795,8 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
 }
 
-fn query_param<'a>(target: &'a str, key: &str) -> Option<&'a str> {
-    let query = target.split('?').nth(1)?;
-    query.split('&').find_map(|kv| {
+fn form_param<'a>(form: &'a str, key: &str) -> Option<&'a str> {
+    form.split('&').find_map(|kv| {
         kv.split_once('=')
             .filter(|(k, _)| *k == key)
             .map(|(_, v)| v)
@@ -878,17 +878,28 @@ mod tests {
         (status, resp[split + 4..].to_vec())
     }
 
-    fn post_result(port: u16, body: &[u8]) {
+    fn post(port: u16, target: &str, body: &[u8]) -> (String, Vec<u8>) {
         let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
         write!(
             stream,
-            "POST /api/result HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            "POST {target} HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
             body.len(),
         )
         .unwrap();
         stream.write_all(body).unwrap();
         let mut resp = Vec::new();
         stream.read_to_end(&mut resp).unwrap();
+        let split = find_subslice(&resp, b"\r\n\r\n").unwrap();
+        let status = String::from_utf8_lossy(&resp[..split])
+            .lines()
+            .next()
+            .unwrap()
+            .to_string();
+        (status, resp[split + 4..].to_vec())
+    }
+
+    fn post_result(port: u16, body: &[u8]) {
+        post(port, "/v1/work/result", body);
     }
 
     #[test]
@@ -903,8 +914,8 @@ mod tests {
         let handle = hopper.serve(0).unwrap();
         let port = handle.port;
 
-        // First /api/next hands out both jobs (deterministic, sorted by path).
-        let (status, body) = get(port, "/api/next?count=10");
+        // First /v1/work/next hands out both jobs (deterministic, sorted by path).
+        let (status, body) = post(port, "/v1/work/next", b"count=10");
         assert!(status.contains("200"), "status: {status}");
         let body = String::from_utf8(body).unwrap();
         assert!(body.contains("\"a.txt\""), "body: {body}");
@@ -914,9 +925,10 @@ mod tests {
             "body: {body}"
         );
 
-        // Second poll drains: 204.
-        let (status, _) = get(port, "/api/next?count=10");
-        assert!(status.contains("204"), "status: {status}");
+        // Second poll drains: an empty list.
+        let (status, body) = post(port, "/v1/work/next", b"count=10");
+        assert!(status.contains("200"), "status: {status}");
+        assert_eq!(body, br#"{"jobs":[]}"#);
 
         // /data/ with a percent-encoded space-containing segment.
         let (status, bytes) = get(port, "/data/sub/b%20dir.txt");
@@ -1067,7 +1079,7 @@ mod tests {
         let port = handle.port;
 
         // Claim both jobs, then post a result for the first sha only.
-        let (status, _) = get(port, "/api/next?count=10");
+        let (status, _) = post(port, "/v1/work/next", b"count=10");
         assert!(status.contains("200"), "status: {status}");
         let body = format!("{{\"sha256\":\"{}\",\"worker\":\"w\"}}", shas[0]);
         post_result(port, body.as_bytes());

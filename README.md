@@ -17,13 +17,19 @@ is the shape most supply-chain compromises take.
 
 Every severity in a result belongs to the engine that produced it.
 
-| Judge      | Engine | Decides |
-| ---------- | ------ | ------- |
-| `cleave`   | [cleave](https://github.com/atomdrift-project/cleave)'s traits, graded by scan's trait floor | whether severe traits corroborate each other across enough behaviour families |
-| `ml`       | the [azoth](https://github.com/atomdrift-project/azoth) model, read through [scan](https://github.com/atomdrift-project/scan) | the tightest false-positive budget at which the artifact grades hostile |
-| `llm`      | scan's per-file interpreter | whether the code reads as benign, suspicious or hostile |
-| `diff`     | isomer, over this artifact and an earlier release | what this release introduced |
-| `diff_llm` | isomer's per-diff interpreter | whether that change reads as an attack |
+| Juror       | Engine | Decides |
+| ----------- | ------ | ------- |
+| `ml`        | the [azoth](https://github.com/atomdrift-project/azoth) model, read through [scan](https://github.com/atomdrift-project/scan) | the tightest false-positive budget at which the artifact grades hostile |
+| `floor`     | [cleave](https://github.com/atomdrift-project/cleave)'s traits, graded by scan's trait floor | whether severe traits corroborate each other across enough behaviour families |
+| `llm`       | scan's per-file interpreter | whether the code reads as benign, suspicious or hostile |
+| `drift_heuristic`  | isomer, over this artifact and an earlier release | what this release introduced |
+| `drift_llm` | isomer's per-diff interpreter | whether that change reads as an attack |
+
+Third-party scanners report beside the jurors and never move the verdict:
+the worker and the server also run ClamAV, malcontent and GuardDog on every
+artifact, by default, and send what each found under `scanners`. Each is
+checked at startup; `make scanners` installs them, and `--scanners` picks a
+subset or `none`.
 
 postdoc owns two things: the order the engines are asked in, and keeping the
 worse of the two finished outcomes — scan's and isomer's. It holds no
@@ -31,49 +37,39 @@ thresholds, no trait lists and no prompts. A verdict here can be traced to an
 engine and a build, and re-derived by running that engine again.
 
 That constraint is the point. A coordinator that quietly re-weighed its
-inputs would be a sixth judge nobody could audit.
+inputs would be a sixth juror nobody could audit.
 
 ## The result
 
-One artifact produces one verdict and, beside it, one judge object per engine.
+postdoc sends scan's result: the version 8 body scan uploads to hopper,
+JSON lines with a header, one line per file (the artifact first, then up to
+256 of its members), and one line per report. Every file line carries its
+verdict and one object per juror that spoke; the artifact's line also
+carries what it points at (`refs`).
+
+When there was an earlier release to compare against, postdoc adds isomer's
+two opinions to the artifact's line as `drift_heuristic` and `drift_llm`, and the
+verdict becomes the worse of scan's and isomer's, with `by` naming the juror
+that decided it:
 
 ```json
-{
-  "v": "1",
-  "sha256": "…",
-  "purl": "pkg:npm/left-pad@1.3.1",
-  "verdict": {
-    "severity": "hostile",
-    "fires_at": 25,
-    "reason": "postinstall fetches and executes a remote script",
-    "findings": [{ "id": "…", "crit": 5, "desc": "…" }],
-    "decided_by": ["ml", "diff"],
-    "engines": { "postdoc": "0.1.0", "scan": "2.12.0", "…": "…" },
-    "analyzed_at": "2026-09-15T12:00:00Z",
-    "duration_ms": 4120
-  },
-  "cleave":   { "status": "ok", "severity": "benign",  "fires_at": null, "…": "…" },
-  "ml":       { "status": "ok", "severity": "hostile", "fires_at": 25,   "…": "…" },
-  "llm":      { "status": "ok", "severity": "hostile", "confidence": 0.95, "…": "…" },
-  "diff":     { "status": "ok", "severity": "hostile", "fires_at": 25,   "…": "…" },
-  "diff_llm": { "status": "skipped", "reason": "no_baseline" }
-}
+{"sha256":"…","size":48211,"type":"npm",
+ "verdict":{"outcome":"ok","class":"hostile","fires_at":25,"by":"drift_heuristic"},
+ "ml":{"class":"benign","fires_at":-1,"prob":0.05,"model":"v20.20"},
+ "llm":{"class":"benign","conf":0.8,"model":"…","reason":"…"},
+ "drift_heuristic":{"class":"hostile","fires_at":25,"base":"9e1c…","engine":"0.5.0"},
+ "drift_llm":{"class":"hostile","model":"…","reason":"postinstall now fetches a remote script","base":"9e1c…"},
+ "report":"9f…"}
 ```
-
-Every judge key is present in every result. An engine that was not asked says
-so and why; one that failed says that instead, with how long it ran before it
-did. A consumer writes one code path.
-
-Each judge carries its own engine's native output under `raw` — the cleave
-report, the model's route scores, isomer's differential. The evidence sits
-with the opinion it supports rather than in a shared pile, so a judge object
-is readable on its own. `raw` is dropped unless the caller asks for it with
-`full=1`.
 
 `fires_at` is the tightest false-positive budget, per 100 million benign
 files, at which the artifact grades hostile. Lower is worse; `-1` means it
 fires at none. It is *measured*, and turning it into an allow or a block
 against a caller's own budget happens when a lookup is answered, never here.
+
+The worker posts this body to hopper. `postdoc serve` answers
+`/v1/analyze?full=1` with it, without the worker name, and answers every
+other `/v1` request with scan's decision.
 
 ## Modes
 
@@ -91,8 +87,8 @@ to these as Scan servers during the mixed-fleet transition; point new and
 replacement hosts at `postdoc serve` without changing `SCAN_URL` consumers.
 
 The worker and server implementations now live here. The server keeps Scan's
-existing `/v1` contract during rollout; the worker keeps its existing hopper
-claim and result payload contract.
+`/v1` contract, and the worker posts the same version 8 body
+`atomscan --hopper` does.
 
 There is no one-shot CLI. `atomscan` and `isomer` are the tools for that.
 
@@ -109,9 +105,9 @@ make release
 
 ## Design
 
-[docs/DESIGN.md](docs/DESIGN.md) is the plan of record: the judges, how the
+[docs/DESIGN.md](docs/DESIGN.md) is the plan of record: the jurors, how the
 fold works, how a baseline is chosen, and the changes it needs in hopper,
-scan and isomer. [docs/JSON.md](docs/JSON.md) is the field-by-field reference
-for the result object.
+scan and isomer. [docs/JSON.md](docs/JSON.md) is what postdoc adds to scan's
+version 8 body.
 
 Licensed Apache-2.0.

@@ -4,14 +4,19 @@
 exposes no HTTP. It polls a [hopper](https://github.com/atomdrift-project/hopper)
 instance for jobs, analyses each file, and posts the result back.
 
-The classifier, thresholds, and response shape are identical to the
-server. See [SERVER_API.md](SERVER_API.md) for the server, and
-[JSON.md](JSON.md) for the JSON envelope every worker
-result carries.
+The classifier and thresholds are identical to the server's. See
+[SERVER_API.md](SERVER_API.md) for the server, and [JSON.md](JSON.md) for
+the result every worker posts.
 
 ## Running a worker
 
     postdoc worker --url http://hopper-host:8081
+
+Every sample is also scanned by ClamAV, malcontent and GuardDog, whose
+findings are posted beside the verdict under `scanners`
+([JSON.md](JSON.md#other-scanners)). Each is checked at startup, and a
+worker without one refuses to start: `make scanners` installs them, and
+`--scanners` (`POSTDOC_SCANNERS`) picks a subset or `none`.
 
 `--url` is required. Everything else has a sensible default.
 
@@ -33,9 +38,10 @@ The same environment variables apply as for the server:
 Hopper requires `Authorization: Bearer <token>` on every API route, so a
 worker needs the token before it can claim work. The same token authenticates
 `scan <path> --hopper` / `--upload` and `serve --hopper`, which renew results
-over the same API. It is attached to every call: `/api/next`,
-`/api/heartbeat`, `/api/result`, `/api/upload`, `/api/known`, `/api/file`,
-`/api/provenance`, and `/data/`.
+over the same API. It is attached to every call: `/v1/work/next`,
+`/v1/work/heartbeat`, `/v1/work/result`, `/v1/intake/upload`,
+`/v1/intake/held`, `/v1/files/{sha256}`, `/v1/files/{sha256}/provenance`,
+`/v1/lookup`, and `/data/`.
 
 It is resolved once per process, in this order:
 
@@ -73,9 +79,10 @@ That path is gone: `~/.tok/hopper` is the only file the worker reads.
    Mismatched SHA-256 fails the claim.
 3. **Analyse.** Same `classify_file` / `classify_bytes` path used by
    the server.
-4. **Report.** The worker posts the [response envelope](JSON.md)
-   back to hopper. The shape is the same as the server's `/analyze`
-   response.
+4. **Report.** The worker posts the result back to hopper: scan's
+   version 8 body ([JSON.md](JSON.md)), the same one the server answers
+   `/v1/analyze?full=1` with, plus the worker's name and the analysis
+   time. A failed analysis posts its error instead.
 5. **Sleep.** If the queue was empty on the last claim, the worker
    sleeps `--poll-secs` before trying again.
 

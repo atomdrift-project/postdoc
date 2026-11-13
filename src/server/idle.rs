@@ -234,6 +234,8 @@ pub(super) struct Worker {
     name: String,
     cache: PathBuf,
     slots: usize,
+    /// The server's third-party scanner switches, passed on to the child.
+    scanner_args: Vec<std::ffi::OsString>,
     /// `None` only between a worker exiting and its replacement starting.
     current: std::sync::RwLock<Option<Idle>>,
 }
@@ -299,6 +301,10 @@ impl Worker {
             self.slots,
             cleave_concurrency.as_deref(),
         )
+        .map(|mut cmd| {
+            cmd.args(&self.scanner_args);
+            cmd
+        })
         .and_then(Idle::spawn);
         let started = match spawned {
             Ok(worker) => {
@@ -361,6 +367,7 @@ pub(super) fn start(
     hopper: Option<&str>,
     name: &str,
     slots: usize,
+    scanners: &postdoc::scanners::Scanners,
     busy: &Arc<Busy>,
     stop: watch::Receiver<bool>,
 ) -> Option<Arc<Worker>> {
@@ -385,11 +392,17 @@ pub(super) fn start(
         return None;
     }
 
+    // The same scanners as the server, where the server found them: the
+    // switches are a command line the child cannot inherit, and a worker
+    // without them would post results that say nothing of the scanners the
+    // server runs.
+    let scanner_args = scanners.args();
     let worker = Arc::new(Worker {
         hopper: primary,
         name: format!("{name}-idle"),
         cache,
         slots,
+        scanner_args,
         current: std::sync::RwLock::new(None),
     });
     tracing::info!(

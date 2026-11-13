@@ -144,6 +144,8 @@ fi
 $SUDO install -d -m0750 -o "$SERVICE_USER" -g "$SERVICE_USER" "$STATE_HOME"
 $SUDO install -d -m0700 -o "$SERVICE_USER" -g "$SERVICE_USER" "$STATE_HOME/.tok"
 
+# The scanners postdoc checks at startup, installed and running before it is.
+ensure_scanners FreeBSD "$SERVICE_USER"
 install_credentials
 LLM_MODEL_ENV=$(python3 "$DEPLOY_DIR/deploy-config.py" rc-model)
 RC_LLM_DEFAULT=$(python3 "$DEPLOY_DIR/deploy-config.py" shell-value "$LLM")

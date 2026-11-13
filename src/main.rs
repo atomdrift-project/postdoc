@@ -132,6 +132,45 @@ struct DaemonArgs {
     /// postdoc.
     #[arg(long, global = true, allow_hyphen_values = true)]
     max_rss_gb: Option<i64>,
+
+    /// Third-party scanners every artifact is also run through, their
+    /// findings sent beside the verdict under `scanners`: any of `clamav`,
+    /// `malcontent` and `guarddog`, comma-separated, or `none`. Each is found
+    /// and checked at startup, and postdoc refuses to start without one it
+    /// was asked for.
+    #[arg(
+        long,
+        global = true,
+        value_name = "LIST",
+        env = "POSTDOC_SCANNERS",
+        default_value = postdoc::scanners::DEFAULT
+    )]
+    scanners: String,
+
+    /// clamd's local socket, when clamd's configuration does not name it.
+    #[arg(long, global = true, value_name = "SOCKET", env = "POSTDOC_CLAMAV")]
+    clamav: Option<PathBuf>,
+
+    /// The malcontent binary, when `mal` is not on PATH.
+    #[arg(long, global = true, value_name = "BIN", env = "POSTDOC_MALCONTENT")]
+    malcontent: Option<PathBuf>,
+
+    /// The GuardDog binary, when `guarddog` is not on PATH.
+    #[arg(long, global = true, value_name = "BIN", env = "POSTDOC_GUARDDOG")]
+    guarddog: Option<PathBuf>,
+}
+
+impl DaemonArgs {
+    /// The scanners asked for, and where any of them was named.
+    fn scanners(&self) -> anyhow::Result<postdoc::scanners::Settings> {
+        Ok(postdoc::scanners::Settings {
+            names: postdoc::scanners::parse_names(&self.scanners)
+                .map_err(|e| anyhow::anyhow!("--scanners: {e}"))?,
+            clamav: self.clamav.clone(),
+            malcontent: self.malcontent.clone(),
+            guarddog: self.guarddog.clone(),
+        })
+    }
 }
 
 const UPLINK_HELP: &str = "Insist on Atomdrift Uplink rules: the latest rules, the moment they clear QA. \
@@ -438,6 +477,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                 max_rss: scan::memory::MaxRssPolicy::from_cli(cli.daemon.max_rss_gb.unwrap_or(0)),
                 nice,
                 data_dir,
+                scanners: cli.daemon.scanners()?,
                 rules: worker::RulesStartup {
                     model_dir: None,
                     level: cli.global.level,
@@ -492,6 +532,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                 hopper,
                 idle_worker_slots,
                 analysis_timeout_secs: analysis_timeout,
+                scanners: cli.daemon.scanners()?,
                 rules: worker::RulesStartup {
                     model_dir: None,
                     level: cli.global.level,

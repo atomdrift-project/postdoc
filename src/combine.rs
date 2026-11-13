@@ -10,11 +10,11 @@
 //!
 //! postdoc keeps the worse of the two. It does not re-weigh the pieces, does
 //! not bound an interpreter, and has no thresholds of its own — every band
-//! here was decided by the engine it came from. The per-judge objects in a
-//! result exist so a reader can see those pieces, not so postdoc can score
-//! them.
+//! here was decided by the engine it came from. Each engine's own opinions
+//! travel beside the verdict as jurors, so a reader can see those pieces, not
+//! so postdoc can score them.
 
-use crate::report::{JudgeId, Level, Severity};
+use crate::report::{Level, Severity};
 
 /// One engine's finished opinion.
 ///
@@ -62,25 +62,6 @@ impl Outcome {
 #[must_use]
 pub fn verdict(scan: Outcome, isomer: Option<Outcome>) -> Outcome {
     isomer.map_or(scan, |isomer| scan.worse_of(isomer))
-}
-
-/// The judges whose own band matches the verdict.
-///
-/// Answers "who decided this", so a reader can tell a model verdict from a
-/// trait-floor verdict from a differential one without re-deriving the fold.
-/// Judges that did not report are not credited. Order follows
-/// [`JudgeId::ALL`] when the caller supplies them in that order, which keeps
-/// the field stable across runs.
-#[must_use]
-pub fn decided_by(
-    severity: Severity,
-    judges: impl IntoIterator<Item = (JudgeId, Option<Severity>)>,
-) -> Vec<JudgeId> {
-    judges
-        .into_iter()
-        .filter(|&(_, reported)| reported == Some(severity))
-        .map(|(id, _)| id)
-        .collect()
 }
 
 #[cfg(test)]
@@ -239,52 +220,5 @@ mod tests {
         // raise what scan concluded on its own.
         let scan = at(Severity::Suspicious, 3000);
         assert_eq!(verdict(scan, None), scan);
-    }
-
-    #[test]
-    fn credit_goes_to_every_judge_that_reached_the_verdict() {
-        let by = decided_by(
-            Severity::Hostile,
-            [
-                (JudgeId::Cleave, Some(Severity::Hostile)),
-                (JudgeId::Ml, Some(Severity::Benign)),
-                (JudgeId::Llm, Some(Severity::Hostile)),
-                (JudgeId::Diff, None),
-                (JudgeId::DiffLlm, None),
-            ],
-        );
-        assert_eq!(by, vec![JudgeId::Cleave, JudgeId::Llm]);
-    }
-
-    #[test]
-    fn a_judge_that_never_reported_is_never_credited() {
-        // `None` is "did not report". It must not match a benign verdict just
-        // because both are the absence of an alarm.
-        let by = decided_by(
-            Severity::Benign,
-            [
-                (JudgeId::Ml, Some(Severity::Benign)),
-                (JudgeId::Diff, None),
-                (JudgeId::DiffLlm, None),
-            ],
-        );
-        assert_eq!(by, vec![JudgeId::Ml]);
-    }
-
-    #[test]
-    fn credit_keeps_the_order_it_was_given() {
-        let by = decided_by(
-            Severity::Hostile,
-            JudgeId::ALL.map(|id| (id, Some(Severity::Hostile))),
-        );
-        assert_eq!(by, JudgeId::ALL.to_vec(), "stable across runs");
-    }
-
-    #[test]
-    fn credit_can_be_empty_only_when_nothing_matched() {
-        // Defensive: the caller derives `severity` from these same judges, so
-        // an empty list means the caller passed a band no judge reported.
-        let by = decided_by(Severity::Hostile, [(JudgeId::Ml, Some(Severity::Benign))]);
-        assert!(by.is_empty());
     }
 }

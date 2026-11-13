@@ -12,7 +12,8 @@ import urllib.error
 import urllib.request
 
 KEYS = ("BIND", "ALLOW_CIDR", "WORKERS", "DATA_DIR", "MAX_RSS_GB", "IDLE",
-        "LLM", "LLM_MODEL", "MEMORY_MAX", "MEMORY_LOW", "IDLE_MEMORY_MAX", "NICE", "ENRICHED")
+        "LLM", "LLM_MODEL", "MEMORY_MAX", "MEMORY_LOW", "IDLE_MEMORY_MAX", "NICE", "ENRICHED",
+        "SCANNERS")
 
 
 def arguments(mode, url, home):
@@ -46,6 +47,9 @@ def arguments(mode, url, home):
             args += [flag, os.environ[key]]
     if mode == "worker" and os.environ.get("DATA_DIR"):
         args += ["--data-dir", os.environ["DATA_DIR"]]
+    # Absent means postdoc's default: every scanner, each checked at startup.
+    if os.environ.get("SCANNERS"):
+        args += ["--scanners", os.environ["SCANNERS"]]
     return args
 
 

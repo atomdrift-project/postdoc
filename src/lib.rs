@@ -24,23 +24,45 @@
 //!
 //! # Shape of a result
 //!
-//! One artifact produces one [`report::Verdict`] and, beside it, one
-//! [`report::Judge`] per engine — `cleave`, `ml`, `llm`, `diff` and
-//! `diff_llm`. Every judge key is present in every result: an engine that was
-//! not asked says so and why, and one that failed says that instead. Each
-//! judge carries its own engine's native output, so the evidence sits with
-//! the opinion it supports rather than in a shared pile.
+//! A result is scan's: the version 8 body it uploads to hopper, with its
+//! verdict on the artifact and everything inside it, and its own `ml`,
+//! `floor` and `llm` jurors (scan's `docs/JSON.md`). When isomer compared the
+//! artifact against an earlier release, its two opinions join them as the
+//! `drift_heuristic` and `drift_llm` jurors, and the verdict becomes the worse of
+//! scan's and isomer's, naming the juror that decided it ([`judge`]).
+//! Third-party scanners (ClamAV, malcontent) report beside the jurors under
+//! `scanners`, and never move the verdict ([`scanners`]).
 
 pub mod combine;
 pub mod engine;
 pub mod judge;
 pub mod report;
 pub mod result;
+pub mod scanners;
 
 pub use combine::Outcome;
-pub use judge::{Analysis, report};
-pub use report::{Assessment, Engines, Finding, Judge, JudgeId, Level, Severity, Skipped, Verdict};
-pub use result::{Baseline, EngineJudge, Report, SCHEMA_VERSION};
+pub use judge::{Analysis, judge};
+pub use report::{Level, Severity};
+pub use result::Baseline;
 
-/// This crate's version, as recorded in [`Engines::postdoc`].
-pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+/// The longest prefix of `text` within `max` bytes that ends on a character
+/// boundary.
+fn bounded(text: &str, max: usize) -> &str {
+    let mut end = max.min(text.len());
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text.get(..end).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn text_is_cut_on_a_character_boundary() {
+        assert_eq!(bounded("aé", 2), "a");
+        assert_eq!(bounded("short", 400), "short");
+        assert!(bounded(&"é".repeat(400), 400).len() <= 400);
+    }
+}

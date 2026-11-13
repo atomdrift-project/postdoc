@@ -547,7 +547,7 @@ impl<'a> Stats<'a> {
 /// every second and must not be cached.
 ///
 /// The vocabulary deliberately matches what the pull worker already advertises
-/// to hopper on `/api/next` — slots, rss, load, max_bytes, traits, tools — so a
+/// to hopper on `/v1/work/next` — slots, rss, load, max_bytes, traits, tools — so a
 /// caller reasoning about which scanner to use is reading the same facts hopper
 /// uses to ration work, rather than a second dialect of the same idea.
 pub(super) async fn stats(State(state): State<Arc<AppState>>) -> Response {

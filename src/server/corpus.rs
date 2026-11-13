@@ -115,6 +115,10 @@ pub(crate) struct CorpusRecord {
     pub(crate) reason: Option<String>,
     #[serde(default)]
     pub(crate) findings: Vec<CorpusFinding>,
+    /// `analyzed`, or `pending` when hopper holds the bytes but nothing has
+    /// analyzed them yet. A pending record carries no verdict.
+    #[serde(default)]
+    pub(crate) state: Option<String>,
 }
 
 /// One of the artifact's strongest traits, as the corpus stores them.
@@ -247,7 +251,7 @@ impl Corpus {
     /// names internal addresses: log it, do not serve it.
     pub(crate) async fn sample(&self, sha: &str, max_bytes: usize) -> Result<Sample, String> {
         use sha2::Digest as _;
-        let path = format!("/api/file/{sha}");
+        let path = format!("/v1/files/{sha}");
         let mut last = "Hopper did not serve the sample".to_string();
         for base in self.order_at(Instant::now()) {
             let mut request = self
@@ -599,6 +603,11 @@ impl Corpus {
                     .await
                     .and_then(|body| Ok(serde_json::from_slice::<CorpusRecord>(&body)?))
                 {
+                    // A pending record is "held, nobody has looked at it": no
+                    // verdict, and no failure either.
+                    Ok(record) if record.state.as_deref() == Some("pending") => {
+                        Some((Reached::Nothing, source))
+                    }
                     Ok(record) => Some((Reached::Record(Box::new(record)), source)),
                     // Reachable, but not speaking our protocol — a proxy's error
                     // page, a schema we do not know, a body past the cap. Not a
@@ -611,8 +620,9 @@ impl Corpus {
                         Some((Reached::Unreachable, source))
                     }
                 },
-                // 404 is "nothing stored"; 202 is "held, nobody has looked at it".
-                // Neither is a verdict, and neither is a failure.
+                // 404 is "nothing stored"; 202 is how a hopper before the
+                // pending state said "held, nobody has looked at it". Neither
+                // is a verdict, and neither is a failure.
                 404 | 202 => Some((Reached::Nothing, source)),
                 // Being turned away is about this endpoint, not about the query:
                 // a credential can be wrong for one address and right for the
@@ -1067,6 +1077,18 @@ mod tests {
         let replica = endpoint("400 Bad Request", r#"{"error":"nope"}"#);
         let primary = endpoint("200 OK", r#"{"sha256":"abc","fires_at":-1}"#);
         let c = corpus(&format!("{replica},{primary}"));
+        assert_eq!(
+            c.known_with_source(None, Some("pkg:npm/left-pad@1.3.0"))
+                .await
+                .0,
+            Reached::Nothing,
+        );
+    }
+
+    /// Held bytes nobody has analyzed are no verdict, and nothing is wrong.
+    #[tokio::test]
+    async fn a_pending_record_is_nothing() {
+        let c = corpus(&endpoint("200 OK", r#"{"sha256":"abc","state":"pending"}"#));
         assert_eq!(
             c.known_with_source(None, Some("pkg:npm/left-pad@1.3.0"))
                 .await

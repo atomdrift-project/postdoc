@@ -182,7 +182,9 @@ class Host:
         helper.write_text(helper.read_text().replace("SERVICE_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "SERVICE_PATH=" + str(self.bin)))
         self.env = {k: v for k, v in os.environ.items() if k not in ("HOPPER_TOKEN_FILE", "SCAN_TOKEN_FILE", "LLM_TOKEN_FILE", "TOKEN_FILE", "SCAN_LLM_KEY", "OPENROUTER_TOKEN_FILE", "ISOTOPE13_TOKEN_FILE", "ISOTOPE13_TOKEN", "ENRICHED", "WORKERS", "IDLE", "BIND", "ALLOW_CIDR", "DATA_DIR", "MAX_RSS_GB")}
         self.env.update(PATH=str(self.bin), HOME=str(self.operator), MOCK_ROOT=str(self.root),
-                        MOCK_PLATFORM=platform, LLM="https://llm.example/v1", LLM_MODEL="", MEMORY_MAX="1G", HEALTH_WAIT="1")
+                        MOCK_PLATFORM=platform, LLM="https://llm.example/v1", LLM_MODEL="", MEMORY_MAX="1G", HEALTH_WAIT="1",
+                        # Installing scanners is exercised by test-deploy-scanners.py.
+                        SCANNERS="none")
 
     def run(self, mode="serve", url="https://hopper.example", **env):
         script = "deploy.sh" if self.platform == "Linux" else "deploy-freebsd.sh"
@@ -327,8 +329,10 @@ class DeployTests(unittest.TestCase):
         args = shlex.split(next(line.split("=", 1)[1] for line in unit.splitlines() if line.startswith("ExecStart=")))
         self.assertEqual(args[args.index("--workers") + 1], "8")
         self.assertEqual(args[args.index("--idle-worker-slots") + 1], "0")
+        self.assertEqual(args[args.index("--scanners") + 1], "none")
         saved = json.loads((host.config / "serve.json").read_text())
         self.assertEqual(saved["BIND"], "0.0.0.0:50123")
+        self.assertEqual(saved["SCANNERS"], "none", "kept for the next rollout")
         self.assertNotIn("SCAN_LLM_KEY", saved)
         self.assertIn("WorkingDirectory=" + str(host.home) + "\n", unit)
 

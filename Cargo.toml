@@ -74,6 +74,11 @@ dashmap = "6"
 dirs = "6"
 rayon = "1"
 tempfile = "3"
+# Unpacking a package for GuardDog, which reads a tree rather than an archive.
+# All three are already in the graph beneath cleave.
+flate2 = "1.1"
+tar = "0.4"
+zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
 # Standalone benchmark fixture; absent from normal builds.
 zstd = { version = "0.13", optional = true }
 burton = { git = "https://github.com/atomdrift-project/burton.git" }

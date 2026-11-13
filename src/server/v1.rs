@@ -67,9 +67,9 @@ pub(super) struct V1LookupQuery {
     /// result is reusable only when it was produced by this worker's traits;
     /// otherwise the immutable sample bytes are fetched and analyzed here.
     refresh: bool,
-    /// Return the complete scan envelope instead of the compact v1 decision.
-    /// A full envelope cannot be reconstructed from the verdict index, so this
-    /// also bypasses decision-only fast paths.
+    /// Return the full result, the version 8 body that is uploaded to hopper,
+    /// instead of the decision. Only an analysis produces one, so this also
+    /// bypasses every fast path that answers from a stored verdict.
     full: bool,
     /// Which references discovered inside the root artifact the caller wants
     /// followed. Repeated keys and comma-separated values are both accepted.
@@ -671,10 +671,7 @@ async fn refresh(state: &Arc<AppState>, req: &V1Analyze) -> Response {
     // prove what Scan already knows.
     if !req.q.full {
         let key = sha.clone();
-        if let Some(verdict) = index_query(move |index| index.sha(&key))
-            .await
-            .flatten()
-        {
+        if let Some(verdict) = index_query(move |index| index.sha(&key)).await.flatten() {
             let mut resp = answered(
                 V1Decision::stored(&verdict, None, req.budget),
                 Source::Index,
@@ -994,33 +991,15 @@ impl Named {
     }
 }
 
-/// A successful full v1 response keeps the ordinary terminal marker while
-/// exposing the complete scan envelope at the same top level.
-#[derive(serde::Serialize)]
-struct V1FullResult {
-    status: &'static str,
-    #[serde(flatten)]
-    envelope: scan::engine::ScanResultEnvelope,
-}
-
-impl V1FullResult {
-    fn from_scan(result: &scan::engine::ScanResult) -> Self {
-        Self {
-            status: "analyzed",
-            envelope: result.to_envelope(),
-        }
-    }
-}
-
 /// The per-request framing an answer renders with: the budget the decision
 /// cites, the clock its `elapsed_ms` fields count from, the follow policy
-/// named on its headers, and whether the terminal frame is the full report or
-/// the verdict.
+/// named on its headers.
 struct V1Framing {
     request_id: u64,
     budget: u16,
     started: Instant,
     follow: Option<String>,
+    /// Whether the answer is the full result rather than the decision.
     full: bool,
 }
 
@@ -1047,7 +1026,21 @@ async fn answer(req: &V1Analyze, attachment: Attachment, named: Named) -> Respon
     }
 }
 
-/// A finished analysis, as a decision.
+/// The full result: the version 8 body hopper is sent, without the worker
+/// name. A body that cannot be written is logged and answered as a failure.
+fn full_result(
+    result: &scan::engine::ScanResult,
+    named: &Named,
+    request_id: u64,
+) -> Result<Vec<u8>, ApiError> {
+    result.full_body(false).ok_or_else(|| {
+        tracing::error!(id = request_id, subject = %named.subject(), "full result could not be written");
+        ApiError::internal()
+    })
+}
+
+/// A finished analysis, as a decision, or as the full result when that was
+/// asked for.
 fn outcome_response(
     outcome: &Outcome,
     named: &Named,
@@ -1057,7 +1050,19 @@ fn outcome_response(
     let mut resp = match outcome {
         Outcome::Report(result) => {
             let mut resp = if framing.full {
-                Json(V1FullResult::from_scan(result)).into_response()
+                full_result(result, named, framing.request_id).map_or_else(
+                    |refusal| refusal.v1(),
+                    |body| {
+                        (
+                            [(
+                                axum::http::header::CONTENT_TYPE,
+                                HeaderValue::from_static(scan::upload::RESULT_CONTENT_TYPE),
+                            )],
+                            body,
+                        )
+                            .into_response()
+                    },
+                )
             } else {
                 Json(named.decision(result, framing.budget)).into_response()
             };
@@ -1148,8 +1153,10 @@ fn progress_frame(attachment: &Attachment, named: &Named, started: Instant) -> s
 /// The same answer, delivered as a stream that reports progress until the
 /// analysis lands.
 ///
-/// Newline-delimited JSON: zero or more progress frames, then the decision.
-/// A caller reads lines until one carries `decision`, and that is the answer;
+/// Newline-delimited JSON: zero or more progress frames, then the decision —
+/// or, with `full=1`, the full result's lines, starting with its `"v":8`
+/// header. A caller reads lines until one carries `decision` (or `v`), and
+/// that is the answer;
 /// an analysis that finishes before the first frame is due emits nothing but
 /// the decision, so a fast call still looks like a single JSON object and still
 /// parses as one.
@@ -1204,10 +1211,19 @@ fn streamed(attachment: Attachment, named: Named, framing: V1Framing) -> Respons
             Outcome::Report(result) => {
                 tracing::info!(id = request_id, subject = %named.subject(), elapsed_ms = elapsed, "streamed analysis answered");
                 if full {
-                    v1_send(&tx, &V1FullResult::from_scan(result)).await;
-                    return;
+                    // The body's lines end the stream, its header first: a
+                    // reader takes a line carrying `"v":8` as the start of the
+                    // answer and everything after it as the rest of it.
+                    match full_result(result, &named, request_id) {
+                        Ok(body) => {
+                            let _ = tx.send(Ok(bytes::Bytes::from(body))).await;
+                            return;
+                        }
+                        Err(_) => named.unavailable(),
+                    }
+                } else {
+                    named.decision(result, budget)
                 }
-                named.decision(result, budget)
             }
             Outcome::Failed(refusal) if refusal.status == StatusCode::TOO_MANY_REQUESTS => {
                 // Refused after the stream began (a big whale found every slot
@@ -2496,6 +2512,7 @@ mod tests {
                 crit: 5,
                 desc: None,
             }],
+            state: None,
         };
 
         let shapes = [
@@ -2731,6 +2748,7 @@ mod tests {
                     desc: None,
                 })
                 .collect(),
+            state: None,
         };
         assert!(
             ids(&V1Decision::corpus(&record, None, None, 25)).is_empty(),

@@ -21,7 +21,7 @@ The defaults are deliberate. Override them only when you have a reason.
 | `--max-rss-gb`   | `0` (auto)         | RSS ceiling. `0` reads the cgroup signal. `-1` disables.   |
 | `--allow-cidr`   | none               | Extra CIDR networks allowed beyond loopback.               |
 | `--token-file`   | none               | File holding the required bearer token. See below.         |
-| `--hopper`       | none               | Hopper base URL. Every analyzed result is renewed on its `/api/result`. Needs a hopper token; see below. |
+| `--hopper`       | none               | Hopper base URL. Every analyzed result is renewed on its `/v1/work/result`. Needs a hopper token; see below. |
 | `--idle-worker-slots` | on when `--hopper` is set | Runs a companion `postdoc worker` process that claims hopper queue work, frozen by the kernel for the whole of every analysis request. Any non-zero value enables it; `0` disables. |
 
 Environment variables read at startup:
@@ -276,6 +276,17 @@ same budget. A verdict already held is returned immediately and costs no
 analysis slot; `unanalyzed` and `unavailable` are not verdicts, so both fall
 through and run. Pass `force=1` to analyze regardless of what is already known,
 which is what to use after an engine upgrade.
+
+`full=1` answers with the full result instead of the decision: the version 8
+body postdoc uploads to hopper, without the worker name, and with the
+ClamAV and malcontent opinions under `scanners` when the server runs them
+(see [JSON.md](JSON.md)), as `application/x-ndjson`. Only an analysis
+produces one, and the server keeps none, so `full=1` skips every answer from
+a stored verdict: it always runs an analysis and takes a slot. The analysis
+cache usually makes a repeat cheap. It streams like a decision: progress
+frames while the run goes on, then the result's lines, which end the stream.
+Read until a line carries `"v":8`; that line and every one after it are the
+result.
 
 The requested artifact is always retrieved. `follow` controls which references
 discovered inside it are also retrieved and analyzed: `dependencies` follows
@@ -576,14 +587,13 @@ the whole error chain, which is the same text the response body returns as
 
 ## Thresholds
 
-The v7 envelope no longer wire-encodes a verdict class. `ml.lvl` is the
-lowest false-positive budget (FP per 100M benigns) at which the model
-flags the file as hostile — a property of the file and model, not of
-the deploy level:
+`fires_at` is the lowest false-positive budget (FP per 100M benigns) at
+which the model flags the file as hostile — a property of the file and
+model, not of the deploy level:
 
-    lvl in grid        -> lowest level at which the file fires (lower = more hostile)
-    lvl == -1          -> fires at no grid level (clean)
-    lvl == null        -> manual --threshold-* mode (no level table)
+    fires_at in grid   -> lowest level at which the file fires (lower = more hostile)
+    fires_at == -1     -> fires at no grid level (clean)
+    fires_at == null   -> manual --threshold-* mode (no level table)
 
 The calibrated grid currently tops out at L25000, and consumers should
 tolerate a future L50000. Atomdrift Scan also reserves off-grid `grid_max + 1`
@@ -591,27 +601,13 @@ and `grid_max + 2` markers for trait-floor overrides where the model was
 clean but confident severe cleave traits manually raised the result to
 suspicious; with today's grid those are `25001` and `25002`.
 
-`ml.conf` is the same level rendered as a pessimistic integer confidence
-percent for display/export. It is `null` when `ml.lvl` is `null`, `0` for
-the benign `-1` sentinel, `100` at L0, `99` at L1, `98` at L2, `95` at
-L5, `90` at L50, `29` at L25000, `28`/`27` for `25001`/`25002`, and
-`17` at L50000. `ml.prob` remains the raw model score used for the
-decision.
+Because `fires_at` is swept over the full grid independent of `-l`, it is
+identical across deploy levels, so a result can be cached once and shared.
+A caller derives the verdict from it and its own budget `N`:
 
-Because `lvl` is swept over the full grid independent of `-l`, the whole
-`ml` envelope is identical across deploy levels, so a result can be
-cached once and shared. The consumer derives the verdict from `lvl` and
-the active level `N` (default 50):
-
-    hostile     when lvl <= N                      (default lvl <= 50)
-    suspicious  when lvl <= min(grid_max, 4 × N)    (default lvl <= 200)
+    hostile     when fires_at <= N
+    suspicious  when fires_at <= min(grid_max, max(500, 100 × N))
     benign      otherwise
-
-The L×4 rule gives suspicious a 4× wider FP budget that catches more
-"maybe-bad" files while keeping hostile crisp. A file with `lvl = 500` is
-benign under the defaults yet still reports `lvl = 500`; raising `-l` is
-what reclassifies the same envelope. When `--threshold-*` is supplied
-(manual mode), `lvl` is `null` and only hostile/benign verdicts apply.
 
 The verdict mode is resolved as follows:
 
@@ -621,21 +617,20 @@ The verdict mode is resolved as follows:
    caps and comes from `-l <N>` / `--level <N>` for any integer in
    `0`-`25000` (`src/main.rs`). The default deploy level is L50
    (= 50 FP/100M = 0.5 FP/M). Higher `N` is more sensitive. Crucially, `N` only
-   moves the caps — it does **not** change `lvl` or the serialized envelope.
+   moves the caps — it does **not** change `fires_at`.
 2. **Manual mode.** `--threshold-hostile` / `--threshold-suspicious`
    bypass the level grid entirely: the verdict comes from those raw
-   cutoffs, `ml.lvl` is `null`, and only hostile/benign verdicts are
+   cutoffs, `fires_at` is `null`, and only hostile/benign verdicts are
    possible (suspicious is not derived).
 3. If the bundle carries no level grid (e.g. a single-bundle dev model),
    the verdict falls back to the bundle's recommended/fallback thresholds
-   and `ml.lvl` is `null`.
+   and `fires_at` is `null`.
 
 The level/grid is baked in at server start. To change models: stop the
 server and restart it. The active level is fixed per server process; there is
 no per-request override.
 
-See [JSON.md](JSON.md) for the full `ml.lvl` encoding and how consumers
-derive hostile/suspicious/benign from it.
+See scan's `docs/JSON.md` for the full `fires_at` encoding.
 
 ## Security
 

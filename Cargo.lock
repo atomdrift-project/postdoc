@@ -4059,6 +4059,7 @@ dependencies = [
  "cleave",
  "dashmap",
  "dirs",
+ "flate2",
  "fletch",
  "form_urlencoded",
  "futures-core",
@@ -4074,6 +4075,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.1",
+ "tar",
  "tempfile",
  "tikv-jemalloc-sys",
  "tikv-jemallocator",
@@ -4082,6 +4084,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "tree-sitter",
+ "zip",
  "zstd 0.13.4",
 ]
 

@@ -29,19 +29,6 @@ impl From<scan::Classification> for Severity {
     }
 }
 
-/// Scan's per-file interpreter grade, in postdoc's bands.
-///
-/// The same three bands under a different name, so this is a rename.
-impl From<scan::interpret::LlmGrade> for Severity {
-    fn from(grade: scan::interpret::LlmGrade) -> Self {
-        match grade {
-            scan::interpret::LlmGrade::Hostile => Self::Hostile,
-            scan::interpret::LlmGrade::Suspicious => Self::Suspicious,
-            scan::interpret::LlmGrade::Benign => Self::Benign,
-        }
-    }
-}
-
 /// A postdoc band as scan names it.
 ///
 /// The inverse of [`Severity`]'s `From<scan::Classification>`, needed to ask
@@ -71,6 +58,17 @@ pub fn level(scan_level: scan::model::Level) -> Option<Level> {
     }
 }
 
+/// A postdoc level as scan records it: the inverse of [`level`], for handing
+/// a folded verdict back to scan's upload.
+#[must_use]
+pub const fn scan_level(level: Option<Level>) -> scan::model::Level {
+    match level {
+        None => scan::model::Level::Manual,
+        Some(Level::Never) => scan::model::Level::Clean,
+        Some(Level::At(budget)) => scan::model::Level::At(budget),
+    }
+}
+
 /// What isomer concluded, in postdoc's bands.
 ///
 /// The mapping from isomer's five grades to these three is isomer's own, so
@@ -89,22 +87,6 @@ pub fn isomer_severity(severity: isomer::Severity) -> Severity {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_grade_keeps_its_band() {
-        assert_eq!(
-            Severity::from(scan::interpret::LlmGrade::Hostile),
-            Severity::Hostile
-        );
-        assert_eq!(
-            Severity::from(scan::interpret::LlmGrade::Suspicious),
-            Severity::Suspicious
-        );
-        assert_eq!(
-            Severity::from(scan::interpret::LlmGrade::Benign),
-            Severity::Benign
-        );
-    }
 
     #[test]
     fn a_band_survives_the_round_trip_through_scans_vocabulary() {
