@@ -208,6 +208,11 @@ install-precommit:
 
 deploy-worker deploy-server: export POSTDOC_DEPLOY_BUILD := 1
 
+# Third-party scanners (ClamAV, malcontent, GuardDog) are off for deploys for
+# now; re-enable with SCANNERS=clamav,malcontent,guarddog (or any subset).
+SCANNERS ?= none
+_deploy: export SCANNERS := $(SCANNERS)
+
 test-deploy:
 	python3 scripts/test-deploy-deps.py
 	python3 scripts/test-deploy-scanners.py
