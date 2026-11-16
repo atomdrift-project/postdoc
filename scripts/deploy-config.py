@@ -28,9 +28,11 @@ def arguments(mode, url, home):
     if os.environ.get("ENRICHED", "0") not in ("0", "1"):
         raise ValueError("ENRICHED must be 0 or 1")
     args = [mode]
-    # The isotope13 Enriched rules; the token is installed beside the service.
+    # The isotope13 zero-day rule feed; the token is installed beside the
+    # service. Named explicitly so a refused token stops startup rather than
+    # quietly falling back to another feed.
     if os.environ.get("ENRICHED") == "1":
-        args += ["--uplink"]
+        args += ["--feed", "zero-day"]
     if mode == "worker":
         args += ["--url", url, "--nice", os.environ.get("WORKER_NICE", "0")]
     else:

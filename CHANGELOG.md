@@ -26,7 +26,7 @@ First release. postdoc replaces `atomscan serve` and `atomscan worker`.
 - Claim and judge hopper artifacts with `postdoc worker`, a drop-in for atomscan worker.
 - Serve scan's existing v1 HTTP API with `postdoc serve`, a drop-in for atomscan serve.
 - Accept uploads up to 1 GiB by default, so promoter's larger archives and images need no flag.
-- Use Atomdrift Uplink rules automatically when the host holds a token; `--uplink` insists on them.
+- Pick the rule feed (zero-day, supporter, oss-delayed) with `--feed`, the saved choice, or a held token, as atomscan does.
 - Fail over LLM requests across an ordered chain of endpoints.
 - Push server metrics over OTLP, configured by the standard OpenTelemetry environment variables.
 - Reap temporary files and download spools a crashed process abandoned on the next startup.

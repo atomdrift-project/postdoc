@@ -1379,13 +1379,14 @@ fn renew_resources_once(rules: &Rules) -> Result<Option<Arc<ModelResources>>> {
     };
     let traits_changed = match scan::traits_repo::update(false, true) {
         Ok(changed) => changed,
-        // A refused enriched token is not an outage to ride out quietly: the
-        // fleet goes on serving the rules it has, and says so at error level
-        // on every renewal until someone fixes the subscription.
-        Err(error) if scan::traits_repo::enriched_refusal(&error).is_some() => {
+        // A refused feed is not an outage to ride out quietly: the fleet goes
+        // on serving the rules it has, and says so at error level on every
+        // renewal until someone fixes the subscription.
+        Err(error) if scan::traits_repo::feed_refusal(&error).is_some() => {
             tracing::error!(
-                reason = scan::traits_repo::enriched_refusal(&error).unwrap_or_default(),
-                "enriched rules refused at renewal; serving the installed rules"
+                feed = cleave::feed::current().slug(),
+                reason = scan::traits_repo::feed_refusal(&error).unwrap_or_default(),
+                "rule feed refused at renewal; serving the installed rules"
             );
             false
         }

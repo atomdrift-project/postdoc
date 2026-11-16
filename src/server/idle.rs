@@ -130,7 +130,7 @@ fn worker_command(
     name: &str,
     cache_dir: &PathBuf,
     traits_dir: Option<&std::path::Path>,
-    enriched: bool,
+    feed: cleave::feed::Feed,
     slots: usize,
     cleave_concurrency: Option<&std::ffi::OsStr>,
 ) -> std::io::Result<Command> {
@@ -152,13 +152,12 @@ fn worker_command(
     if let Some(dir) = traits_dir {
         cmd.env("CLEAVE_TRAITS_DIR", dir);
     }
-    // The same rules tree for the same reason: `--uplink` is a process
-    // switch the child cannot inherit, and a worker on the open-source rules
-    // beside an Enriched server would report results under a version the
-    // server never runs.
-    if enriched {
-        cmd.arg("--uplink");
-    }
+    // The same rules tree for the same reason: the feed the server resolved
+    // (from its flag, its saved choice, its token, or a fall back after a
+    // refusal) is process state the child cannot inherit, and a worker on
+    // another feed's tree would report results under a version the server
+    // never runs.
+    cmd.arg("--feed").arg(feed.slug());
     cmd
         // The server owns updating. Two processes refreshing the same traits
         // checkout and models directory would race each other over a git tree,
@@ -297,7 +296,7 @@ impl Worker {
             &self.name,
             &self.cache,
             traits_dir.as_deref(),
-            cleave::enriched::enabled(),
+            cleave::feed::current(),
             self.slots,
             cleave_concurrency.as_deref(),
         )
@@ -453,7 +452,7 @@ mod tests {
             "host-idle",
             &dir,
             None,
-            false,
+            cleave::feed::Feed::OssDelayed,
             4,
             None,
         )
@@ -474,6 +473,8 @@ mod tests {
                 "4",
                 "--nice",
                 "19",
+                "--feed",
+                "oss-delayed",
                 "--no-update"
             ],
             "the child must honor the configured idle slots and background priority",
@@ -504,7 +505,7 @@ mod tests {
             "host-idle",
             &cache,
             None,
-            false,
+            cleave::feed::Feed::OssDelayed,
             96,
             Some(std::ffi::OsStr::new("8")),
         )
@@ -535,7 +536,7 @@ mod tests {
             "host-idle",
             &dir,
             Some(&traits),
-            false,
+            cleave::feed::Feed::OssDelayed,
             4,
             None,
         )
@@ -548,28 +549,32 @@ mod tests {
         assert!(!cmd.get_args().any(|arg| arg == "--traits-dir"));
     }
 
-    /// `--uplink` is a process switch, invisible to a child, so an Enriched
-    /// server must pass it on — or its idle worker would analyze with the
-    /// open-source rules and report results under a version the server never
-    /// runs.
+    /// The feed is process state, invisible to a child, so the server must
+    /// pass on the one it resolved — or its idle worker would analyze with
+    /// another feed's rules and report results under a version the server
+    /// never runs.
     #[test]
-    fn the_command_forwards_enriched_only_when_the_server_runs_it() {
+    fn the_command_forwards_the_servers_feed() {
+        use cleave::feed::Feed;
         let dir = PathBuf::from("/tmp/scan-idle-test");
-        let has = |enriched| {
-            worker_command(
+        for feed in Feed::ALL {
+            let cmd = worker_command(
                 "http://hopper.example",
                 "host-idle",
                 &dir,
                 None,
-                enriched,
+                feed,
                 4,
                 None,
             )
-            .expect("command")
-            .get_args()
-            .any(|a| a == "--uplink")
-        };
-        assert!(has(true));
-        assert!(!has(false));
+            .expect("command");
+            let args: Vec<_> = cmd.get_args().collect();
+            let at = args.iter().position(|a| *a == "--feed");
+            assert_eq!(
+                at.and_then(|i| args.get(i + 1)).copied(),
+                Some(std::ffi::OsStr::new(feed.slug())),
+                "{args:?}"
+            );
+        }
     }
 }

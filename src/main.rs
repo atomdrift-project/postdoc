@@ -177,10 +177,6 @@ impl DaemonArgs {
     }
 }
 
-const UPLINK_HELP: &str = "Insist on Atomdrift Uplink rules: the latest rules, the moment they clear QA. \
-Enabled automatically when this host holds a token. With the flag, a missing token starts \
-connection and a refused token stops the refresh. `ATOMDRIFT_UPLINK=0` keeps the public rules.";
-
 /// Worker and server coordination for the Atomdrift analysis fleet.
 #[derive(Debug, Parser)]
 #[command(version, about, max_term_width = 100)]
@@ -188,7 +184,6 @@ connection and a refused token stops the refresh. `ATOMDRIFT_UPLINK=0` keeps the
 // isotope13 for one: it is what isotope13's remote analysis runs on.
 // `--analyze` is still accepted, so a shared `SCAN_ANALYZE` does not break a
 // host, but only `remote` changes anything, and that is refused.
-#[command(mut_arg("uplink", |arg| arg.help(UPLINK_HELP).long_help(UPLINK_HELP)))]
 #[command(mut_arg("analyze", |arg| arg.hide(true)))]
 struct Cli {
     /// Scan's own global flags, flattened rather than restated.
@@ -417,18 +412,17 @@ fn main() -> ExitCode {
     // Reclaim stale and oversized caches on a recurring loop, as a
     // never-exiting daemon needs.
     scan::cache_cleanup::start(true);
-    // Enriched picks the rules tree, so it is decided before anything resolves
-    // one: on whenever this host holds a token, insisted on by `--uplink`,
-    // which connects the host before the first refresh. It means the
-    // Enriched rules and nothing else here: postdoc is what isotope13's remote
-    // analysis runs on, so it never asks isotope13 for a verdict itself.
-    if let Err(error) = cleave::enriched::resolve(cli.global.uplink) {
+    // The rule feed picks the rules tree, so it is decided before anything
+    // resolves one: `--feed`, else the saved choice, else zero-day when this
+    // host holds a token. A paid feed named with `--feed` connects the host
+    // before the first refresh (`sign_in` is a no-op otherwise). It means the
+    // rules and nothing else here: postdoc is what isotope13's remote analysis
+    // runs on, so it never asks isotope13 for a verdict itself.
+    if let Err(error) = cleave::feed::resolve(cli.global.feed) {
         eprintln!("postdoc: {error}");
         return ExitCode::from(EXIT_ERROR);
     }
-    if cleave::enriched::required()
-        && let Err(error) = cleave::rule_update::sign_in()
-    {
+    if let Err(error) = cleave::rule_update::sign_in() {
         eprintln!("postdoc: {error}");
         return ExitCode::from(EXIT_ERROR);
     }
@@ -606,14 +600,13 @@ mod tests {
         assert!(!help.contains("--analyze"), "--analyze is listed:\n{help}");
         assert!(
             !help.contains("remote verdicts"),
-            "--uplink promises remote verdicts:\n{help}"
+            "the help promises remote verdicts:\n{help}"
         );
-        assert!(help.contains("Uplink rules"));
         // Rendering the root propagated the global flags to its subcommands.
         let serve = command
             .find_subcommand_mut("serve")
             .map(|serve| serve.render_long_help().to_string());
-        assert!(serve.is_some_and(|help| help.contains("--uplink") && !help.contains("--analyze")));
+        assert!(serve.is_some_and(|help| help.contains("--feed") && !help.contains("--analyze")));
     }
 
     #[test]

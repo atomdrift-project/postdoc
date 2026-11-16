@@ -62,6 +62,8 @@ if cmd == 'rustup':
             rust['removed'] = True
             rust['stable'] = None
             done()
+        if args == ['component', 'add', 'llvm-tools']:
+            done(1 if rust.get('llvm_tools_fails') else 0)
         assert args == ['toolchain', 'install', 'stable', '--profile', 'minimal'], args
         if rust.get('removed'):
             if rust.get('repair_fails'): done(1)
@@ -162,7 +164,7 @@ class Host:
             executable = self.bin / command
             executable.write_text(MOCK)
             executable.chmod(0o755)
-        for command in ("dirname", "cut", "grep", "tr", "mktemp", "rm", "sed", "head", "awk", "cat", "python3"):
+        for command in ("dirname", "cut", "grep", "tr", "mktemp", "rm", "sed", "head", "awk", "cat", "find", "python3"):
             (self.bin / command).symlink_to(shutil.which(command))
         for command in ("7zz", "upx", "innoextract"):
             executable = self.bin / command
@@ -390,9 +392,9 @@ class DeployTests(unittest.TestCase):
                 self.assertEqual(saved["ENRICHED"], "1")
                 if platform == "Linux":
                     unit = (host.units / "postdoc.service").read_text()
-                    self.assertIn('"--uplink"', unit)
+                    self.assertIn('"--feed" "zero-day"', unit)
                 else:
-                    self.assertIn("--uplink", (host.units / "postdoc").read_text())
+                    self.assertIn("--feed zero-day", (host.units / "postdoc").read_text())
                 token = host.home / ".config/atomdrift/isotope13-api.json"
                 self.assertEqual(json.loads(token.read_text()), {"token": "i13_test_secret"})
                 self.assertEqual(token.stat().st_mode & 0o777, 0o600)
@@ -425,7 +427,7 @@ class DeployTests(unittest.TestCase):
                                           ("Linux", "worker"): "postdoc-worker.service",
                                           ("FreeBSD", "serve"): "postdoc",
                                           ("FreeBSD", "worker"): "postdoc_worker"}[(platform, mode)])
-                    self.assertIn("--uplink", unit.read_text())
+                    self.assertIn("zero-day", unit.read_text())
                     installed = host.home / ".config/atomdrift/isotope13-api.json"
                     self.assertEqual(json.loads(installed.read_text()), {"token": "i13_auto_secret"})
                     self.assertEqual(installed.stat().st_mode & 0o777, 0o600)
@@ -459,7 +461,7 @@ class DeployTests(unittest.TestCase):
         result = host.run(ENRICHED="0")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse((host.home / ".config/atomdrift/isotope13-api.json").exists())
-        self.assertNotIn("--uplink", (host.units / "postdoc.service").read_text())
+        self.assertNotIn("--feed", (host.units / "postdoc.service").read_text())
 
     def test_enriched_auto_detection_rejects_blank_source_before_service_changes(self):
         host = self.host()
@@ -547,11 +549,19 @@ class DeployTests(unittest.TestCase):
 
 
 class BootstrapRustTests(unittest.TestCase):
-    def exercise(self, **rust):
+    def exercise(self, llvm_tools=True, **rust):
         host = Host()
         self.addCleanup(host.close)
         (host.root / "Cargo.toml").write_text('rust-version = "1.97"\n')
         host.env.pop("RUSTUP_TOOLCHAIN", None)
+        # The bootstrap looks for llvm-profdata under RUSTUP_HOME to decide
+        # whether PGO needs llvm-tools; never let it see the developer's own.
+        rustup_home = host.root / "rustup"
+        if llvm_tools:
+            profdata = rustup_home / "toolchains/stable/lib/rustlib/x86_64-unknown-linux-gnu/bin/llvm-profdata"
+            profdata.parent.mkdir(parents=True)
+            profdata.write_text("")
+        host.env["RUSTUP_HOME"] = str(rustup_home)
         state = host.state()
         state["rust"] = rust
         (host.root / "state.json").write_text(json.dumps(state))
@@ -618,6 +628,17 @@ class BootstrapRustTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("error:", result.stderr)
                 self.assertEqual(len(calls), 3)
+
+    def test_missing_llvm_tools_are_added_for_pgo(self):
+        result, calls = self.exercise(default="1.97.0", llvm_tools=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(calls, [["component", "add", "llvm-tools"]])
+
+    def test_unavailable_llvm_tools_do_not_block_the_build(self):
+        result, calls = self.exercise(default="1.97.0", llvm_tools=False, llvm_tools_fails=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("release builds proceed without PGO", result.stdout)
+        self.assertEqual(calls, [["component", "add", "llvm-tools"]])
 
     def test_stable_below_required_version_stops_before_build(self):
         result, calls = self.exercise(installed_version="1.96.0")
