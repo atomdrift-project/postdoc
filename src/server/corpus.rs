@@ -218,6 +218,7 @@ impl Corpus {
         let client = reqwest::Client::builder()
             .timeout(READ_TIMEOUT)
             .redirect(reqwest::redirect::Policy::none())
+            .user_agent(crate::USER_AGENT)
             .build()
             .inspect_err(|e| {
                 tracing::error!(error = %e, "cannot build the corpus HTTP client; lookups answer from the local index alone");

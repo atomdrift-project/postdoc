@@ -4582,9 +4582,11 @@ impl Hopper {
         // network (cloud metadata, loopback admin ports) and read the reply
         // back through the failure it posts, and reqwest keeps the bearer
         // token on a same-host scheme downgrade.
+        // Hopper refuses a client that does not name itself.
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(120))
             .redirect(reqwest::redirect::Policy::none())
+            .user_agent(crate::USER_AGENT)
             .build()
             .context("building the hopper HTTP client")?;
         Ok(Self {

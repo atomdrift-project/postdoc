@@ -105,6 +105,10 @@ mod suspend;
 mod temp_space;
 mod worker;
 
+/// The user agent postdoc sends hopper, which refuses a client that does not
+/// name itself.
+const USER_AGENT: &str = concat!("postdoc/", env!("CARGO_PKG_VERSION"));
+
 /// Operational error. A worker that cannot start says why and stops, rather
 /// than idling in a loop that will never claim anything.
 const EXIT_ERROR: u8 = 1;
