@@ -36,22 +36,22 @@ build:
 	$(CARGO) build --locked
 
 # --- Profile-guided optimization ---------------------------------------------
-# `release` is profile-guided, as in ../scan: the first build trains a profile
-# (`pgo-train`) and later builds reuse it until `make pgo-train` runs again
-# (../scan measured CPU -7% to -10% over its benchmark corpora with identical
-# findings). postdoc has no local-scan entry point, so training drives an
-# instrumented `serve` over the corpus through scripts/bench-serve.sh (curl and
-# python3, both deploy prerequisites). The instrumented binary writes its
-# counters only on a normal exit, which SIGTERM gives the server on Unix; a
-# script cannot stop it gracefully on Windows, so training is skipped there
-# and the build proceeds unprofiled unless a profile already exists.
+# `release` uses a PGO profile when one exists and never trains one: training
+# is an instrumented build plus a full corpus run, far slower than the build it
+# speeds up, so it is the explicit `make pgo-train`. Release builds then reuse
+# that profile until `make pgo-train` runs again (../scan measured CPU -7% to
+# -10% over its benchmark corpora with identical findings). postdoc has no
+# local-scan entry point, so training drives an instrumented `serve` over the
+# corpus through scripts/bench-serve.sh (curl and python3, both deploy
+# prerequisites). The instrumented binary writes its counters only on a normal
+# exit, which SIGTERM gives the server on Unix; a script cannot stop it
+# gracefully on Windows, so there is no training there.
 #
 # The corpus is the rules repo's testdata beside this checkout (../traits-dev
 # or ../traits), or a shallow clone of https://github.com/atomdrift-project/traits
 # made into $(PGO_DIR)/traits when neither exists, plus ../scan's tests/ and
-# testdata/ when present. PGO=0 builds without a profile and without training.
-# Needs rustup's llvm-tools (deploy-bootstrap installs it; `rustup component
-# add llvm-tools` by hand).
+# testdata/ when present. PGO=0 ignores an existing profile. Training needs
+# rustup's llvm-tools (`rustup component add llvm-tools`).
 PGO ?= 1
 PGO_DIR ?= build/pgo
 PGO_PROFDATA = $(PGO_DIR)/$(BINARY)-release.profdata
@@ -62,20 +62,9 @@ TRAITS_TESTDATA ?= $(firstword $(wildcard ../traits-dev/testdata ../traits/testd
 PGO_TRAIN_CORPUS = $(if $(TRAITS_TESTDATA),$(TRAITS_TESTDATA),$(PGO_DIR)/traits/testdata)
 PGO_TRAIN_PATHS ?= $(PGO_TRAIN_CORPUS) $(wildcard ../scan/tests ../scan/testdata)
 
-# The training sub-make has a recipe line of its own: make runs a line that
-# mentions $(MAKE) even under `-n`, so sharing it with the cargo build would
-# turn a dry run into a real build. The bootstrap is sourced on that build
-# line because it is what puts cargo on PATH.
+# The bootstrap is sourced on the build line because it is what puts cargo on
+# PATH.
 release:
-	@if [ "$(PGO)" != 0 ] && [ ! -f "$(PGO_PROFDATA)" ]; then \
-	  case "$$(uname -s)" in \
-	    Linux|FreeBSD|Darwin) \
-	      if [ "$${POSTDOC_DEPLOY_BUILD:-}" = 1 ]; then . ./scripts/deploy-bootstrap.sh; fi; \
-	      $(MAKE) --no-print-directory pgo-train \
-	        || echo "release: PGO training failed (see above); building without PGO" >&2 ;; \
-	    *) echo "release: no PGO profile at $(PGO_PROFDATA) and no graceful server stop on $$(uname -s) to train with; building without PGO" >&2 ;; \
-	  esac; \
-	fi
 	@if [ "$${POSTDOC_DEPLOY_BUILD:-}" = 1 ]; then . ./scripts/deploy-bootstrap.sh; fi; \
 	set -e; prof="$(PGO_PROFDATA)"; flags=""; \
 	if [ "$(PGO)" != 0 ] && [ -f "$$prof" ]; then \
@@ -83,7 +72,7 @@ release:
 	  if command -v cygpath >/dev/null 2>&1; then abs=$$(cygpath -m "$$abs"); fi; \
 	  flags="-C profile-use=$$abs"; echo "release: PGO enabled ($$prof)"; \
 	else \
-	  echo "release: building without PGO"; \
+	  echo "release: building without PGO (make pgo-train creates a profile)"; \
 	fi; \
 	env -u MAKEFLAGS -u MAKELEVEL -u MFLAGS RUSTFLAGS="$${RUSTFLAGS:-} $$flags" cargo build --locked --release
 
@@ -279,8 +268,8 @@ clean:
 help:
 	@echo "postdoc targets:"
 	@echo "  build     debug build (optimized dependencies)"
-	@echo "  release   optimized, profile-guided build (trains the profile on first use; PGO=0 to skip)"
-	@echo "  pgo-train retrain the PGO profile on the rules testdata"
+	@echo "  release   optimized build; profile-guided once pgo-train has run (PGO=0 to ignore the profile)"
+	@echo "  pgo-train train the PGO profile on the rules testdata (slow)"
 	@echo "  quick     optimized build, no LTO — fast to link"
 	@echo "  install   cargo install to ~/.cargo/bin"
 	@echo "  lint      rustfmt --check + clippy with warnings denied"

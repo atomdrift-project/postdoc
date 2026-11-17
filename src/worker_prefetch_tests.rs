@@ -85,13 +85,11 @@ impl DelayedDownloadHopper {
                             }).collect();
                             let body = serde_json::json!({"jobs":jobs}).to_string();
                             respond(&mut stream, "200 OK", body.as_bytes()).await;
-                        } else if target.starts_with("/data/") {
-                            let id: usize = target
-                                .strip_prefix("/data/samples/")
-                                .and_then(|path| path.strip_suffix(".bin"))
-                                .expect("fixture data path")
-                                .parse()
-                                .expect("fixture numeric member");
+                        } else if let Some(sha) = target.strip_prefix("/v1/files/") {
+                            let id = payloads
+                                .iter()
+                                .position(|(want, _)| want == sha)
+                                .expect("fixture sha256");
                             let now = active.fetch_add(1, Ordering::AcqRel) + 1;
                             let _active = ActiveTestDownload(active);
                             peak.fetch_max(now, Ordering::AcqRel);

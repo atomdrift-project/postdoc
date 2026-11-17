@@ -62,8 +62,6 @@ if cmd == 'rustup':
             rust['removed'] = True
             rust['stable'] = None
             done()
-        if args == ['component', 'add', 'llvm-tools']:
-            done(1 if rust.get('llvm_tools_fails') else 0)
         assert args == ['toolchain', 'install', 'stable', '--profile', 'minimal'], args
         if rust.get('removed'):
             if rust.get('repair_fails'): done(1)
@@ -549,19 +547,11 @@ class DeployTests(unittest.TestCase):
 
 
 class BootstrapRustTests(unittest.TestCase):
-    def exercise(self, llvm_tools=True, **rust):
+    def exercise(self, **rust):
         host = Host()
         self.addCleanup(host.close)
         (host.root / "Cargo.toml").write_text('rust-version = "1.97"\n')
         host.env.pop("RUSTUP_TOOLCHAIN", None)
-        # The bootstrap looks for llvm-profdata under RUSTUP_HOME to decide
-        # whether PGO needs llvm-tools; never let it see the developer's own.
-        rustup_home = host.root / "rustup"
-        if llvm_tools:
-            profdata = rustup_home / "toolchains/stable/lib/rustlib/x86_64-unknown-linux-gnu/bin/llvm-profdata"
-            profdata.parent.mkdir(parents=True)
-            profdata.write_text("")
-        host.env["RUSTUP_HOME"] = str(rustup_home)
         state = host.state()
         state["rust"] = rust
         (host.root / "state.json").write_text(json.dumps(state))
@@ -628,17 +618,6 @@ class BootstrapRustTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("error:", result.stderr)
                 self.assertEqual(len(calls), 3)
-
-    def test_missing_llvm_tools_are_added_for_pgo(self):
-        result, calls = self.exercise(default="1.97.0", llvm_tools=False)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(calls, [["component", "add", "llvm-tools"]])
-
-    def test_unavailable_llvm_tools_do_not_block_the_build(self):
-        result, calls = self.exercise(default="1.97.0", llvm_tools=False, llvm_tools_fails=True)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("release builds proceed without PGO", result.stdout)
-        self.assertEqual(calls, [["component", "add", "llvm-tools"]])
 
     def test_stable_below_required_version_stops_before_build(self):
         result, calls = self.exercise(installed_version="1.96.0")

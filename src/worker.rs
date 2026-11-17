@@ -4547,7 +4547,7 @@ struct Hopper {
     /// The analyzer tools this host has, comma-separated, so hopper routes it
     /// only work it can finish.
     tools: String,
-    /// Bearer token; hopper requires it on all of `/v1/*` and `/data/`, and
+    /// Bearer token; hopper requires it on all of `/v1/*`, and
     /// does not exempt loopback. See [`scan::hopper::token`].
     token: Option<&'static str>,
     input_budget: Option<Arc<InputBudget>>,
@@ -4927,9 +4927,8 @@ impl Hopper {
         .await;
     }
 
-    /// Download file bytes from hopper, verifying their SHA-256. Tries the
-    /// fast `/data/{path}` endpoint first (static file serving, no DB query),
-    /// falling back to `/v1/files/{sha256}` for older hopper versions.
+    /// Download file bytes from hopper's `/v1/files/{sha256}`, verifying their
+    /// SHA-256.
     // Retained as the MAX_JOB_BYTES-capped entry point; production staging
     // goes through `download_bytes_with_limit` with the tighter RAM limit.
     #[allow(dead_code)]
@@ -5124,49 +5123,30 @@ impl Hopper {
         Ok(temp.into_temp_path())
     }
 
-    /// Open a download stream for a sample, trying the cheap path-based
-    /// endpoint first and falling back to the by-hash API. Returns the
-    /// successful response (headers read, body not yet consumed) and the route
-    /// label for logs.
+    /// Open a download stream for a sample from `/v1/files/{sha256}`. Returns
+    /// the successful response (headers read, body not yet consumed) and the
+    /// route label for logs. `path` is the sample's catalog path, for context
+    /// in errors only: hopper serves bytes by hash, and the path-based `/data/`
+    /// route is retired.
     async fn download_response(
         &self,
         sha256: &str,
         path: &str,
     ) -> Result<(reqwest::Response, &'static str)> {
-        if path.is_empty() || path == "." {
-            anyhow::bail!("download {sha256}: empty path from hopper, cannot fetch");
-        }
-
-        // Path-based endpoint: static file serving, no DB query on hopper's
-        // side. Each path segment is percent-encoded on its own.
-        let data_url = self.url(std::iter::once("data").chain(path.split('/')));
-        tracing::debug!(sha256 = %sha256, url = %data_url, "downloading via /data/");
-        let resp = self.get(data_url.clone()).send().await.with_context(|| {
-            format!("download failed: path={path} sha256={sha256} url={data_url}")
-        })?;
-        if resp.status().is_success() {
-            return Ok((resp, "/data/"));
-        }
-        let data_status = resp.status();
-        let data_body = error_excerpt(resp).await;
-
-        // /data/ failed — fall back to /v1/files/{sha256}, which looks the
-        // sample up by hash, so it works even when the relative path doesn't
-        // match hopper's data root (a different symlink resolution or a data
-        // root migration).
-        let api_url = self.url(["v1", "files", sha256]);
-        tracing::debug!(sha256 = %sha256, url = %api_url, "downloading via /v1/files/ (fallback)");
-        let resp = self.get(api_url.clone()).send().await.with_context(|| {
-            format!("download fallback failed: path={path} sha256={sha256} url={api_url}")
-        })?;
+        let url = self.url(["v1", "files", sha256]);
+        tracing::debug!(sha256 = %sha256, url = %url, "downloading via /v1/files/");
+        let resp =
+            self.get(url.clone()).send().await.with_context(|| {
+                format!("download failed: path={path} sha256={sha256} url={url}")
+            })?;
         if !resp.status().is_success() {
-            let api_status = resp.status();
-            let api_body = error_excerpt(resp).await;
+            let status = resp.status();
+            let body = error_excerpt(resp).await;
             anyhow::bail!(
-                "download failed: path={path} sha256={sha256}; /data/ url={data_url} status={data_status} body={data_body}; /v1/files/ url={api_url} status={api_status} body={api_body}",
+                "download failed: path={path} sha256={sha256} url={url} status={status} body={body}",
             );
         }
-        Ok((resp, "/v1/files/ (fallback)"))
+        Ok((resp, "/v1/files/"))
     }
 
     /// Fetch the registry-metadata provenance hopper holds for `sha256`,
@@ -5764,8 +5744,8 @@ mod tests {
     }
 
     // Minimal in-process hopper: serves `/v1/work/next` (returning exactly the
-    // requested `count` of distinct jobs, an unlimited supply) and `/data/...`
-    // (a fixed payload). Zero extra dependencies — just tokio, already in tree.
+    // requested `count` of distinct jobs, an unlimited supply) and
+    // `/v1/files/...` (a fixed payload). Zero extra dependencies — just tokio, already in tree.
     async fn read_target(stream: &mut tokio::net::TcpStream) -> Option<String> {
         read_request(stream).await.map(|(target, _)| target)
     }
@@ -6023,7 +6003,7 @@ mod tests {
                     let Some(target) = read_target(&mut stream).await else {
                         return;
                     };
-                    if target.starts_with("/data/") {
+                    if target.starts_with("/v1/files/") {
                         respond(&mut stream, "200 OK", PAYLOAD).await;
                     } else {
                         respond(&mut stream, "404 Not Found", b"").await;
@@ -6297,7 +6277,7 @@ mod tests {
                     let Some(target) = read_target(&mut stream).await else {
                         return;
                     };
-                    if target.starts_with("/data/") {
+                    if target.starts_with("/v1/files/") {
                         respond(&mut stream, "200 OK", PAYLOAD).await;
                     } else {
                         respond(&mut stream, "404 Not Found", b"").await;
@@ -6728,7 +6708,7 @@ mod tests {
                     let Some(target) = read_target(&mut stream).await else {
                         return;
                     };
-                    if target.starts_with("/data/") {
+                    if target.starts_with("/v1/files/") {
                         respond(&mut stream, "200 OK", PAYLOAD).await;
                     } else {
                         respond(&mut stream, "404 Not Found", b"").await;
@@ -6865,7 +6845,7 @@ mod tests {
                                 .collect();
                             let body = serde_json::json!({ "jobs": jobs }).to_string();
                             respond(&mut stream, "200 OK", body.as_bytes()).await;
-                        } else if target.starts_with("/data/") {
+                        } else if target.starts_with("/v1/files/") {
                             respond(&mut stream, "200 OK", PAYLOAD).await;
                         } else {
                             respond(&mut stream, "404 Not Found", b"").await;
@@ -7550,15 +7530,15 @@ mod tests {
         assert_eq!(WorkerTuning::default().stall_abort_after, None);
     }
 
-    /// Each sample-path segment is encoded on its own, so a path can neither
-    /// climb out of `/data/` nor smuggle a query into the URL.
+    /// Each segment is encoded on its own, so a value can neither climb out of
+    /// its route nor smuggle a query into the URL.
     #[test]
-    fn data_urls_encode_each_path_segment() {
+    fn urls_encode_each_segment() {
         let hopper = test_hopper("http://hopper.test:8081/");
-        let url = hopper.url(std::iter::once("data").chain("a b/../c?d#e/f.bin".split('/')));
+        let url = hopper.url(["v1", "files", "a b/../c?d#e"]);
         assert_eq!(
             url.as_str(),
-            "http://hopper.test:8081/data/a%20b/c%3Fd%23e/f.bin"
+            "http://hopper.test:8081/v1/files/a%20b%2F..%2Fc%3Fd%23e"
         );
         let prefixed = test_hopper("https://hops.example/hopper/");
         assert_eq!(
