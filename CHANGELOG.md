@@ -2,6 +2,22 @@
 
 All notable changes to postdoc. Versions follow [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.9.5 (unreleased)
+
+### Features
+
+- Speak scan's version 8 result format, rather than a private one nobody else could read.
+- Run ClamAV, malcontent and GuardDog on request with `--scanners`; they report beside the verdict and never change it.
+- Install requested scanners on Linux and FreeBSD deploys with `SCANNERS`, and fail loudly if one will not answer.
+- Return the full version 8 result instead of the decision when asked with `full=1`.
+- Breaking: talk only to hopper's `/v1` routes; older hoppers need not apply.
+- Breaking: analyses no longer time out by default; `--analysis-timeout` brings the limit back.
+
+### Fixes
+
+- Name ourselves to hopper with a user agent, since it refuses anonymous clients.
+- Read a hopper record holding unanalyzed bytes as nothing known, not as a failure.
+
 ## 0.9.0 (unreleased)
 
 First release. postdoc replaces `atomscan serve` and `atomscan worker`.
