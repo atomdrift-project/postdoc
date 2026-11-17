@@ -201,5 +201,3 @@ unwrap_used = "deny"
 expect_used = "deny"
 panic = "deny"
 
-[patch."https://github.com/atomdrift-project/scan.git"]
-atomdrift-scan = { path = "../scan" }
