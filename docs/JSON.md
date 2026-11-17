@@ -70,8 +70,8 @@ Each scanner is found when postdoc starts (clamd's socket from its
 `mal` must give its version, and GuardDog must scan an empty npm package,
 which proves the sandbox it insists on works. postdoc refuses to start
 without a scanner it was asked for, and says which and why. `--scanners`
-(`POSTDOC_SCANNERS`) picks which run — `clamav,malcontent,guarddog` by
-default, or `none` — and `--clamav`, `--malcontent` and `--guarddog` name
+(`POSTDOC_SCANNERS`) picks which run — `none` by default, or any of
+`clamav,malcontent,guarddog` — and `--clamav`, `--malcontent` and `--guarddog` name
 where one is when discovery will not find it. `make scanners`, and every
 deploy, install them.
 

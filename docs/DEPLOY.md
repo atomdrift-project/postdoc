@@ -114,7 +114,9 @@ down to `python3.10`, installing `python@3.13` when none fits).
 passed to the service as `--scanners` and kept in its manifest for later
 rollouts. The deploy fails if a scanner it was asked for cannot be installed
 or does not answer; the service then checks each again every time it starts.
-Windows deploys install none, and postdoc there runs none by default.
+Deploys default to `SCANNERS=none`, and postdoc itself runs none unless
+`--scanners` names some, so a unit or drop-in that omits the flag runs none.
+Windows deploys install none.
 
 ## Deployment parity fixes
 

@@ -208,8 +208,9 @@ install-precommit:
 
 deploy-worker deploy-server: export POSTDOC_DEPLOY_BUILD := 1
 
-# Third-party scanners (ClamAV, malcontent, GuardDog) are off for deploys for
-# now; re-enable with SCANNERS=clamav,malcontent,guarddog (or any subset).
+# Third-party scanners (ClamAV, malcontent, GuardDog) are off by default, for
+# deploys and for postdoc itself; enable with SCANNERS=clamav,malcontent,guarddog
+# (or any subset).
 SCANNERS ?= none
 _deploy: export SCANNERS := $(SCANNERS)
 
@@ -223,16 +224,18 @@ test-deploy:
 ## worker: run a worker in the foreground, as you, until Ctrl-C
 ##         No service, no state directory — it reads ~/.tok/hopper directly.
 ##         LLM= turns the interpreter off; LLM=<endpoint> points it elsewhere.
+##         SCANNERS=clamav,malcontent,guarddog (or a subset) adds those scanners.
 worker: release
 	@[ -n "$(URL)" ] || { echo "usage: make worker URL=<hopper url>"; exit 1; }
 	@[ -r "$$HOME/.tok/hopper" ] || { \
 	  echo "error: no hopper token at ~/.tok/hopper; every claim would 401" >&2; exit 1; }
 	SCAN_LLM="$(LLM)" $(if $(LLM_MODEL),SCAN_LLM_MODEL="$(LLM_MODEL)",) \
-	  ./target/release/$(BINARY) worker --url "$(URL)"
+	  POSTDOC_SCANNERS="$(SCANNERS)" ./target/release/$(BINARY) worker --url "$(URL)"
 
-## scanners: install and start the scanners postdoc runs by default — ClamAV,
-##           malcontent, GuardDog — on this host (macOS, Linux, FreeBSD).
-##           Deploys do this themselves; SCANNERS=clamav,guarddog picks a subset.
+## scanners: install and start the third-party scanners postdoc can run —
+##           ClamAV, malcontent, GuardDog — on this host (macOS, Linux, FreeBSD).
+##           A deploy with SCANNERS= set does this itself; SCANNERS=clamav,guarddog
+##           picks a subset.
 scanners:
 	./scripts/deploy-scanners.sh
 

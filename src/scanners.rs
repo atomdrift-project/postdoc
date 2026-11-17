@@ -37,12 +37,10 @@ use clamav::ClamAv;
 use guarddog::GuardDog;
 use malcontent::Malcontent;
 
-/// The scanners postdoc runs unless told otherwise. ClamAV is reached over a
-/// Unix socket, and none of the three is deployed on other platforms.
-#[cfg(unix)]
-pub const DEFAULT: &str = "clamav,malcontent,guarddog";
-/// The scanners postdoc runs unless told otherwise.
-#[cfg(not(unix))]
+/// The scanners postdoc runs unless told otherwise: none. Third-party
+/// scanners are opt-in (`--scanners`, `POSTDOC_SCANNERS`), so a worker that
+/// is run by hand, supervised by hopper, or started by a unit that never
+/// heard of them runs without them instead of refusing to start.
 pub const DEFAULT: &str = "none";
 
 /// The most bytes of a scanner's error text an object carries: what scan

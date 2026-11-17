@@ -12,11 +12,12 @@ the result every worker posts.
 
     postdoc worker --url http://hopper-host:8081
 
-Every sample is also scanned by ClamAV, malcontent and GuardDog, whose
+With `--scanners` (`POSTDOC_SCANNERS`) naming any of `clamav`,
+`malcontent` and `guarddog`, every sample is also scanned by them, and their
 findings are posted beside the verdict under `scanners`
-([JSON.md](JSON.md#other-scanners)). Each is checked at startup, and a
-worker without one refuses to start: `make scanners` installs them, and
-`--scanners` (`POSTDOC_SCANNERS`) picks a subset or `none`.
+([JSON.md](JSON.md#other-scanners)). The default is `none`. Each one named is
+checked at startup, and a worker without one it was asked for refuses to
+start: `make scanners` installs them.
 
 `--url` is required. Everything else has a sensible default.
 
