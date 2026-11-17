@@ -3,6 +3,7 @@ $fixture=Join-Path ([IO.Path]::GetTempPath()) ('postdoc-windows-test-'+[guid]::N
 New-Item -ItemType Directory -Force -Path "$fixture/scripts","$fixture/target/release","$fixture/tokens","$fixture/mockbin" | Out-Null
 $env:ProgramFiles="$fixture/programfiles"
 $env:ProgramData="$fixture/programdata"
+$env:POSTDOC_SERVICE_HOME="$fixture/programdata/Atomdrift/postdoc"
 $env:WINDOWS_DEPLOY_TEST_STATE="$fixture/state.json"
 $env:LLM='https://llm.example/v1'
 $env:LLM_MODEL='test/model'

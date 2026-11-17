@@ -31,6 +31,7 @@
 ///
 /// No-op unless this is a Windows build using mimalloc.
 #[cfg(all(windows, not(feature = "crt-heap")))]
+#[allow(unsafe_code)] // FFI into mimalloc; see the SAFETY notes below
 pub(crate) fn trim() {
     // `mi_collect(true)` does two things (mimalloc v3 `theap.c`): it collects
     // the *calling thread's* heap, and it then runs `_mi_arenas_collect` with a

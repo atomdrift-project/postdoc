@@ -1,4 +1,15 @@
 SHELL := /bin/sh
+# From cmd.exe or PowerShell there is no /bin/sh, so make falls back to cmd.exe
+# and chokes on the POSIX recipes. Use Git for Windows' sh and put its
+# coreutils (uname, find, head, ...) on PATH. Git Bash/MSYS already has both.
+ifeq ($(OS),Windows_NT)
+# Paths with spaces break wildcard and SHELL, so Program Files becomes its 8.3 name.
+GIT_USR_BIN := $(firstword $(wildcard C:/Progra~1/Git/usr/bin $(subst \,/,$(subst Program Files,Progra~1,$(ProgramW6432)))/Git/usr/bin $(subst \,/,$(LOCALAPPDATA))/Programs/Git/usr/bin $(subst \,/,$(USERPROFILE))/scoop/apps/git/current/usr/bin))
+ifneq ($(GIT_USR_BIN),)
+SHELL := $(GIT_USR_BIN)/sh.exe
+export PATH := $(GIT_USR_BIN);$(PATH)
+endif
+endif
 # postdoc — worker and server coordination for the Atomdrift analysis fleet.
 # The cargo package, library, and binary all share the name `postdoc`.
 BINARY = postdoc

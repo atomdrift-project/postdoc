@@ -47,7 +47,19 @@ $InstallDir  = Join-Path $env:ProgramFiles 'Atomdrift'
 $BinDst      = Join-Path $InstallDir $Binary
 $StateHome   = Join-Path $env:ProgramData 'Atomdrift\postdoc'
 $LogDir      = Join-Path $StateHome 'logs'
-$TokDir      = Join-Path $StateHome '.tok'
+# postdoc resolves `~/.tok` through the Windows profile API, which ignores the
+# HOME and USERPROFILE variables, so the tokens have to live in the profile of
+# the account the service runs as (LocalSystem). POSTDOC_SERVICE_HOME overrides
+# the lookup for tests.
+$ServiceHome = if ($env:POSTDOC_SERVICE_HOME) {
+    $env:POSTDOC_SERVICE_HOME
+} else {
+    $profileKey = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\S-1-5-18'
+    $profilePath = (Get-ItemProperty -Path $profileKey -ErrorAction SilentlyContinue).ProfileImagePath
+    if ($profilePath) { [Environment]::ExpandEnvironmentVariables($profilePath) }
+    else { Join-Path $env:SystemRoot 'System32\config\systemprofile' }
+}
+$TokDir      = Join-Path $ServiceHome '.tok'
 
 $identity = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
 if (-not $identity.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -153,6 +165,10 @@ $binSrc = Join-Path (Join-Path $PSScriptRoot '..') "target\release\$Binary"
 if (-not (Test-Path $binSrc)) { Die "$binSrc not found; run ``cargo build --release`` first" }
 
 New-Item -ItemType Directory -Force -Path $InstallDir, $StateHome, $LogDir, $TokDir | Out-Null
+# The service runs with USERPROFILE=$StateHome, and Windows resolves the data
+# and cache directories as %USERPROFILE%\AppData\{Roaming,Local}. It reports
+# "no data directory" rather than creating them, so they have to exist.
+New-Item -ItemType Directory -Force -Path (Join-Path $StateHome 'AppData\Roaming'), (Join-Path $StateHome 'AppData\Local') | Out-Null
 # Tokens are inherited by the service as LocalSystem. Remove ProgramData's
 # broader inherited read access so ordinary local users cannot read either
 # credential.
@@ -193,6 +209,17 @@ function Quote-Argument([string]$value) {
     # CommandLineToArgvW escaping, including trailing backslashes.
     return '"' + ([regex]::Replace($value, '(\\*)"', '$1$1\"') -replace '(\\+)$', '$1$1') + '"'
 }
+# Stop in any state but Stopped (Running, Paused by NSSM's throttle,
+# StartPending...) and wait for it: `nssm start` on a live service fails.
+function Stop-ServiceFully {
+    if ((Get-Service $ServiceName).Status -eq 'Stopped') { return }
+    & $nssm stop $ServiceName | Out-Null
+    for ($i = 0; $i -lt 60; $i++) {
+        if ((Get-Service $ServiceName).Status -eq 'Stopped') { return }
+        Start-Sleep -Seconds 1
+    }
+    Die "could not stop service $ServiceName"
+}
 $arguments = @($Mode)
 if ($Mode -eq 'worker') {
     $arguments += @('--url', $Url)
@@ -219,14 +246,22 @@ $configPath = Join-Path $StateHome "deploy-$Mode.json"
 $configText = $configuration | ConvertTo-Json
 if (-not (Test-Path $configPath) -or [IO.File]::ReadAllText($configPath) -ne $configText) { $changed = $true }
 if ($binaryChanged -or $changed) {
-    if ($svc -and $svc.Status -eq 'Running') { & $nssm stop $ServiceName | Out-Null; if ($LASTEXITCODE -ne 0) { Die 'could not stop service' } }
+    if ($svc) { Stop-ServiceFully }
     if ($binaryChanged) {
         Copy-Item $binSrc "$BinDst.new" -Force
         Move-Item "$BinDst.new" $BinDst -Force
     }
 } elseif ($svc) {
     Log 'No changes; leaving service running'
-    if ($svc.Status -ne 'Running') { & $nssm start $ServiceName | Out-Null }
+    # Like `systemctl start` on a unit that is not active: a service the SCM
+    # shows as anything but Running (stopped, or Paused by the throttle after
+    # a crash loop) is restarted rather than reported healthy.
+    if ($svc.Status -ne 'Running') {
+        Log "$ServiceName is $($svc.Status); restarting"
+        Stop-ServiceFully
+        & $nssm start $ServiceName | Out-Null
+        if ($LASTEXITCODE -ne 0) { Die "NSSM operation failed for $ServiceName" }
+    }
     $skipUpdate = $true
 }
 
@@ -273,10 +308,11 @@ if ($LASTEXITCODE -ne 0) { Die "NSSM operation failed for $ServiceName" }
 & $nssm set $ServiceName AppRotateBytes 52428800 | Out-Null
 if ($LASTEXITCODE -ne 0) { Die "NSSM operation failed for $ServiceName" }
 
-# HOME steers every ~/.tok lookup into the state directory. The tokens
-# themselves never enter the environment block, which any local user can read
-# out of the registry. PATH is the deploying user's, so 7z/upx installed
-# per-user stay reachable.
+# HOME points child tools at the state directory. It does not move postdoc's
+# own ~/.tok lookup, which follows the service account's profile (see $TokDir).
+# The tokens themselves never enter the environment block, which any local user
+# can read out of the registry. PATH is the deploying user's, so 7z/upx
+# installed per-user stay reachable.
 $svcEnv = @(
     "HOME=$StateHome",
     "USERPROFILE=$StateHome",
@@ -294,15 +330,20 @@ Log "Starting $ServiceName"
 & $nssm start $ServiceName | Out-Null
 if ($LASTEXITCODE -ne 0) { Die "NSSM operation failed for $ServiceName" }
 
-# A service that starts and then dies still reports "started", so wait and look.
-Start-Sleep -Seconds 3
-$svc = Get-Service $ServiceName
-if ($svc.Status -ne 'Running') {
-    Get-Content (Join-Path $LogDir "$Mode.err.log") -Tail 40 -ErrorAction SilentlyContinue
-    Die "$ServiceName failed to start"
+}
+
+# A service that starts and then dies still reports "started", and NSSM turns a
+# crash loop into Paused, so watch it through a grace period (this also covers
+# the no-change path) rather than trusting the instant after `start`.
+for ($i = 0; $i -lt 15; $i++) {
+    $svc = Get-Service $ServiceName
+    if ($svc.Status -ne 'Running') {
+        Get-Content (Join-Path $LogDir "$Mode.err.log") -Tail 40 -ErrorAction SilentlyContinue
+        Die "$ServiceName exited during startup (status $($svc.Status))"
+    }
+    Start-Sleep -Seconds 1
 }
 Log "$ServiceName is running"
-}
 
 if ($Mode -eq 'serve') {
     $bind = if ($env:BIND) { $env:BIND } else { '127.0.0.1:49999' }

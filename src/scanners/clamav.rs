@@ -8,9 +8,14 @@
 use std::path::PathBuf;
 
 use anyhow::Result;
-use serde_json::{Value, json};
+use serde_json::Value;
+#[cfg(unix)]
+use serde_json::json;
 
-use super::{MAX_ERROR, failed};
+#[cfg(unix)]
+use super::MAX_ERROR;
+use super::failed;
+#[cfg(unix)]
 use crate::bounded;
 
 /// clamd configurations, in the places each platform's package puts them.
@@ -228,6 +233,7 @@ impl ClamAv {
 
 /// `ClamAV 1.4.1/28044/Thu Nov 12 09:24:02 2026` as its engine and database
 /// versions.
+#[cfg(unix)]
 fn parse_version(reply: &str) -> Option<(String, String)> {
     let mut parts = reply.strip_prefix("ClamAV ")?.split('/');
     let engine = parts.next()?.trim();
@@ -241,6 +247,7 @@ fn parse_version(reply: &str) -> Option<(String, String)> {
 /// software that is unwanted rather than malicious, and `Heuristics.` a
 /// pattern rather than a known sample, so both are suspicious. A limit
 /// reached is no reading at all.
+#[cfg(unix)]
 fn clamd_opinion(reply: &str) -> Value {
     let body = reply.strip_prefix("stream:").map_or(reply, str::trim);
     if body == "OK" {

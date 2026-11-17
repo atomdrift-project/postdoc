@@ -308,7 +308,6 @@ dependencies = [
 [[package]]
 name = "atomdrift-scan"
 version = "3.0.0-beta.2"
-source = "git+https://github.com/atomdrift-project/scan.git#ac57480dddb9c97222e61a1503a40a404d80dbbb"
 dependencies = [
  "anyhow",
  "axum",
@@ -900,7 +899,7 @@ checksum = "e0921b3876b3a1df8a1c9f912e7f94342458022c2e84288015893d83c4d62a79"
 [[package]]
 name = "cleave"
 version = "3.0.0"
-source = "git+https://github.com/atomdrift-project/cleave.git#a9fa220b8ba4136ac4f5f5b1b7b0dddaf434a016"
+source = "git+https://github.com/atomdrift-project/cleave.git#d0161691daacf6fd27eec32bd88a28b4ad2615a2"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -978,7 +977,7 @@ dependencies = [
 [[package]]
 name = "cleave-macros"
 version = "0.1.0"
-source = "git+https://github.com/atomdrift-project/cleave.git#a9fa220b8ba4136ac4f5f5b1b7b0dddaf434a016"
+source = "git+https://github.com/atomdrift-project/cleave.git#d0161691daacf6fd27eec32bd88a28b4ad2615a2"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -3238,7 +3237,7 @@ dependencies = [
 [[package]]
 name = "lzx"
 version = "0.1.0"
-source = "git+https://github.com/atomdrift-project/cleave.git#a9fa220b8ba4136ac4f5f5b1b7b0dddaf434a016"
+source = "git+https://github.com/atomdrift-project/cleave.git#d0161691daacf6fd27eec32bd88a28b4ad2615a2"
 
 [[package]]
 name = "lzxd"
@@ -5625,7 +5624,7 @@ dependencies = [
 [[package]]
 name = "sysmem"
 version = "0.1.0"
-source = "git+https://github.com/atomdrift-project/cleave.git#a9fa220b8ba4136ac4f5f5b1b7b0dddaf434a016"
+source = "git+https://github.com/atomdrift-project/cleave.git#d0161691daacf6fd27eec32bd88a28b4ad2615a2"
 
 [[package]]
 name = "tap"
@@ -7490,7 +7489,7 @@ checksum = "cfe53a6657fd280eaa890a3bc59152892ffa3e30101319d168b781ed6529b049"
 [[package]]
 name = "yara-classify"
 version = "0.1.0"
-source = "git+https://github.com/atomdrift-project/cleave.git#a9fa220b8ba4136ac4f5f5b1b7b0dddaf434a016"
+source = "git+https://github.com/atomdrift-project/cleave.git#d0161691daacf6fd27eec32bd88a28b4ad2615a2"
 
 [[package]]
 name = "yara-x"
