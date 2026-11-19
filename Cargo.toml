@@ -128,6 +128,8 @@ tree-sitter = "0.28"
 # `links = "tree-sitter-language"` permits exactly one copy in the graph.
 # Keep in lockstep with the siblings; remove when a release lands.
 [patch.crates-io]
+# Inherited from a sibling by update-deps: [patch] applies only in the root.
+regex-syntax = { git = "https://github.com/tstromberg/regex" }
 # Unicode-safe brace-range scanner; shared across consumers by update-deps.
 tree-sitter-bash = { git = "https://github.com/tstromberg/tree-sitter-bash" }
 tree-sitter = { git = "https://github.com/tstromberg/tree-sitter" }
