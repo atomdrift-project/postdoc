@@ -28,7 +28,9 @@
 #   HOPPER_NODE   SSH host for Hopper (default 10.9.8.10)
 #   HOPPER_HEALTH Hopper health URL on that host (default http://127.0.0.1:8081/healthz)
 #   URL           explicit Hopper override; otherwise preserve installed settings
-#   DB            hopper database to read the roster from
+#   HOPPER_DASH   hopper's dashboard, whose /workers.json is the roster
+#                 (default http://$HOPPER_NODE:8082)
+#   MIN_FREE_GB   free disk a host must have before it is built on  (default 20)
 #   TIMEOUT       seconds before a wedged deploy is cut loose (default 1800)
 #   HEALTH_ADDR   where a server answers /_/health   (default 127.0.0.1:49999)
 #   HEALTH_WAIT   seconds a server may take to come back      (default 300)
@@ -48,18 +50,22 @@ PHASES="${PHASES:-hopper workers servers}"
 URL="${URL:-}"
 HOPPER_NODE="${HOPPER_NODE:-10.9.8.10}"
 HOPPER_HEALTH="${HOPPER_HEALTH:-http://127.0.0.1:8081/healthz}"
-DB="${DB:-}"
+HOPPER_DASH="${HOPPER_DASH:-http://$HOPPER_NODE:8082}"
 TIMEOUT="${TIMEOUT:-1800}"
 HEALTH_ADDR="${HEALTH_ADDR:-}"
 HEALTH_WAIT="${HEALTH_WAIT:-300}"
 HEALTH_UPTIME="${HEALTH_UPTIME:-600}"
+MIN_FREE_GB="${MIN_FREE_GB:-20}"
 
 log()  { printf '==> %s\n' "$*"; }
 note() { printf '    %s\n' "$*"; }
 warn() { printf '!!! %s\n' "$*" >&2; }
 die()  { warn "$*"; exit 1; }
 
-work="$(mktemp -d)"
+# Under /tmp, not $TMPDIR: the ssh control sockets live in here, and a unix
+# socket path is limited to 104 bytes. macOS's $TMPDIR alone is ~50, which
+# with the 40-byte %C hash overflows it, and ssh then fails every connection.
+work="$(mktemp -d /tmp/rollout.XXXXXX)"
 ctl="$work/ssh"
 mkdir -p "$ctl"
 # Close every multiplexed master on the way out, whatever the exit path.
@@ -76,25 +82,47 @@ trap cleanup EXIT INT TERM
 SSH_OPTS="-o ControlMaster=auto -o ControlPath=$ctl/%C -o ControlPersist=900 \
   -o ConnectTimeout=15 -o ServerAliveInterval=30 -o StrictHostKeyChecking=accept-new"
 
+# Reaches a remote shell's arithmetic, so it is digits or nothing.
+case "$MIN_FREE_GB" in ''|*[!0-9]*) die "MIN_FREE_GB must be a whole number of gigabytes, not '$MIN_FREE_GB'" ;; esac
+
 # --- Roster ------------------------------------------------------------------
 
 if [ -z "$HOSTS" ]; then
-    [ -n "$DB" ] || die "set DB=<hopper postgres url>, or pass HOSTS=\"a b c\""
-    command -v psql >/dev/null 2>&1 || die "psql not found; pass HOSTS instead"
+    command -v curl >/dev/null 2>&1 || die "curl not found; pass HOSTS instead"
+    command -v python3 >/dev/null 2>&1 || die "python3 not found; pass HOSTS instead"
     log "Asking hopper which hosts checked in over the last $DAYS days"
+    # The roster is what hopper's dashboard shows: its in-memory worker tracker.
+    # The workers table in its database is not that. Hopper stops writing it
+    # while the verdict store is on, so a roster read from it is frozen at the
+    # day that changed and drops hosts as they age out of the window.
+    curl -fsS --max-time 15 -o "$work/workers.json" "$HOPPER_DASH/workers.json" ||
+        die "could not reach $HOPPER_DASH/workers.json; check HOPPER_DASH, or pass HOSTS"
+    # A hopper that predates the route answers every path with the dashboard
+    # page, which is a 200 and not JSON.
     # A server's embedded idle worker checks in as `<host>-idle`, so the suffix
     # is what separates a server from a worker. Newest check-in per host wins.
-    roster=$(psql "$DB" -Atq -c "
-        SELECT DISTINCT ON (host) host || CASE WHEN idle THEN '-idle' ELSE '' END
-        FROM (
-            SELECT regexp_replace(split_part(name, ':', 1), '-idle\$', '') AS host,
-                   split_part(name, ':', 1) LIKE '%-idle'                  AS idle,
-                   last_seen
-            FROM workers
-            WHERE last_seen > now() - interval '$DAYS days'
-        ) t
-        ORDER BY host, last_seen DESC") ||
-        die "could not read the worker roster from $DB"
+    # `local` is hopper's own built-in worker: it is redeployed with hopper, and
+    # is not a host that can be reached.
+    roster=$(python3 -I -c '
+import datetime, json, re, sys
+cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=float(sys.argv[1]))
+newest = {}
+try:
+    workers = json.load(open(sys.argv[2]))
+except ValueError:
+    sys.exit(1)
+for w in workers:
+    name = w["name"].split(":")[0]
+    if name == "local":
+        continue
+    seen = re.sub(r"(\.\d{6})\d+", r"\1", w["last_seen"]).replace("Z", "+00:00")
+    seen = datetime.datetime.fromisoformat(seen)
+    host = name[: -len("-idle")] if name.endswith("-idle") else name
+    if seen >= cutoff and (host not in newest or seen > newest[host][0]):
+        newest[host] = (seen, name)
+print("\n".join(name for _, name in sorted(newest.values(), key=lambda v: v[1])))
+' "$DAYS" "$work/workers.json") ||
+        die "$HOPPER_DASH/workers.json is not a worker list: is hopper older than that route? run PHASES=hopper first, or pass HOSTS"
     [ -n "$roster" ] || die "hopper has seen no workers in the last $DAYS days"
 else
     roster="$HOSTS"
@@ -161,9 +189,36 @@ HOPPER_REMOTE
     fi
     cat <<'REMOTE'
 set -eu
-repo="$HOME/postdoc"
-[ -d "$repo" ] || exit 90
+# Where the checkout lives is the host's choice. Windows hosts keep source
+# under src\ -- in the profile or at the drive root -- rather than in $HOME.
+set -- "$HOME/postdoc"
+case "$(uname -s)" in
+MSYS*|MINGW*|CYGWIN*) set -- "$@" "$HOME/src/postdoc" /c/src/postdoc ;;
+esac
+repo=""
+for d in "$@"; do
+    if [ -d "$d" ]; then repo="$d"; break; fi
+done
+[ -n "$repo" ] || exit 90
 cd "$repo"
+
+# Cargo's built-in git client authenticates through ssh-agent only, and a
+# rollout session has none, so a git dependency it has not cached fails with
+# "failed to authenticate". The git CLI uses the host's own ssh keys instead.
+CARGO_NET_GIT_FETCH_WITH_CLI=true
+export CARGO_NET_GIT_FETCH_WITH_CLI
+
+# A release build needs room for its dependencies and for the previous build's
+# leftovers. Without this a full disk surfaces as "os error 112" halfway through
+# a compile, after the checkout has already been moved. Check before touching
+# anything. It does not go looking for what is using the space: walking a full
+# disk takes minutes, and the failure should be immediate.
+min_free_gb=${ROLLOUT_MIN_FREE_GB:-20}
+free_kb=$(df -Pk . | awk 'NR==2 {print $4}')
+if [ "${free_kb:-0}" -lt $(( min_free_gb * 1024 * 1024 )) ]; then
+    echo "not enough free disk for a build: $(( ${free_kb:-0} / 1024 / 1024 )) GB free under $repo, need $min_free_gb GB" >&2
+    exit 1
+fi
 
 unit_live() {
     case "$1" in
@@ -210,6 +265,11 @@ upstream=$(git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null) |
 git fetch --prune
 git reset --hard "$upstream"
 
+# The Makefile is GNU make's. FreeBSD's `make` is BSD make, which cannot parse
+# it, and GNU make is installed there as `gmake`.
+mk=make
+[ "$(uname -s)" != FreeBSD ] || mk=gmake
+
 if [ -n "$server_unit" ]; then
     config=/etc/postdoc/serve.json
     [ "$(uname -s)" != FreeBSD ] || config=/usr/local/etc/postdoc/serve.json
@@ -227,7 +287,7 @@ if [ -n "$server_unit" ]; then
     . "$saved"
     rm -f "$saved"
     if [ -n "${ROLLOUT_URL:-}" ]; then HOPPER=$ROLLOUT_URL; export HOPPER; fi
-    make deploy-server
+    $mk deploy-server
 elif [ -n "$worker_unit" ]; then
     config=/etc/postdoc/worker.json
     [ "$(uname -s)" != FreeBSD ] || config=/usr/local/etc/postdoc/worker.json
@@ -249,7 +309,7 @@ elif [ -n "$worker_unit" ]; then
         URL=${ROLLOUT_URL:-${URL:-}}
     fi
     [ -n "${URL:-}" ] || { echo "no worker URL configured" >&2; exit 91; }
-    make deploy-worker URL="$URL"
+    $mk deploy-worker URL="$URL"
 else
     exit 91
 fi
@@ -261,7 +321,9 @@ status_of() { cut -d' ' -f2 "$work/$1.status" 2>/dev/null || echo "not-reached";
 connect() {
     host="$1"
     for _ in 1 2 3; do
-        ssh $SSH_OPTS -o BatchMode=no -- "$host" true >/dev/null 2>&1 && return 0
+        # `exit 0`, not `true`: it is the one command sh, cmd.exe and PowerShell
+        # all have, and a Windows host's ssh login shell is cmd.exe.
+        ssh $SSH_OPTS -o BatchMode=no -- "$host" 'exit 0' >/dev/null 2>&1 && return 0
     done
     echo "$host UNREACHABLE" > "$work/$host.status"
     warn "$host: unreachable"
@@ -274,12 +336,25 @@ deploy_host() {
     started=$(date +%s)
 
     role=${2:-postdoc}
+    # The deploy script is POSIX sh fed over stdin. A Windows host's ssh login
+    # shell is cmd.exe: it has no `sh` on PATH, so Git for Windows' is run by
+    # its 8.3 path (no quoting needed), and that sh starts with only the Windows
+    # PATH, which lacks the Git coreutils (uname, mktemp, ...) the script uses.
+    if ssh $SSH_OPTS -- "$host" 'sh -c "exit 0"' >/dev/null 2>&1; then
+        remote_sh='sh -s'
+        remote_path=''
+    else
+        remote_sh='C:\Progra~1\Git\usr\bin\sh.exe -s'
+        remote_path='PATH=/usr/bin:$PATH; export PATH'
+    fi
     # Quote values as shell data in stdin rather than interpolating an ssh command.
     {
+        [ -z "$remote_path" ] || printf '%s\n' "$remote_path"
+        printf "ROLLOUT_MIN_FREE_GB='%s'\n" "$MIN_FREE_GB"
         printf "ROLLOUT_URL='%s'\n" "$(printf '%s' "$URL" | sed "s/'/'\\\\''/g")"
         printf "ROLLOUT_HOPPER_HEALTH='%s'\n" "$(printf '%s' "$HOPPER_HEALTH" | sed "s/'/'\\\\''/g")"
         remote_script "$role"
-    } | ssh $SSH_OPTS -- "$host" sh -s >"$logfile" 2>&1 &
+    } | ssh $SSH_OPTS -- "$host" $remote_sh >"$logfile" 2>&1 &
     ssh_pid=$!
     # A wedged deploy must not hold the whole rollout. The killer races the
     # deploy and loses in the normal case.

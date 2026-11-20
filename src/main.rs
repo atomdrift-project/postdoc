@@ -488,13 +488,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                     // resolvable dependency: the fresh-risk window that keeps
                     // an interactive scan fast discards exactly the long tail
                     // the cache wants.
-                    fetch: cli.global.fetch_policy(
-                        cli.global
-                            .follow
-                            .unwrap_or_else(scan::fetch::default_service_follow_policy),
-                        scan::fetch::WORKER_MAX_DEP_AGE_DAYS,
-                        true,
-                    ),
+                    fetch: service_fetch_policy(&cli.global, scan::fetch::WORKER_MAX_DEP_AGE_DAYS),
                     zip_passwords: cli.global.zip_passwords.clone().into(),
                 },
             }
@@ -538,13 +532,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                     refresh: cli.global.refresh(),
                     slow_rule_ms: scan::cli::DEFAULT_SLOW_RULE_MS,
                     interpret: cli.global.interpret_config()?,
-                    fetch: cli.global.fetch_policy(
-                        cli.global
-                            .follow
-                            .unwrap_or_else(scan::fetch::default_service_follow_policy),
-                        scan::fetch::DEFAULT_MAX_DEP_AGE_DAYS,
-                        true,
-                    ),
+                    fetch: service_fetch_policy(&cli.global, scan::fetch::DEFAULT_MAX_DEP_AGE_DAYS),
                     zip_passwords: cli.global.zip_passwords.clone().into(),
                 },
             }
@@ -556,6 +544,24 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
     }
+}
+
+/// The follow policy for both daemons: scan's for a scanner that answers for
+/// other hosts. Unless `--follow`/`--follow-depth` say otherwise, that follows
+/// every reference kind at least two levels deep — a dependency's own
+/// dependencies and a downloaded script's next stage — since a shallower
+/// answer is cached for every host that asks.
+fn service_fetch_policy(
+    global: &scan::cli::GlobalArgs,
+    max_dep_age_days: u32,
+) -> scan::fetch::FetchPolicy {
+    global.fetch_policy(
+        global
+            .follow
+            .unwrap_or_else(scan::fetch::default_service_follow_policy),
+        max_dep_age_days,
+        true,
+    )
 }
 
 /// The runtime both daemons run on, with the analysis pool's stack depth.
@@ -768,5 +774,39 @@ mod tests {
         .unwrap();
         assert!(matches!(cli.command, Command::Worker { .. }));
         assert_eq!(cli.daemon.max_rss_gb, Some(-1));
+    }
+
+    /// Both daemons answer for every host that asks, so by default they follow
+    /// references at least two levels deep; an operator's explicit depth wins.
+    #[test]
+    fn the_daemons_follow_at_least_two_levels_by_default() {
+        for (args, max_dep_age_days) in [
+            (
+                &["postdoc", "worker", "--url", "http://h"][..],
+                scan::fetch::WORKER_MAX_DEP_AGE_DAYS,
+            ),
+            (
+                &["postdoc", "serve"][..],
+                scan::fetch::DEFAULT_MAX_DEP_AGE_DAYS,
+            ),
+        ] {
+            let cli = Cli::try_parse_from(args).unwrap();
+            let policy = service_fetch_policy(&cli.global, max_dep_age_days);
+            assert!(policy.enabled(), "{args:?} follows references");
+            assert!(
+                policy.depth >= 2,
+                "{args:?} follows {} level(s)",
+                policy.depth
+            );
+
+            let mut shallow = args.to_vec();
+            shallow.push("--follow-depth=1");
+            let cli = Cli::try_parse_from(shallow).unwrap();
+            assert_eq!(
+                service_fetch_policy(&cli.global, max_dep_age_days).depth,
+                1,
+                "{args:?}: an explicit depth wins"
+            );
+        }
     }
 }
