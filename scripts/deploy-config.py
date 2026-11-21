@@ -77,28 +77,44 @@ def local_base(bind):
     return "http://" + host + ":" + port
 
 
+def read_token(token_file):
+    return next(line.strip() for line in Path(token_file).read_text().splitlines() if line.strip())
+
+
+def health_word(base):
+    """/_/health's one word, whatever the status: 503 still names the reason."""
+    try:
+        with urllib.request.urlopen(base + "/_/health", timeout=5) as response:
+            return response.read().decode().strip()
+    except urllib.error.HTTPError as error:
+        return error.read().decode().strip()
+
+
+def stats(base, token):
+    request = urllib.request.Request(base + "/_/stats", headers={"Authorization": "Bearer " + token})
+    with urllib.request.urlopen(request, timeout=5) as response:
+        return json.load(response)
+
+
 def health(token_file, bind, timeout, expect_idle="0"):
     base = local_base(bind)
-    token = next(line.strip() for line in Path(token_file).read_text().splitlines() if line.strip())
+    token = read_token(token_file)
     deadline = time.monotonic() + int(timeout)
     last = "no response"
     while time.monotonic() < deadline:
         try:
-            request = urllib.request.Request(base + "/_/health", headers={"Authorization": "Bearer " + token})
-            with urllib.request.urlopen(request, timeout=5) as response:
-                status = json.load(response).get("status")
-            if status in ("ok", "saturated"):
-                if expect_idle == "1":
-                    request = urllib.request.Request(base + "/_/info", headers={"Authorization": "Bearer " + token})
-                    with urllib.request.urlopen(request, timeout=5) as response:
-                        if not json.load(response)["idle_worker"]["running"]:
-                            last = "idle worker not running"
-                            time.sleep(1)
-                            continue
-                print("==> API ready (" + status + ")")
+            word = health_word(base)
+            if word == "ok":
+                # Readiness is public; this proves the installed token works
+                # too, and reads whether the idle worker came up.
+                if not stats(base, token)["idle_worker"]["running"] and expect_idle == "1":
+                    last = "idle worker not running"
+                    time.sleep(1)
+                    continue
+                print("==> API ready")
                 return
-            last = str(status)
-            if status == "failed":
+            last = word or "empty response"
+            if word == "failed":
                 break
         except (OSError, ValueError, KeyError, urllib.error.HTTPError) as error:
             last = str(error)
@@ -178,8 +194,13 @@ def main():
             candidates.insert(0, Path(os.environ["ProgramData"]) / "Atomdrift/postdoc/deploy-serve.json")
         settings = next((json.loads(path.read_text()) for path in candidates if path.exists()), {})
         bind = (args[0] if args and args[0] else settings.get("BIND")) or "127.0.0.1:49999"
-        with urllib.request.urlopen(local_base(bind) + "/_/health", timeout=5) as response:
-            print(response.read().decode())
+        # The rollout gate's two facts: readiness, which is public, and uptime,
+        # which proves the new process is the one answering and is behind the
+        # token. The token is the one this account deploys from.
+        base = local_base(bind)
+        token = read_token(os.environ.get("SCAN_TOKEN_FILE") or Path.home() / ".tok" / "scan")
+        print(json.dumps({"status": health_word(base), "uptime_secs": stats(base, token)["uptime_secs"]},
+                         separators=(",", ":")))
     else:
         raise SystemExit("unknown deploy-config command")
 

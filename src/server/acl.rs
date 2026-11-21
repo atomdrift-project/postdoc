@@ -1,22 +1,17 @@
-//! Per-request access control for the litmus HTTP API: a peer-IP ACL, and
-//! bearer-token authentication when `--token-file` is set.
+//! Per-request access control for the HTTP API: a peer-IP ACL, then a
+//! bearer token on every route but [`HEALTH_ROUTE`].
 //!
 //! Two gates run in order on every request:
 //!
 //! 1. **Peer IP.** Loopback connections pass. Every other peer must match one
 //!    of the configured `--allow-cidr` networks.
-//! 2. **Bearer token.** When a token is configured, every route except
-//!    [`HEALTH_ROUTE`] requires `Authorization: Bearer <token>`. Loopback is
-//!    deliberately *not* exempt: the server is meant to sit behind a
-//!    Cloudflare tunnel, where `cloudflared` runs on the host and dials the
-//!    service over loopback, so every remote request arrives with a loopback
-//!    peer address. Exempting loopback would exempt the entire internet.
-//!
-//! For the same reason no route is granted anything for arriving over
-//! loopback: behind a tunnel, "loopback" means "local *or* tunnelled".
-//!
-//! Requests clearing both gates carry a [`Trusted`] marker, which handlers use
-//! to decide whether a response may include privileged diagnostic detail.
+//! 2. **Bearer token.** Every route except [`HEALTH_ROUTE`] requires
+//!    `Authorization: Bearer <token>`, where the token is the one read from
+//!    `--token-file` at startup. There is no unauthenticated mode: `serve`
+//!    refuses to start without a token. Loopback is deliberately *not*
+//!    exempt: the server sits behind a Cloudflare tunnel, where `cloudflared`
+//!    dials the service over loopback, so every remote request arrives with a
+//!    loopback peer address. Exempting loopback would exempt the internet.
 //!
 //! Every response — pass or reject — is tagged with the [`Auth`] decision that
 //! produced it, which [`access_log`](super::access::access_log) turns into the
@@ -275,21 +270,10 @@ fn fingerprint(credential: &[u8]) -> Fingerprint {
     Fingerprint(fp)
 }
 
-/// Marker attached to requests allowed to see privileged diagnostic detail:
-/// in-flight sample names, thread counts, orphan counts. Present when the
-/// request carried a valid bearer token — or when authentication is disabled,
-/// which leaves those responses exactly as they were before tokens existed.
-#[derive(Clone, Copy, Debug)]
-pub(super) struct Trusted;
-
-// Legacy loopback-only (`/analyze-path`) and admin (`/_/reload`,
-// `/_/update`) routes removed: no route gets loopback trust, because
-// behind a tunnel every remote caller arrives over loopback.
-
 /// The one route reachable without a bearer token, so that load balancers,
 /// tunnel health checks, and monitoring can probe liveness without holding a
-/// credential. A valid token still upgrades the response to the full
-/// diagnostic body; see [`Trusted`].
+/// credential. It answers a single word and nothing else, so there is nothing
+/// behind it for a token to unlock.
 pub(super) const HEALTH_ROUTE: &str = "/_/health";
 
 /// How long a presented-but-wrong bearer token waits before its answer.
@@ -330,11 +314,10 @@ fn unauthorized() -> Response {
 /// gets to upload bytes.
 pub(super) async fn acl(
     State(state): State<Arc<AppState>>,
-    mut req: Request<Body>,
+    req: Request<Body>,
     next: Next,
 ) -> Response {
-    let path = req.uri().path();
-    let auth_exempt = path == HEALTH_ROUTE;
+    let auth_exempt = req.uri().path() == HEALTH_ROUTE;
 
     let peer = req
         .extensions()
@@ -354,41 +337,35 @@ pub(super) async fn acl(
         return forbidden("peer address not in any allow-cidr", Auth::PeerDenied);
     }
 
-    // Gate 2: bearer token. Loopback is not exempt — see the module docs.
-    let auth = match state.config.auth_digest {
-        None => Auth::Open,
-        Some(digest) => match bearer_credential(req.headers()) {
-            Presented::Bearer(credential) if digest.matches(credential) => Auth::Token,
-            Presented::Bearer(credential) => {
-                // Online guessing gets no oracle (identical 401) and no
-                // speed: a fixed delay caps attempts per connection far
-                // below any plausible token search. Valid tokens never
-                // pay it. The health route pays it too — its body differs
-                // for a valid token, so without the delay it would be the
-                // fast oracle every other route refuses to be.
-                tokio::time::sleep(BAD_TOKEN_DELAY).await;
-                if auth_exempt {
-                    Auth::Anonymous
-                } else {
-                    return tag(
-                        unauthorized(),
-                        Auth::BadToken {
-                            len: credential.len(),
-                            fp: fingerprint(credential),
-                        },
-                    );
-                }
-            }
-            _ if auth_exempt => Auth::Anonymous,
-            // The response is identical in all three cases — only the log
-            // distinguishes them, so the endpoint stays useless as an oracle.
-            Presented::None => return tag(unauthorized(), Auth::NoCredential),
-            Presented::Malformed => return tag(unauthorized(), Auth::MalformedCredential),
-        },
-    };
-    if auth != Auth::Anonymous {
-        req.extensions_mut().insert(Trusted);
+    // The health route carries no credential and answers one word; checking
+    // a token it does not need would only make it an oracle for guesses.
+    if auth_exempt {
+        return tag(next.run(req).await, Auth::Anonymous);
     }
+
+    // Gate 2: bearer token. Loopback is not exempt — see the module docs.
+    // The response is identical in every refusal — only the log tells them
+    // apart, so the endpoint stays useless as an oracle.
+    let auth = match bearer_credential(req.headers()) {
+        Presented::Bearer(credential) if state.config.auth_digest.matches(credential) => {
+            Auth::Token
+        }
+        Presented::Bearer(credential) => {
+            // Online guessing gets no speed: a fixed delay caps attempts per
+            // connection far below any plausible token search. Valid tokens
+            // never pay it.
+            tokio::time::sleep(BAD_TOKEN_DELAY).await;
+            return tag(
+                unauthorized(),
+                Auth::BadToken {
+                    len: credential.len(),
+                    fp: fingerprint(credential),
+                },
+            );
+        }
+        Presented::None => return tag(unauthorized(), Auth::NoCredential),
+        Presented::Malformed => return tag(unauthorized(), Auth::MalformedCredential),
+    };
 
     tag(next.run(req).await, auth)
 }
@@ -590,6 +567,123 @@ mod tests {
             .collect();
         assert_eq!(rendered, expected);
         assert_eq!(rendered.len(), 8);
+    }
+
+    /// Send one request through the real router, from `peer`, with an
+    /// optional `Authorization` value; answer the status and body.
+    async fn send(path: &str, authorization: Option<&str>, peer: &str) -> (StatusCode, String) {
+        use tower::ServiceExt as _;
+
+        let (app, _state) = super::super::assemble(super::super::ServerConfig {
+            model_dir: std::env::temp_dir(),
+            ..super::super::ServerConfig::default()
+        })
+        .expect("app");
+        let mut request = Request::get(path);
+        if let Some(value) = authorization {
+            request = request.header(header::AUTHORIZATION, value);
+        }
+        let mut request = request.body(Body::empty()).expect("request");
+        let peer: std::net::SocketAddr = peer.parse().expect("peer");
+        request.extensions_mut().insert(ConnectInfo(peer));
+        let response = app.oneshot(request).await.expect("response");
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .expect("body");
+        (status, String::from_utf8_lossy(&body).into_owned())
+    }
+
+    const LOCAL: &str = "127.0.0.1:40000";
+
+    /// Health needs no token and says one word: here, that the server is
+    /// still loading. A token does not change the answer.
+    #[tokio::test]
+    async fn health_is_one_word_without_a_token() {
+        let anonymous = send(HEALTH_ROUTE, None, LOCAL).await;
+        assert_eq!(
+            anonymous,
+            (StatusCode::SERVICE_UNAVAILABLE, "starting\n".into())
+        );
+        let bearer = format!("Bearer {TOKEN}");
+        assert_eq!(send(HEALTH_ROUTE, Some(&bearer), LOCAL).await, anonymous);
+    }
+
+    /// Every other route refuses a missing, malformed or wrong credential
+    /// identically, and serves the right one.
+    #[tokio::test]
+    async fn every_other_route_requires_the_token() {
+        let refused = || {
+            (
+                StatusCode::UNAUTHORIZED,
+                r#"{"error":"missing or invalid bearer token"}"#.to_string(),
+            )
+        };
+        for path in [
+            "/_/stats",
+            "/v1/status?sha256=00",
+            "/v1/lookup?sha256=00",
+            "/v1/analyze",
+        ] {
+            assert_eq!(
+                send(path, None, LOCAL).await,
+                refused(),
+                "{path} without a token"
+            );
+            assert_eq!(
+                send(path, Some("Basic abc"), LOCAL).await,
+                refused(),
+                "{path} malformed"
+            );
+            assert_eq!(
+                send(path, Some("Bearer 0123456789abcdef0124"), LOCAL).await,
+                refused(),
+                "{path} wrong token"
+            );
+        }
+        let bearer = format!("Bearer {TOKEN}");
+        assert_eq!(
+            send("/_/stats", Some(&bearer), LOCAL).await.0,
+            StatusCode::OK
+        );
+    }
+
+    /// The diagnostic routes are gone, not merely hidden.
+    #[tokio::test]
+    async fn removed_routes_are_not_found() {
+        let bearer = format!("Bearer {TOKEN}");
+        for path in [
+            "/_/info",
+            "/_/memory",
+            "/_/requests",
+            "/_/threads",
+            "/_/metrik",
+        ] {
+            assert_eq!(
+                send(path, Some(&bearer), LOCAL).await.0,
+                StatusCode::NOT_FOUND,
+                "{path}"
+            );
+            assert_eq!(
+                send(path, None, LOCAL).await.0,
+                StatusCode::UNAUTHORIZED,
+                "{path}"
+            );
+        }
+    }
+
+    /// The peer gate runs first, health included.
+    #[tokio::test]
+    async fn an_unlisted_peer_is_refused_everywhere() {
+        let bearer = format!("Bearer {TOKEN}");
+        assert_eq!(
+            send(HEALTH_ROUTE, None, "203.0.113.9:1").await.0,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            send("/_/stats", Some(&bearer), "203.0.113.9:1").await.0,
+            StatusCode::FORBIDDEN
+        );
     }
 
     #[test]

@@ -1,15 +1,15 @@
 # Scan-compatible API served by Postdoc
 
 `postdoc serve` is an HTTP daemon that takes a file and returns a
-classification. It binds to loopback. Pass `--token-file` to require a
-bearer token on every route but `/_/health`; `make deploy-server` always does.
+classification. It binds to loopback and requires `--token-file`: every route
+but `/_/health` needs that bearer token, and there is no unauthenticated mode.
 
 For the pull-based worker, see [WORKERS.md](WORKERS.md).
 For the response schema, see [JSON.md](JSON.md).
 
 ## Running the server
 
-    postdoc serve
+    postdoc serve --token-file ~/.tok/scan
 
 The defaults are deliberate. Override them only when you have a reason.
 
@@ -90,20 +90,20 @@ dependency follow-up.
 
 The listener binds before the model is loaded. While loading, every
 route returns 503 with `{"error":"server starting"}`. Poll `/_/health`
-until the status flips to `ok`.
+until it answers `ok`.
 
 Models and traits are refreshed once at startup — that is what a restart is
 for, and it is also what installs traits on a fresh host. `-u` forces the refresh even when the local copy looks
 current; `--no-update` (before the subcommand) skips it. If traits still cannot
 be resolved afterwards the server never reports ready: `/_/health` returns 503
-with `{"status":"failed","reason":"initialization_failed"}` and the log names
-the path, rather than reporting healthy and failing every analysis.
+`failed` and the log names the path, rather than reporting healthy and failing
+every analysis.
 
 ## Authentication
 
-`--token-file PATH` reads a token from the first non-empty line of `PATH`,
-stripped of surrounding whitespace — a trailing newline is not part of the
-secret — and requires it on every route except `/_/health`:
+`--token-file PATH` is required. It reads a token from the first non-empty
+line of `PATH`, stripped of surrounding whitespace — a trailing newline is not
+part of the secret — and requires it on every route except `/_/health`:
 
     curl -H "Authorization: Bearer $(cat ~/.tok/scan)" ...
 
@@ -133,9 +133,9 @@ Four properties are deliberate:
   `argv` is world-readable through `ps`, and systemd unit files are
   world-readable in `/etc/systemd/system`. Only the SHA-256 digest is kept in
   memory, so the token cannot surface in a log line or a core file.
-- **Missing means fatal.** If `--token-file` is set and the file is missing,
-  empty, or unreadable, the server refuses to start. It never falls back to
-  serving unauthenticated.
+- **Missing means fatal.** Without `--token-file`, or with a file that is
+  missing, empty, unreadable or too weak, the server refuses to start. There
+  is no unauthenticated mode to fall back to.
 - **Rotation needs a restart.** The token is read once at startup;
   rotation needs a restart. A rotated-but-not-restarted server is the
   usual cause of a 401 against a token file that looks correct — the access
@@ -143,7 +143,12 @@ Four properties are deliberate:
   [Logging](#logging).
 
 `/_/health` stays open so tunnel and load-balancer probes work without a
-credential — but a valid token there upgrades the response, see below.
+credential. It answers one word and nothing a token could unlock.
+
+Callers: beamline (`/v1/lookup`, `/v1/analyze`, `/v1/status`, `/_/stats`) and
+promoter (`/_/health`, `/_/stats`, `POST /v1/analyze?full=1`), both with the
+token from `~/.tok/scan`. Hopper runs postdoc as a pull worker and never calls
+this API; forager talks only to hopper.
 
 ### Deploy
 
@@ -185,11 +190,10 @@ differences.
 ### Removed legacy routes
 
 `POST /analyze`, `POST /analyze-purl`, `POST /analyze-path`, `GET /lookup`,
-`POST /_/reload` and `POST /_/update` were removed. Beamline uses only
-`/v1/lookup`, `/v1/analyze`, `/status` and `/_/stats`; promoter uploads
-bytes to `POST /v1/analyze?full=1` (see `promoter-v1-migration.patch`).
-Rules/model updates now happen by server restart (deploy/rollout), not
-by API call. `GET /status` is kept for beamline's reconnect routing.
+`POST /_/reload`, `POST /_/update`, `GET /_/info`, `GET /_/memory`,
+`GET /_/requests`, `GET /_/threads` and `GET /_/metrik` were removed: no caller
+used them. Rules/model updates happen by server restart (deploy/rollout), not
+by API call. Metrics are pushed over OTLP (below), not scraped.
 
 ### `GET /v1/lookup`
 
@@ -345,7 +349,7 @@ analysis continues regardless — it is not that connection's to lose —
 and a caller that reconnects joins the run already in progress rather
 than starting a second one.
 
-### `GET /status`
+### `GET /v1/status`
 
 `?sha256=…`, `?purl=…`, or both. Where an analysis of this artifact
 stands, without starting one:
@@ -353,7 +357,7 @@ stands, without starting one:
 | state | meaning |
 | --- | --- |
 | `running` | an analysis is in progress here, with `elapsed_ms` and `attached` |
-| `complete` | a verdict is stored; fetch it from `/lookup` |
+| `complete` | a verdict is stored; fetch it from `/v1/lookup` |
 | `unknown` | nothing running here and nothing stored |
 
 For the caller whose connection did not survive the analysis. A proxy
@@ -380,48 +384,20 @@ already making that request needs no second one.
 
 ### `GET /_/health`
 
-Liveness and load. 200 when ready, 503 while loading or failed. The only
-route that does not require a bearer token.
+Readiness, in one word, as `text/plain`. The only route that does not require
+a bearer token, so it reports nothing else: no load, memory, versions or
+sample names.
 
-    {
-      "status": "ok",
-      "rss_mb": 312,
-      "max_rss_mb": 16384,
-      "active_tasks": 1,
-      "max_concurrent_tasks": 4,
-      "load": 0.25,
-      "load_avg": 0.42,
-      "uptime_secs": 91
-    }
+| Status | Body       | Meaning                                              |
+| ------ | ---------- | ---------------------------------------------------- |
+| 200    | `ok`       | Serving. A full pool is still `ok`; analyze refuses past capacity itself. |
+| 503    | `starting` | Model, rules or traits still loading.                |
+| 503    | `failed`   | Startup failed; the log names why.                   |
+| 503    | `degraded` | RSS is over `--max-rss-gb`.                          |
 
-`status` is one of `ok`, `starting`, `failed`, `degraded`, `saturated`.
+Load, memory, uptime and versions are on `/_/stats`, behind the token.
 
-Because the route is public, that body carries no operational detail. A
-request that *does* present a valid token — or any request to a server with
-no `--token-file`, which behaves exactly as it did before tokens existed —
-additionally gets:
-
-    "stuck_orphans": 0,
-    "long_running_tasks": [ ... ],
-    "oldest_task": { "name": "...", "elapsed_secs": 310 },
-    "rayon_threads": 8
-
-`long_running_tasks` and `oldest_task` name the samples currently being
-analysed, which is why they are not public.
-
-### `GET /_/info`
-
-Static facts: version, slot count, CPU count, upload and RSS limits,
-total memory, the model and traits commit hashes.
-
-### `GET /_/memory`, `GET /_/requests`, `GET /_/threads`
-
-Diagnostics. `/_/memory` exposes jemalloc counters and rayon pool
-size. `/_/requests` lists in-flight analyses with elapsed time and
-phase. `/_/threads` reports per-thread state (Linux: `wchan`, context
-switch counts; FreeBSD: rayon thread count; other platforms: error).
-
-### `GET /_/metrik` and OTLP push
+### Metrics (OTLP push)
 
 The same metrics the Go services export through `obs` (see
 `../obs/OBSERVABILITY.md`), on the same terms:
@@ -431,8 +407,6 @@ The same metrics the Go services export through `obs` (see
   is used verbatim; `OTEL_EXPORTER_OTLP_ENDPOINT` gets `/v1/metrics` appended;
   `OTEL_METRICS_EXPORTER=none` turns pushing off. A box that cannot reach the
   receiver warns once and logs again on recovery.
-- **Served** for scraping at `/_/metrik`, behind the bearer token, under the
-  names the receiver gives the pushed series, so one query reads either.
 - Series carry `job="postdoc"` and `instance="<host>-<pid>"`;
   `target_info` carries `host_name`, `service_version` and
   `deployment_environment` (`OTEL_DEPLOYMENT_ENVIRONMENT`, default `dev`).
@@ -499,7 +473,7 @@ A field with nothing to say is left off the line rather than printed empty.
 | `dur_ms`    | Wall time from arrival to response.                                    |
 | `peer`      | Socket peer address. Behind a tunnel this is always loopback.          |
 | `fwd`       | Client address a proxy reported (`CF-Connecting-IP`, `X-Forwarded-For`, `X-Real-IP`). Advisory: logged, never used for access control. |
-| `auth`      | `token`, `open` (no `--token-file`), `anon` (unauthenticated `/_/health`), or a rejection reason: `no-credential`, `malformed-credential`, `bad-token`, `peer-denied`, `no-peer-info`. |
+| `auth`      | `token`, `anon` (unauthenticated `/_/health`), or a rejection reason: `no-credential`, `malformed-credential`, `bad-token`, `peer-denied`, `no-peer-info`. |
 | `req_bytes` | Request `Content-Length`, when the client sent one.                    |
 | `shared`    | `true` when this request attached to an analysis already in flight for the same bytes, PURL or URL and replayed its result instead of doing the work. Absent otherwise. |
 | `streamed`  | `true` when the answer went out as an NDJSON stream; `status` and `dur_ms` then describe the headers, and the stream logs its own outcome under the same `id`. |
@@ -638,9 +612,8 @@ The server is built for trusted networks. The defaults reflect that.
 
 - **Bind is loopback.** Do not change `--bind` without thinking about
   what else can now reach it.
-- **Authentication is opt-in; there is no TLS.** Pass `--token-file`
-  whenever anything but this host can reach the socket (a tunnel counts),
-  and terminate TLS in front of it.
+- **Authentication is mandatory; there is no TLS.** `serve` will not start
+  without `--token-file`. Terminate TLS in front of it (the tunnel does).
 - **No loopback-trusted routes.** `/analyze-path`, `/_/reload` and
   `/_/update` were removed, so tunnel loopback is never treated as
   local trust.
@@ -664,7 +637,7 @@ The server is built for trusted networks. The defaults reflect that.
 
     $ postdoc serve --bind 127.0.0.1:49999 --workers 4 --token-file ~/.tok/scan
     $ AUTH="Authorization: Bearer $(cat ~/.tok/scan)"
-    $ curl -s http://127.0.0.1:49999/_/health | jq -r .status
+    $ curl -s http://127.0.0.1:49999/_/health
     ok
     $ curl -s -H "$AUTH" -F file=@/bin/ls http://127.0.0.1:49999/analyze \
         | jq '.ml | {lvl, prob, version}'

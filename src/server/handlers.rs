@@ -1,4 +1,4 @@
-//! Shared helpers for the `/v1` routes and `GET /status` (kept for
+//! Shared helpers for the `/v1` routes and `GET /v1/status` (kept for
 //! beamline's reconnect routing). The legacy `/analyze`, `/analyze-purl`,
 //! `/analyze-path`, `/lookup` and admin `/_/reload`, `/_/update` routes
 //! were removed: beamline uses only `/v1/*`, and promoter now uploads
@@ -128,7 +128,7 @@ pub(super) struct StatusBody {
     pub(super) attached: Option<usize>,
 }
 
-/// GET /status?sha256=… | ?purl=… | ?url=… — where an analysis of this artifact stands.
+/// GET /v1/status?sha256=… | ?purl=… | ?url=… — where an analysis of this artifact stands.
 ///
 /// Exists for the caller whose connection did not survive the analysis. The run
 /// keeps going here when a proxy gives up at its own ceiling, but from outside

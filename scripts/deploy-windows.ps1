@@ -352,8 +352,13 @@ if ($Mode -eq 'serve') {
     $ready = $false
     while ([DateTime]::UtcNow -lt $deadline) {
         try {
-            $reply = Invoke-RestMethod "http://$bind/_/health" -Headers @{Authorization=('Bearer ' + [IO.File]::ReadAllText($scanTokDst).Trim())} -TimeoutSec 5
-            if ($reply.status -in @('ok','saturated')) { $ready = $true; break }
+            # Readiness is public and one word; /_/stats then proves the
+            # installed token is the one the server loaded.
+            $word = (Invoke-RestMethod "http://$bind/_/health" -TimeoutSec 5).Trim()
+            if ($word -eq 'ok') {
+                $null = Invoke-RestMethod "http://$bind/_/stats" -Headers @{Authorization=('Bearer ' + [IO.File]::ReadAllText($scanTokDst).Trim())} -TimeoutSec 5
+                $ready = $true; break
+            }
         } catch { }
         Start-Sleep -Seconds 1
     }

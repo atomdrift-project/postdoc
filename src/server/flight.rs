@@ -173,7 +173,7 @@ pub(super) struct Flight {
     /// streaming progress reads the phase here: it does not know the leader's
     /// request, and the run's display name is not its key.
     phase: OnceLock<RequestPhase>,
-    /// When the analysis began, so `/status` can say how far along a run is
+    /// When the analysis began, so `/v1/status` can say how far along a run is
     /// and a caller can tell a long analysis from a stuck one.
     started_at: Instant,
     /// Holds `None` until the analysis finishes.
@@ -300,7 +300,7 @@ impl Flights {
         }
     }
 
-    /// What is running under `key` right now, if anything. `/status` answers
+    /// What is running under `key` right now, if anything. `/v1/status` answers
     /// from this: a caller whose connection was cut needs to tell an analysis
     /// still in progress from one that never started, and the two are
     /// indistinguishable from the outside.
@@ -322,7 +322,9 @@ impl Flights {
         found
     }
 
-    /// Snapshot how much work de-duplication is saving right now.
+    /// How many analyses are live and how many requests ride them: what the
+    /// single-flight tests assert de-duplication with.
+    #[cfg(test)]
     pub(super) fn census(&self) -> Census {
         let live = lock(&self.live);
         let census = Census {
@@ -357,7 +359,7 @@ impl Flights {
     }
 }
 
-/// One analysis in progress, as `/status` reports it.
+/// One analysis in progress, as `/v1/status` reports it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct Running {
     /// How long the analysis has been going.
@@ -367,8 +369,8 @@ pub(super) struct Running {
     pub(super) attached: usize,
 }
 
-/// How many analyses are running and how many requests are riding them. The
-/// gap between the two is work that is not being repeated.
+/// How many analyses are running and how many requests are riding them.
+#[cfg(test)]
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Census {
     /// Distinct analyses in progress.
@@ -588,7 +590,7 @@ mod tests {
         );
     }
 
-    /// `/status` has to tell a run in progress from one that never started,
+    /// `/v1/status` has to tell a run in progress from one that never started,
     /// and the interesting case is the one with nobody attached: that is
     /// exactly the state a cut connection leaves behind, and the state where
     /// answering "unknown" would send the caller off to pay for it again.
@@ -698,7 +700,7 @@ mod tests {
     }
 
     /// A follower streaming progress reads the leader's phase through the
-    /// flight. It used to search `/_/requests` for an entry named like the
+    /// flight. It used to search the in-flight table for an entry named like the
     /// flight's subject — but an upload's entry is named by its filename and
     /// its subject is the digest, so every streamed upload reported a null
     /// phase.

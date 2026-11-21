@@ -13,6 +13,7 @@ import hashlib
 import http.client
 import json
 import os
+import secrets
 from pathlib import Path
 import signal
 import socket
@@ -69,13 +70,17 @@ def host_load():
             **read_memory_state()}
 
 
+# The server has no unauthenticated mode; main() sets a throwaway token.
+AUTH = {}
+
+
 def upload(port, root, row, output, timeout):
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
     started = time.monotonic()
     try:
         with (root / row["path"]).open("rb") as body:
             connection.request("POST", "/v1/analyze?full=1&force=1", body=body,
-                               headers={"Content-Type": "application/octet-stream",
+                               headers={**AUTH, "Content-Type": "application/octet-stream",
                                         "Content-Length": str(row["bytes"]),
                                         "X-Filename": Path(row["path"]).name})
             response = connection.getresponse()
@@ -94,7 +99,7 @@ def upload(port, root, row, output, timeout):
 def get_json(port, route):
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
     try:
-        connection.request("GET", route)
+        connection.request("GET", route, headers=AUTH)
         response = connection.getresponse()
         if response.status != 200:
             raise RuntimeError(f"{route}: HTTP {response.status}")
@@ -137,6 +142,11 @@ def main():
     if output == root or root in output.parents:
         parser.error("output must be outside the input dataset")
     output.mkdir(parents=True, exist_ok=False)
+    token = secrets.token_hex(32)
+    token_file = output / "token"
+    token_file.touch(mode=0o600)
+    token_file.write_text(token + "\n")
+    AUTH["Authorization"] = "Bearer " + token
     responses = output / "foreground-responses"
     responses.mkdir()
     (output / "manifest.json").write_text(json.dumps(foreground, indent=2) + "\n")
@@ -171,7 +181,7 @@ def main():
                    "-p", "UnsetEnvironment=SCAN_HOPPER SCAN_IDLE_WORKER_SLOTS SCAN_LLM SCAN_INTERPRET SCAN_TOKEN_FILE HOPPER_TOKEN_FILE HOPPER_TOKEN SCAN_HEAP_PROFILE_DIR"]
         command.extend("--setenv=" + k + "=" + v for k, v in env.items())
         command.extend([str(args.binary.resolve()), "serve", "--bind", f"127.0.0.1:{port}",
-                        "--workers", str(args.workers), "--max-rss-gb", str(args.max_rss_gb),
+                        "--token-file", str(token_file.resolve()), "--workers", str(args.workers), "--max-rss-gb", str(args.max_rss_gb),
                         "--analysis-timeout", "0",
                         "--no-update", "--mode", "slow"])
         launched = True
@@ -243,7 +253,6 @@ def main():
         if stats["idle_worker"]["running"]:
             raise RuntimeError("idle worker started during foreground benchmark")
         (output / "stats-after.json").write_text(json.dumps(stats, indent=2) + "\n")
-        (output / "memory-after.json").write_text(json.dumps(get_json(port, "/_/memory"), indent=2) + "\n")
         summary = {"foreground_jobs": len(foreground), "idle_worker_enabled": False,
                    "ready_s": ready_at - service_started,
                    "foreground_wall_s": foreground_finished - foreground_started,

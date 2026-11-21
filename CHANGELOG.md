@@ -12,6 +12,10 @@ All notable changes to postdoc. Versions follow [semantic versioning](https://se
 - Return the full version 8 result instead of the decision when asked with `full=1`.
 - Breaking: talk only to hopper's `/v1` routes; older hoppers need not apply.
 - Breaking: analyses no longer time out by default; `--analysis-timeout` brings the limit back.
+- Breaking: `serve` requires `--token-file`; there is no unauthenticated mode, and every route but `/_/health` needs the token.
+- Breaking: `/_/health` answers one word (`ok`, `starting`, `failed`, `degraded`) as plain text; load and uptime are on `/_/stats`.
+- Breaking: remove `/_/info`, `/_/memory`, `/_/requests`, `/_/threads` and `/_/metrik`, which no caller used; metrics are still pushed over OTLP.
+- Breaking: `GET /status` is now `GET /v1/status`, beside the other per-artifact routes.
 
 ### Fixes
 

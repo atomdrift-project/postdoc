@@ -253,9 +253,9 @@ enum Command {
         allow_cidr: Option<String>,
 
         /// File holding the bearer token required on every route but
-        /// `/_/health`. Omitted disables authentication.
+        /// `/_/health`. Required: the server has no unauthenticated mode.
         #[arg(long, value_name = "PATH")]
-        token_file: Option<PathBuf>,
+        token_file: PathBuf,
 
         /// Hopper API root. Enables result renewal, corpus deferral for
         /// unknown lookups, and the companion idle worker.
@@ -682,6 +682,8 @@ mod tests {
             "--zip-password",
             "infected",
             "serve",
+            "--token-file",
+            "/t",
         ])
         .unwrap();
 
@@ -690,12 +692,20 @@ mod tests {
         assert_eq!(cli.global.zip_passwords, vec!["infected".to_owned()]);
     }
 
+    /// There is no unauthenticated server: `serve` without a token does not
+    /// even parse.
+    #[test]
+    fn serve_requires_a_token_file() {
+        let err = Cli::try_parse_from(["postdoc", "serve"]).expect_err("no token");
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    }
+
     #[test]
     fn serve_defaults_match_the_binary_it_replaces() {
         // A drop-in that listens elsewhere is not a drop-in: the bind is
         // `atomscan serve`'s. The body limit was raised past its 100 MB so
         // promoter's larger archives and images upload without a flag.
-        let cli = Cli::try_parse_from(["postdoc", "serve"]).unwrap();
+        let cli = Cli::try_parse_from(["postdoc", "serve", "--token-file", "/t"]).unwrap();
         let Command::Serve {
             bind,
             max_size_mb,
@@ -753,7 +763,7 @@ mod tests {
         };
         assert_eq!(bind.to_string(), "0.0.0.0:8080");
         assert_eq!(hopper.as_deref(), Some("http://hopper:8081"));
-        assert_eq!(token_file, Some(PathBuf::from("/etc/postdoc/token")));
+        assert_eq!(token_file, PathBuf::from("/etc/postdoc/token"));
         assert_eq!(allow_cidr.as_deref(), Some("10.0.0.0/8,192.168.0.0/16"));
         assert_eq!(cli.daemon.max_rss_gb, Some(-1));
     }
@@ -786,7 +796,7 @@ mod tests {
                 scan::fetch::WORKER_MAX_DEP_AGE_DAYS,
             ),
             (
-                &["postdoc", "serve"][..],
+                &["postdoc", "serve", "--token-file", "/t"][..],
                 scan::fetch::DEFAULT_MAX_DEP_AGE_DAYS,
             ),
         ] {

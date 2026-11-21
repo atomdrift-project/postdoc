@@ -4,13 +4,12 @@
 //! path — runs cleave static analysis and the model, and answers with a
 //! decision, or with the full result (`/v1/analyze?full=1`).
 //!
-//! Routes:
-//!   GET  /_/health      — liveness (public; detail only when trusted)
-//!   GET  /_/info        — build and capacity, for sizing a client
+//! Routes. Every one but `/_/health` requires the `--token-file` bearer token;
+//! beamline is the only HTTP caller.
+//!   GET  /_/health      — readiness in one word (public)
 //!   GET  /_/stats       — live routing signals
-//!   GET  /_/memory, /_/requests, /_/threads — diagnostics
-//!   GET  /status        — whether an analysis of an artifact is running
-//!                       (kept for beamline's reconnect routing)
+//!   GET  /v1/status     — whether an analysis of an artifact is running
+//!                       (beamline's reconnect routing)
 //!   GET  /v1/lookup     — decisions for one or many artifacts (no slot)
 //!   POST /v1/analyze    — a decision (the full result with `?full=1`),
 //!                       streamed if the analysis is slow
@@ -57,20 +56,10 @@ use scan::model::{Model, Thresholds};
 
 /// How the HTTP API server runs, settled before it starts.
 ///
-/// Plain data: build one with struct update syntax over [`Default`], or
-/// resolve one from a command line with [`Startup::resolve`].
-/// [`build_app`] validates it.
-///
-/// ```
-/// use crate::server::ServerConfig;
-///
-/// let config = ServerConfig {
-///     model_dir: "/path/to/models".into(),
-///     workers: 2,
-///     ..ServerConfig::default()
-/// };
-/// assert!(config.validate().is_ok());
-/// ```
+/// Plain data, resolved from a command line with [`Startup::resolve`].
+/// [`build_app`] validates it. Tests build one with struct update syntax over
+/// a test-only [`Default`], which carries a fixed token; production has no
+/// default, because there is no default token.
 #[derive(Debug, Clone)]
 pub(crate) struct ServerConfig {
     /// Address to listen on.
@@ -100,10 +89,11 @@ pub(crate) struct ServerConfig {
     /// Peer networks besides loopback allowed to connect. Behind a tunnel
     /// every peer is loopback, so this filters direct connections only.
     pub(crate) allow_cidrs: Vec<Cidr>,
-    /// Digest of the bearer token required on every route but `/_/health`;
-    /// `None` leaves the API open. Loopback is not exempt: behind a Cloudflare
-    /// tunnel every remote request arrives over loopback.
-    pub(crate) auth_digest: Option<TokenDigest>,
+    /// Digest of the bearer token required on every route but `/_/health`.
+    /// Not optional: there is no unauthenticated mode. Loopback is not
+    /// exempt: behind a Cloudflare tunnel every remote request arrives over
+    /// loopback.
+    pub(crate) auth_digest: TokenDigest,
     /// Per-request analysis timeout in seconds. Zero disables it.
     pub(crate) analysis_timeout_secs: u64,
     /// The LLM second opinion, when one is configured.
@@ -125,9 +115,10 @@ pub(crate) struct ServerConfig {
     pub(crate) scanners: Arc<postdoc::scanners::Scanners>,
 }
 
+#[cfg(test)]
 impl Default for ServerConfig {
     /// The `serve` command line's defaults, except `model_dir`, which has
-    /// none: a caller always names one.
+    /// none, and the token, which is a fixed test value.
     fn default() -> Self {
         Self {
             bind: SocketAddr::from(([127, 0, 0, 1], 49999)),
@@ -140,7 +131,7 @@ impl Default for ServerConfig {
             workers: 1,
             idle_worker_slots: 0,
             allow_cidrs: Vec::new(),
-            auth_digest: None,
+            auth_digest: TokenDigest::new("0123456789abcdef0123").expect("test token"),
             analysis_timeout_secs: DEFAULT_ANALYSIS_TIMEOUT_SECS,
             interpret: None,
             fetch: scan::fetch::FetchPolicy::default(),
@@ -193,8 +184,8 @@ pub(crate) struct Startup {
     pub(crate) workers: Option<NonZeroUsize>,
     /// Comma-separated CIDRs allowed to reach non-loopback routes.
     pub(crate) allow_cidr: Option<String>,
-    /// File holding the bearer token. `None` disables authentication.
-    pub(crate) token_file: Option<PathBuf>,
+    /// File holding the bearer token every route but `/_/health` requires.
+    pub(crate) token_file: PathBuf,
     /// Hopper API root. Enables result renewal, corpus deferral, and the
     /// companion idle worker.
     pub(crate) hopper: Option<String>,
@@ -218,9 +209,8 @@ impl Startup {
     ///
     /// Returns an error when the model bundle cannot be resolved, a CIDR does
     /// not parse, the thresholds or worker count are invalid, or `token_file`
-    /// is set but missing, empty or unreadable. That last one fails closed on
-    /// purpose: an operator who asked for authentication must never get an
-    /// open server because a file went away.
+    /// is missing, empty, unreadable or too weak. There is no open mode for a
+    /// missing file to fall back to.
     pub(crate) fn resolve(self) -> anyhow::Result<ServerConfig> {
         // Before the rules, which take minutes: a scanner named but not
         // answering should fail the start at once.
@@ -240,27 +230,22 @@ impl Startup {
             None => Vec::new(),
         };
 
-        let auth_digest = match self.token_file {
-            Some(ref path) => {
-                let token = scan::interpret::read_token_file(path).ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "--token-file {}: missing, empty, or unreadable",
-                        path.display()
-                    )
-                })?;
-                let digest = TokenDigest::new(&token)
-                    .map_err(|e| anyhow::anyhow!("--token-file {}: {e}", path.display()))?;
-                // Name the file the running process actually read: after a
-                // rotation the token in a file and the token in memory can
-                // differ, and the 401 that follows is otherwise unreadable.
-                tracing::info!(
-                    token_file = %path.display(),
-                    "bearer authentication enabled (token is read once, at startup)",
-                );
-                Some(digest)
-            }
-            None => None,
-        };
+        let path = &self.token_file;
+        let token = scan::interpret::read_token_file(path).ok_or_else(|| {
+            anyhow::anyhow!(
+                "--token-file {}: missing, empty, or unreadable",
+                path.display()
+            )
+        })?;
+        let auth_digest = TokenDigest::new(&token)
+            .map_err(|e| anyhow::anyhow!("--token-file {}: {e}", path.display()))?;
+        // Name the file the running process actually read: after a rotation
+        // the token in a file and the token in memory can differ, and the 401
+        // that follows is otherwise unreadable.
+        tracing::info!(
+            token_file = %path.display(),
+            "bearer authentication enabled (token is read once, at startup)",
+        );
 
         let hopper = self.hopper.filter(|s| !s.trim().is_empty());
         // Half the request slots for background work. Disabled without
@@ -394,30 +379,23 @@ mod config_tests {
     }
 }
 
-/// One admitted analysis, as `/_/requests` and the watchdog report it.
+/// One admitted analysis, as the watchdog reports it.
 struct InFlightRequest {
     name: String,
-    size_bytes: u64,
     started_at: Instant,
     /// Shared with the blocking task; set to true to request cooperative cancellation.
     cancellation: Arc<AtomicBool>,
     /// Tracks the current analysis phase inside cleave/litmus. Updated at each
-    /// major stage so `/_/requests` can report what a stuck request is doing.
+    /// major stage so the watchdog can report what a stuck request is doing.
     phase: RequestPhase,
     /// OS thread ID of the blocking thread servicing this request (0 until started).
     thread_id: AtomicU64,
 }
 
 impl InFlightRequest {
-    fn new(
-        name: &str,
-        size_bytes: u64,
-        cancellation: Arc<AtomicBool>,
-        phase: RequestPhase,
-    ) -> Self {
+    fn new(name: &str, cancellation: Arc<AtomicBool>, phase: RequestPhase) -> Self {
         Self {
             name: name.to_owned(),
-            size_bytes,
             started_at: Instant::now(),
             cancellation,
             phase,
@@ -468,7 +446,7 @@ pub(super) struct RequestGuard {
 }
 
 impl RequestGuard {
-    /// Register an admitted analysis on `/_/requests` and hold its capacity
+    /// Register an admitted analysis for the watchdog and hold its capacity
     /// until the guard drops.
     fn new(
         state: &Arc<AppState>,
@@ -1316,13 +1294,8 @@ fn assemble(config: ServerConfig) -> anyhow::Result<(Router, Arc<AppState>)> {
     // a rejected peer never gets to upload bytes.
     let app = Router::new()
         .route("/_/health", get(diag::health))
-        .route("/_/info", get(diag::info))
         .route("/_/stats", get(diag::stats))
-        .route("/_/memory", get(diag::memory_stats))
-        .route("/_/requests", get(diag::requests))
-        .route("/_/threads", get(diag::threads))
-        .route("/_/metrik", get(metrics::metrik))
-        .route("/status", get(handlers::status))
+        .route("/v1/status", get(handlers::status))
         .route("/v1/lookup", get(v1::v1_lookup))
         .route("/v1/analyze", post(v1::v1_analyze))
         .layer(DefaultBodyLimit::max(state.config.max_body_size))
@@ -1545,19 +1518,8 @@ pub(crate) async fn run(config: ServerConfig) -> anyhow::Result<()> {
         max_body_mb = config.max_body_size / 1024 / 1024,
         analysis_timeout_secs = config.analysis_timeout_secs,
         allow_cidrs = config.allow_cidrs.len(),
-        authenticated = config.auth_digest.is_some(),
         "listening (resources loading in background)",
     );
-
-    // An unauthenticated API is open to anyone who can reach the socket. Warn
-    // unconditionally — a loopback bind is not evidence of safety, because a
-    // Cloudflare tunnel terminates on loopback and puts the whole internet on
-    // the other side of it.
-    if config.auth_digest.is_none() {
-        tracing::warn!(
-            "no --token-file: the API is unauthenticated; any peer that reaches the socket can submit work",
-        );
-    }
 
     // Operator footgun: setting --allow-cidr while bound to loopback means
     // the CIDR list can never match (no remote peers can connect). Warn so

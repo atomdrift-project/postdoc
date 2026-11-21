@@ -138,9 +138,7 @@ pub(super) fn with_subject(mut response: Response, subject: Subject) -> Response
 pub(super) enum Auth {
     /// Presented a valid bearer token.
     Token,
-    /// Trusted because no `--token-file` is configured: the API is open.
-    Open,
-    /// No valid credential, on the one route that does not require one.
+    /// The one route that requires no credential: `/_/health`.
     Anonymous,
     /// Refused: peer address unavailable. A wiring bug, not a client error.
     NoPeerInfo,
@@ -161,7 +159,6 @@ impl Auth {
     fn as_str(self) -> &'static str {
         match self {
             Self::Token => "token",
-            Self::Open => "open",
             Self::Anonymous => "anon",
             Self::NoPeerInfo => "no-peer-info",
             Self::PeerDenied => "peer-denied",
@@ -174,7 +171,7 @@ impl Auth {
     /// Whether this outcome refused the request. Denials are the security
     /// record, so they are logged a level above ordinary traffic.
     fn denied(self) -> bool {
-        !matches!(self, Self::Token | Self::Open | Self::Anonymous)
+        !matches!(self, Self::Token | Self::Anonymous)
     }
 }
 

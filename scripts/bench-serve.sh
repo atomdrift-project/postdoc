@@ -69,10 +69,17 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+# The server has no unauthenticated mode; a throwaway token for this run.
+token_file="$output/token"
+(umask 077; od -An -tx1 -N32 /dev/urandom | tr -d ' \n' >"$token_file")
+auth="Authorization: Bearer $(cat "$token_file")"
+export auth
+
 started_ns=$(date +%s%N)
 RUST_LOG=${RUST_LOG:-postdoc=info,scan=info} \
     "$binary" serve \
     --bind "127.0.0.1:$port" \
+    --token-file "$token_file" \
     --workers "$workers" \
     --max-rss-gb -1 \
     --analysis-timeout 0 \
@@ -82,7 +89,7 @@ server_pid=$!
 
 ready=0
 for _ in $(seq 1 1200); do
-    if curl -fsS "$url/_/health" >"$output/health.json" 2>/dev/null; then
+    if curl -fsS "$url/_/health" >/dev/null 2>&1; then
         ready=1
         break
     fi
@@ -115,6 +122,7 @@ find "$dataset" -type f -print0 |
             curl -sS \
                 -o "$body.tmp" \
                 -w "%{http_code}" \
+                -H "$auth" \
                 -H "Content-Type: application/octet-stream" \
                 -H "X-Filename: $(basename "$file")" \
                 --data-binary "@$file" \
@@ -148,7 +156,7 @@ vmhwm_mib=$(awk -v kib="$vmhwm_kib" 'BEGIN { printf "%.1f", kib/1024 }')
 vmrss_mib=$(awk -v kib="$vmrss_kib" 'BEGIN { printf "%.1f", kib/1024 }')
 
 python3 "$script_dir/detect-fingerprint.py" "$responses" >"$output/fingerprint.json"
-curl -fsS "$url/_/memory" >"$output/memory-after.json"
+curl -fsS -H "$auth" "$url/_/stats" >"$output/stats-after.json"
 cat >"$output/summary.json" <<EOF
 {
   "ready_s": $ready_s,

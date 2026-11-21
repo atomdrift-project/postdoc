@@ -19,8 +19,6 @@
 //!   honouring the same `OTEL_EXPORTER_OTLP_*` overrides. Push rather than
 //!   scrape because most of the fleet is not on the network Prometheus
 //!   scrapes from, and a box can always reach out.
-//! - Also served for scraping at `/_/metrik`, under the names the receiver
-//!   gives the pushed series, so one query reads either.
 //! - Named `<service>.<noun>.<verb>`, with the same resource attributes, so the
 //!   series carry `job="postdoc"` and `instance="<host>-<pid>"`.
 //!
@@ -29,13 +27,9 @@
 //! JSON, and serde and reqwest are already here.
 
 use std::collections::BTreeMap;
-use std::fmt::Write as _;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use axum::extract::State;
-use axum::http::header::CONTENT_TYPE;
-use axum::response::{IntoResponse, Response};
 use serde_json::{Value, json};
 
 use super::flight::{FlightKey, Outcome};
@@ -97,7 +91,7 @@ enum Kind {
 /// One metric and its current values.
 #[derive(Debug)]
 struct Family {
-    /// The OTel name. [`Self::prometheus_name`] is what Prometheus calls it.
+    /// The OTel name.
     name: &'static str,
     /// UCUM, as OTel spells it: `s`, `By`, or empty.
     unit: &'static str,
@@ -121,23 +115,6 @@ impl Family {
         let mut family = Self::new(name, unit, Kind::Gauge, help);
         family.points.push((Vec::new(), value));
         family
-    }
-
-    /// The name Prometheus's OTLP receiver gives this metric: dots become
-    /// underscores, the unit becomes a suffix, and a counter ends `_total`.
-    /// Spelled out here so a scrape of `/_/metrik` and a pushed series answer
-    /// to the same query.
-    fn prometheus_name(&self) -> String {
-        let mut name = self.name.replace('.', "_");
-        match self.unit {
-            "s" => name.push_str("_seconds"),
-            "By" => name.push_str("_bytes"),
-            _ => {}
-        }
-        if self.kind == Kind::Counter {
-            name.push_str("_total");
-        }
-        name
     }
 }
 
@@ -267,55 +244,6 @@ fn collect(state: &AppState) -> Vec<Family> {
     }
 
     families
-}
-
-/// `GET /_/metrik`, where `obs` mounts its scrape handler. Behind the bearer
-/// token like every `/_/` route but health: it names the corpus addresses and
-/// this box's load.
-pub(super) async fn metrik(State(state): State<Arc<AppState>>) -> Response {
-    (
-        [(CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
-        prometheus_text(&collect(&state)),
-    )
-        .into_response()
-}
-
-fn prometheus_text(families: &[Family]) -> String {
-    let mut out = String::with_capacity(4096);
-    for family in families {
-        let name = family.prometheus_name();
-        let kind = match family.kind {
-            Kind::Counter => "counter",
-            Kind::Gauge => "gauge",
-        };
-        let _ = writeln!(out, "# HELP {name} {}\n# TYPE {name} {kind}", family.help);
-        for (labels, value) in &family.points {
-            out.push_str(&name);
-            if !labels.is_empty() {
-                out.push('{');
-                for (i, (key, val)) in labels.iter().enumerate() {
-                    if i > 0 {
-                        out.push(',');
-                    }
-                    let _ = write!(out, "{key}=\"");
-                    // The three characters the format requires escaped in a
-                    // label value.
-                    for c in val.chars() {
-                        match c {
-                            '\\' => out.push_str("\\\\"),
-                            '"' => out.push_str("\\\""),
-                            '\n' => out.push_str("\\n"),
-                            c => out.push(c),
-                        }
-                    }
-                    out.push('"');
-                }
-                out.push('}');
-            }
-            let _ = writeln!(out, " {value}");
-        }
-    }
-    out
 }
 
 /// What `obs` puts on every series' resource, so `job` and `instance` mean the
@@ -524,43 +452,6 @@ mod tests {
                 (("other", "invalid_artifact"), 1),
                 (("sha256", "internal"), 1),
             ]
-        );
-    }
-
-    /// The names the OTLP receiver produces, checked against what it already
-    /// made of forager's: `forager.feed.cursor_lag` in seconds is
-    /// `forager_feed_cursor_lag_seconds`.
-    #[test]
-    fn prometheus_names_match_the_receiver() {
-        let named = |name, unit, kind| Family::new(name, unit, kind, "").prometheus_name();
-        assert_eq!(
-            named("postdoc.analyses.finished", "", Kind::Counter),
-            "postdoc_analyses_finished_total"
-        );
-        assert_eq!(
-            named("postdoc.uptime", "s", Kind::Gauge),
-            "postdoc_uptime_seconds"
-        );
-        assert_eq!(
-            named("postdoc.memory.rss", "By", Kind::Gauge),
-            "postdoc_memory_rss_bytes"
-        );
-        assert_eq!(
-            named("postdoc.slots.free", "", Kind::Gauge),
-            "postdoc_slots_free"
-        );
-    }
-
-    #[test]
-    fn text_escapes_label_values() {
-        let mut family = Family::new("m", "", Kind::Gauge, "h");
-        family
-            .points
-            .push((vec![("a", "x\"y\\z\nw".into()), ("b", "ok".into())], 3));
-        family.points.push((Vec::new(), 4));
-        assert_eq!(
-            prometheus_text(&[family]),
-            "# HELP m h\n# TYPE m gauge\nm{a=\"x\\\"y\\\\z\\nw\",b=\"ok\"} 3\nm 4\n"
         );
     }
 

@@ -148,28 +148,23 @@ local worker as `atomscan worker --url … --name local [--data-dir …]
 `CLEAVE_VALIDATE_SOFT`, and `TMPDIR` set; `postdoc worker` accepts that argv
 verbatim, so the binary name is the only thing hopper's config changes.
 
-**serve** is a drop-in replacement for `atomscan serve`. Every route scan
-answers, postdoc answers the same way: same paths, same request shapes, same
-status codes, same error codes, same `X-Scan-Source` header. Swapping the
-binary is a deployment change and nothing else.
+**serve** began as a drop-in replacement for `atomscan serve`, answering
+every route scan did. It now answers only what its callers use, all behind the
+`--token-file` bearer token, which `serve` requires:
 
-| Route | |
-|---|---|
-| `GET  /v1/lookup` | The decision API. |
-| `POST /v1/analyze` | Analyze and answer; NDJSON progress frames, then the decision. |
-| `POST /analyze`, `/analyze-purl`, `/analyze-path` | Upload, coordinate, and loopback-only path. |
-| `GET  /lookup`, `/status` | The legacy lookup and the reconnect probe. |
-| `GET  /_/health`, `/_/info`, `/_/stats` | Liveness, build facts, counters. |
-| `GET  /_/memory`, `/_/requests`, `/_/threads` | Operator diagnostics. |
-| `GET  /_/metrik` | Prometheus scrape, as `obs` serves it; the same metrics are pushed over OTLP to `otel`. |
-| `POST /_/reload`, `/_/update` | Hot-swap the bundles. |
+| Route | Caller | |
+|---|---|---|
+| `GET  /v1/lookup` | beamline | The decision API. |
+| `POST /v1/analyze` | beamline, promoter | Analyze and answer; NDJSON progress frames, then the decision. |
+| `GET  /v1/status` | beamline | The reconnect probe: is an analysis of this artifact running here? |
+| `GET  /_/stats` | beamline, promoter, deploy | Routing signals, uptime, idle-worker state. |
+| `GET  /_/health` | probes, deploy, promoter | Readiness in one word. The only unauthenticated route. |
 
-An earlier draft cut this to the four routes beamline calls. That was wrong
-twice over. Beamline is the only *application* caller, but the `/_/*` routes
-have operators and deploy scripts behind them, and a survey that finds no
-code calling a route has not shown that nobody does. More importantly, a
-drop-in cannot be a subset: the point of the swap is that nothing else has to
-change at the same time.
+The legacy upload, coordinate and path routes, the bundle hot-swap routes,
+and the `/_/info`, `/_/memory`, `/_/requests`, `/_/threads` and `/_/metrik`
+diagnostics were removed (2026-11, after the Neo and ARTEX pentests): an
+unused route is attack surface with nobody watching it. Metrics still reach
+`otel` by OTLP push.
 
 **`/v1` is scan's.** It is scan's contract and postdoc follows it: the same
 decision on `/v1/lookup` and `/v1/analyze`, and on `/v1/analyze?full=1` the
@@ -280,7 +275,8 @@ postdoc/
   src/server/mod.rs     router, state, config
   src/server/lookup.rs  /v1/lookup
   src/server/analyze.rs /v1/analyze
-  src/server/ops.rs     /_/stats, /_/health
+  src/server/diag.rs    /_/stats, /_/health
+  src/server/acl.rs     peer ACL and the bearer token
   src/worker.rs         the postdoc backend for scan::worker::run
   docs/DESIGN.md
   docs/JSON.md          what postdoc adds to scan's version 8 body

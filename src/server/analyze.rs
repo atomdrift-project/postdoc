@@ -2,7 +2,7 @@
 //! blocking thread, and filing what it found.
 //!
 //! Every analysis goes through [`lead`] — uploaded bytes, a PURL and an exact
-//! URL alike — so admission, the `/_/requests` entry, the timeout, the
+//! URL alike — so admission, the in-flight entry, the timeout, the
 //! completion log and the `/_/stats` figures are one code path, not three
 //! copies that drift.
 
@@ -54,7 +54,7 @@ impl Job {
         }
     }
 
-    /// How `/_/requests` and the phase tracker name the run.
+    /// How the watchdog and the phase tracker name the run.
     fn name(&self) -> &str {
         match self {
             Self::Bytes { filename, .. } => filename,
@@ -178,12 +178,7 @@ impl Leader {
     ) -> Outcome {
         let phase = RequestPhase::with_label(format!("req#{} {}", self.request_id, job.name()));
         self.flight.set_phase(phase.clone());
-        let entry = InFlightRequest::new(
-            job.name(),
-            job.size_hint().unwrap_or(0),
-            self.flight.cancellation(),
-            phase.clone(),
-        );
+        let entry = InFlightRequest::new(job.name(), self.flight.cancellation(), phase.clone());
         let cancellation = Arc::clone(&entry.cancellation);
         let started = Instant::now();
 

@@ -441,9 +441,11 @@ Saved settings preserve each host's Hopper URLs, LLM configuration, and explicit
 Windows that means `nssm get postdoc-worker AppParameters`, whose answer is
 UTF-16 and has its NULs stripped before anything tries to tokenize it.
 
-**The health gate asks two questions**, not one. Answering `/_/health` proves
-the port is bound; a small `uptime_secs` proves it is the *new* process
-answering. A server that failed to restart answers happily with the old
+**The health gate asks two questions**, not one. `/_/health` answering `ok`
+proves the port is bound and the server ready; a small `uptime_secs` on
+`/_/stats` proves it is the *new* process answering. `/_/stats` needs the
+token, which the probe reads from `SCAN_TOKEN_FILE` or `~/.tok/scan` on the
+host — the same file the deploy installs from. A server that failed to restart answers happily with the old
 binary, and that is exactly the failure worth catching before touching the
 next one.
 
