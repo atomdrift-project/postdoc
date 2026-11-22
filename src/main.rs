@@ -182,9 +182,9 @@ impl DaemonArgs {
 #[command(version, about, max_term_width = 100)]
 // Scan's wording for these describes remote verdicts, and postdoc never asks
 // isotope13 for one: it is what isotope13's remote analysis runs on.
-// `--analyze` is still accepted, so a shared `SCAN_ANALYZE` does not break a
-// host, but only `remote` changes anything, and that is refused.
-#[command(mut_arg("analyze", |arg| arg.hide(true)))]
+// `--uplink` is still accepted, so a shared `ATOMDRIFT_UPLINK` does not break a
+// host, but only `always` changes anything, and that is refused.
+#[command(mut_arg("uplink", |arg| arg.hide(true)))]
 struct Cli {
     /// Scan's own global flags, flattened rather than restated.
     ///
@@ -603,7 +603,7 @@ mod tests {
     fn the_help_offers_no_remote_verdicts() {
         let mut command = Cli::command();
         let help = command.render_long_help().to_string();
-        assert!(!help.contains("--analyze"), "--analyze is listed:\n{help}");
+        assert!(!help.contains("--uplink"), "--uplink is listed:\n{help}");
         assert!(
             !help.contains("remote verdicts"),
             "the help promises remote verdicts:\n{help}"
@@ -612,7 +612,7 @@ mod tests {
         let serve = command
             .find_subcommand_mut("serve")
             .map(|serve| serve.render_long_help().to_string());
-        assert!(serve.is_some_and(|help| help.contains("--feed") && !help.contains("--analyze")));
+        assert!(serve.is_some_and(|help| help.contains("--feed") && !help.contains("--uplink")));
     }
 
     #[test]
