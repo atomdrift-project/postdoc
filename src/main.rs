@@ -440,8 +440,8 @@ fn main() -> ExitCode {
 
 fn run(cli: Cli) -> anyhow::Result<ExitCode> {
     anyhow::ensure!(
-        cli.global.analyze != scan::remote::Analyze::Remote,
-        "--analyze=remote has no meaning for postdoc: it is the remote analysis"
+        cli.global.uplink != Some(scan::remote::Uplink::Always),
+        "--uplink=always has no meaning for postdoc: it is the remote analysis"
     );
     let command = cli.command;
     match command {
