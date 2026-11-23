@@ -220,6 +220,20 @@ function Stop-ServiceFully {
     }
     Die "could not stop service $ServiceName"
 }
+# `nssm start` reports failure ("Unexpected status SERVICE_PAUSED in response to
+# START control") when the app exits inside the throttle window and NSSM parks
+# the service in Paused before the SCM's start call returns. That is a
+# crash-on-startup, not an NSSM failure, so don't die blind here: fall through
+# to the grace-period check, which dumps the logs and reports the real status.
+# Only a failure that leaves the service Stopped is an NSSM error in itself.
+function Start-ServiceChecked {
+    & $nssm start $ServiceName 2>&1 | Out-Null
+    if ($LASTEXITCODE -eq 0) { return }
+    Start-Sleep -Milliseconds 500
+    $status = (Get-Service $ServiceName).Status
+    if ($status -eq 'Stopped') { Die "NSSM failed to start $ServiceName" }
+    Log "nssm start returned $LASTEXITCODE with $ServiceName $status; checking startup"
+}
 $arguments = @($Mode)
 if ($Mode -eq 'worker') {
     $arguments += @('--url', $Url)
@@ -249,7 +263,11 @@ if ($binaryChanged -or $changed) {
     if ($svc) { Stop-ServiceFully }
     if ($binaryChanged) {
         Copy-Item $binSrc "$BinDst.new" -Force
-        Move-Item "$BinDst.new" $BinDst -Force
+        # Move-Item -Force can still fail with "Cannot create a file when that
+        # file already exists" on an existing destination, so remove it first.
+        # The service is stopped above, so the old binary is not locked.
+        if (Test-Path -LiteralPath $BinDst) { Remove-Item -LiteralPath $BinDst -Force -ErrorAction Stop }
+        Move-Item -LiteralPath "$BinDst.new" -Destination $BinDst
     }
 } elseif ($svc) {
     Log 'No changes; leaving service running'
@@ -259,8 +277,7 @@ if ($binaryChanged -or $changed) {
     if ($svc.Status -ne 'Running') {
         Log "$ServiceName is $($svc.Status); restarting"
         Stop-ServiceFully
-        & $nssm start $ServiceName | Out-Null
-        if ($LASTEXITCODE -ne 0) { Die "NSSM operation failed for $ServiceName" }
+        Start-ServiceChecked
     }
     $skipUpdate = $true
 }
@@ -327,9 +344,7 @@ if ($LASTEXITCODE -ne 0) { Die "NSSM operation failed for $ServiceName" }
 [IO.File]::WriteAllText($configPath, $configText)
 
 Log "Starting $ServiceName"
-& $nssm start $ServiceName | Out-Null
-if ($LASTEXITCODE -ne 0) { Die "NSSM operation failed for $ServiceName" }
-
+Start-ServiceChecked
 }
 
 # A service that starts and then dies still reports "started", and NSSM turns a
@@ -338,7 +353,10 @@ if ($LASTEXITCODE -ne 0) { Die "NSSM operation failed for $ServiceName" }
 for ($i = 0; $i -lt 15; $i++) {
     $svc = Get-Service $ServiceName
     if ($svc.Status -ne 'Running') {
-        Get-Content (Join-Path $LogDir "$Mode.err.log") -Tail 40 -ErrorAction SilentlyContinue
+        foreach ($stream in 'err', 'out') {
+            Log "--- $Mode.$stream.log (tail) ---"
+            Get-Content (Join-Path $LogDir "$Mode.$stream.log") -Tail 40 -ErrorAction SilentlyContinue
+        }
         Die "$ServiceName exited during startup (status $($svc.Status))"
     }
     Start-Sleep -Seconds 1
