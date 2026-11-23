@@ -113,6 +113,9 @@ class RolloutTests(unittest.TestCase):
         self.assertEqual(calls["server"][0]["IDLE"], "0")
         self.assertEqual(calls["server"][0]["BIND"], "127.0.0.1:50555")
         self.assertIn("URL=https://custom-worker.example", calls["worker"][0]["args"])
+        # The tree is already reset to upstream; a pull on top could only fail.
+        self.assertEqual(calls["server"][0]["args"], ["deploy-server", "PULL=0"])
+        self.assertIn("PULL=0", calls["worker"][0]["args"])
 
     def test_hopper_failure_blocks_every_analysis_host(self):
         result, calls = self.exercise(fail=True)

@@ -8,6 +8,11 @@ make deploy-server HOPPER=none                  # explicitly disable Hopper
 make rollout                                    # the fleet
 ```
 
+Both deploy targets start with `git pull --ff-only`, so a host installs what is
+upstream; a checkout that has diverged stops the deploy instead of being merged.
+`PULL=0` skips the pull. `make rollout` passes it, having already fetched and
+reset each host's checkout to upstream.
+
 `make` picks the platform:
 
 | Platform | Supervision | Script |

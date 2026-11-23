@@ -204,7 +204,7 @@ install-precommit:
 # the allocator tuning FreeBSD needs in its unit because it uses libc's
 # jemalloc rather than the one linked into the binary.
 
-.PHONY: worker deploy-worker deploy-server check-server-hopper test-deploy rollout scanners
+.PHONY: worker deploy-worker deploy-server _deploy-worker _deploy-server check-server-hopper test-deploy rollout scanners
 
 deploy-worker deploy-server: export POSTDOC_DEPLOY_BUILD := 1
 
@@ -239,14 +239,26 @@ worker: release
 scanners:
 	./scripts/deploy-scanners.sh
 
-## deploy-worker: install and start a worker here (URL=<hopper url>)
-deploy-worker: release
+# A deploy installs what is upstream, so it pulls first. Everything after the
+# pull runs in a fresh make that reads the pulled Makefile; the copy this make
+# already parsed may be stale. --ff-only stops on a checkout that has diverged
+# rather than merging into it. PULL=0 skips the pull: rollout.sh passes it,
+# having already fetched and reset the tree to upstream.
+PULL ?= 1
+
+## deploy-worker: pull, then install and start a worker here (URL=<hopper url>)
+## deploy-server: pull, then install and start a server here
+##                (HOPPER=<read,primary> or URL=); HOPPER=none explicitly
+##                disables uploads and idle work.
+deploy-worker deploy-server:
+	@if [ "$(PULL)" != 0 ]; then git pull --ff-only; fi
+	@$(MAKE) --no-print-directory _$@
+
+_deploy-worker: release
 	@[ -n "$(URL)" ] || { echo "usage: make deploy-worker URL=<hopper url>"; exit 1; }
 	@$(MAKE) --no-print-directory _deploy MODE=worker URL="$(URL)"
 
-## deploy-server: install and start a server here (HOPPER=<read,primary> or URL=)
-##                HOPPER=none explicitly disables uploads and idle work.
-deploy-server: check-server-hopper release
+_deploy-server: check-server-hopper release
 	@$(MAKE) --no-print-directory _deploy MODE=serve URL="$(if $(filter none,$(SERVER_HOPPER)),,$(SERVER_HOPPER))"
 
 check-server-hopper:
@@ -291,7 +303,7 @@ help:
 	@echo "  worker         run a worker in the foreground (URL=<hopper url>)"
 	@echo "  server-benchmark / server-heap-benchmark   HTTP corpus benchmark (SERVER_BENCH_PATH=)"
 	@echo "  worker-benchmark / worker-heap-benchmark   local hopper benchmark (WORKER_BENCH_PATH=)"
-	@echo "  deploy-worker  install + start a worker here (URL=<hopper url>)"
-	@echo "  deploy-server  install + start a server here"
+	@echo "  deploy-worker  git pull, then install + start a worker here (URL=<hopper url>; PULL=0 skips the pull)"
+	@echo "  deploy-server  git pull, then install + start a server here (PULL=0 skips the pull)"
 	@echo "  rollout        redeploy the fleet (DRY_RUN=1 to preview)"
 	@echo "  clean     cargo clean"

@@ -259,7 +259,7 @@ fi
 # do with it. Fetching and resetting reaches the same commit either way, and
 # discards exactly the local commits and edits a deploy host is not supposed to
 # have. Untracked files -- build artifacts, caches, token files -- are left
-# alone.
+# alone. The deploy targets are told PULL=0 so they do not pull over this.
 upstream=$(git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null) ||
     upstream=origin/main
 git fetch --prune
@@ -287,7 +287,7 @@ if [ -n "$server_unit" ]; then
     . "$saved"
     rm -f "$saved"
     if [ -n "${ROLLOUT_URL:-}" ]; then HOPPER=$ROLLOUT_URL; export HOPPER; fi
-    $mk deploy-server
+    $mk deploy-server PULL=0
 elif [ -n "$worker_unit" ]; then
     config=/etc/postdoc/worker.json
     [ "$(uname -s)" != FreeBSD ] || config=/usr/local/etc/postdoc/worker.json
@@ -309,7 +309,7 @@ elif [ -n "$worker_unit" ]; then
         URL=${ROLLOUT_URL:-${URL:-}}
     fi
     [ -n "${URL:-}" ] || { echo "no worker URL configured" >&2; exit 91; }
-    $mk deploy-worker URL="$URL"
+    $mk deploy-worker URL="$URL" PULL=0
 else
     exit 91
 fi
