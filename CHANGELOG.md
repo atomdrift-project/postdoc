@@ -2,6 +2,24 @@
 
 All notable changes to postdoc. Versions follow [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.9.6 (unreleased)
+
+### Features
+
+- Follow references two levels deep by default, since a shallow answer gets cached for every host that asks.
+- Accept scan's renamed `--uplink` flag, and refuse its always mode, which means nothing here.
+- Breaking: `serve` refuses to start without a token, and every route but health demands it.
+- Breaking: `/_/health` answers one plain-text word; load and uptime moved to the stats route.
+- Breaking: remove five diagnostic routes nobody called; metrics still ship over OTLP.
+- Breaking: the status route moves under `/v1`, beside the other per-artifact routes.
+
+### Fixes
+
+- Install Windows service tokens in the LocalSystem profile, where postdoc actually looks for them.
+- Create the Windows service's AppData directories, without which it refused to start.
+- Restart a Windows service NSSM paused after a crash loop, instead of declaring it healthy.
+- Watch a fresh Windows service through a grace period, catching crashes an instant check missed.
+
 ## 0.9.5 (unreleased)
 
 ### Features
@@ -12,10 +30,6 @@ All notable changes to postdoc. Versions follow [semantic versioning](https://se
 - Return the full version 8 result instead of the decision when asked with `full=1`.
 - Breaking: talk only to hopper's `/v1` routes; older hoppers need not apply.
 - Breaking: analyses no longer time out by default; `--analysis-timeout` brings the limit back.
-- Breaking: `serve` requires `--token-file`; there is no unauthenticated mode, and every route but `/_/health` needs the token.
-- Breaking: `/_/health` answers one word (`ok`, `starting`, `failed`, `degraded`) as plain text; load and uptime are on `/_/stats`.
-- Breaking: remove `/_/info`, `/_/memory`, `/_/requests`, `/_/threads` and `/_/metrik`, which no caller used; metrics are still pushed over OTLP.
-- Breaking: `GET /status` is now `GET /v1/status`, beside the other per-artifact routes.
 
 ### Fixes
 
