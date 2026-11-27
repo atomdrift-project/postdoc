@@ -22,7 +22,7 @@ The defaults are deliberate. Override them only when you have a reason.
 | `--allow-cidr`   | none               | Extra CIDR networks allowed beyond loopback.               |
 | `--token-file`   | none               | File holding the required bearer token. See below.         |
 | `--hopper`       | none               | Hopper base URL. Every analyzed result is renewed on its `/v1/work/result`. Needs a hopper token; see below. |
-| `--idle-worker-slots` | on when `--hopper` is set | Runs a companion `postdoc worker` process that claims hopper queue work, frozen by the kernel for the whole of every analysis request. Any non-zero value enables it; `0` disables. |
+| `--idle-worker-slots` | on when `--hopper` is set | Runs a companion `postdoc worker` process that claims hopper queue work, frozen by the kernel for the whole of every analysis request except promoter's (by `Atomdrift-Origin`, else User-Agent), which is background work. Any non-zero value enables it; `0` disables. |
 
 Environment variables read at startup:
 

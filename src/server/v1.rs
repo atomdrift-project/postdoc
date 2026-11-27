@@ -21,6 +21,7 @@ use super::error::ApiError;
 use super::flight::{Attachment, FlightKey, Outcome};
 use super::handlers::{normalize_pkg_purl, pick_verdict, sanitize_upload_filename, valid_http_url};
 use scan::model::Level;
+use scan::upload::Origin;
 
 /// Query for `GET /v1/lookup` and `POST /v1/analyze`. `purl`, `url` and
 /// `sha256` repeat; one `sha256` names one artifact, and only a lookup takes
@@ -240,12 +241,21 @@ struct V1Analyze {
     purl: Option<(String, String)>,
     /// The exact URL, validated.
     url: Option<String>,
+    /// Who the request is on behalf of: its `Atomdrift-Origin`, or failing
+    /// that its User-Agent's product token. Sent with every artifact the
+    /// analysis files in hopper.
+    origin: Option<Origin>,
 }
 
 impl V1Analyze {
     /// Validate everything the query says. A refusal is a finished response:
     /// an unparseable PURL names what the caller sent on the access line.
-    fn parse(state: &AppState, request_id: u64, q: V1LookupQuery) -> Result<Self, Box<Response>> {
+    fn parse(
+        state: &AppState,
+        request_id: u64,
+        q: V1LookupQuery,
+        origin: Option<Origin>,
+    ) -> Result<Self, Box<Response>> {
         let started = Instant::now();
         let reject =
             |code, message: &'static str| Box::new(ApiError::bad_request(code, message).v1());
@@ -353,6 +363,7 @@ impl V1Analyze {
             follow,
             purl,
             url,
+            origin,
         })
     }
 
@@ -392,7 +403,7 @@ pub(super) async fn v1_analyze(
 ) -> Response {
     let request_id = request_id.get();
     let q = V1LookupQuery::parse(raw.0.as_deref()).with_fresh_header(&headers);
-    let req = match V1Analyze::parse(&state, request_id, q) {
+    let req = match V1Analyze::parse(&state, request_id, q, Origin::from_headers(&headers)) {
         Ok(req) => req,
         Err(rejected) => return *rejected,
     };
@@ -571,7 +582,7 @@ async fn analyze_bytes(
             // original analysis may have lost its request-scoped bytes before
             // the asynchronous uploader read them. Re-offer them, so a cached
             // answer can repair a missing hopper row without another analysis.
-            repair(state, request_id, &filename, &sha, bytes);
+            repair(state, req, &filename, &sha, bytes);
             let mut resp = answered(decided, source, req.elapsed_ms());
             resp.extensions_mut().insert(match purl.as_deref() {
                 Some(named) => Subject::purl(named, Some(&sha)),
@@ -596,13 +607,14 @@ async fn analyze_bytes(
         state.config.fetch.selection_bits(),
     ));
     if attachment.leads() {
-        tracing::info!(id = request_id, sha256 = %sha, size_bytes = bytes.len(), filename = %filename, "--> POST /v1/analyze (bytes)");
+        tracing::info!(id = request_id, sha256 = %sha, size_bytes = bytes.len(), filename = %filename, origin = req.origin.as_ref().map(Origin::as_str), "--> POST /v1/analyze (bytes)");
         analyze::lead(
             state,
             request_id,
             attachment.flight(),
             Job::Bytes { filename, bytes },
             req.follow,
+            req.origin.clone(),
         );
     } else {
         tracing::info!(id = request_id, sha256 = %sha, "--> POST /v1/analyze (bytes; joined a run already in flight)");
@@ -622,10 +634,11 @@ async fn analyze_bytes(
 /// [`super::MAX_REPAIRS`] at once: each holds the whole upload until it is
 /// staged, and a repeat past the bound is skipped — the next repeat of the
 /// same artifact repairs it instead.
-fn repair(state: &AppState, request_id: u64, filename: &str, sha: &str, bytes: bytes::Bytes) {
+fn repair(state: &AppState, req: &V1Analyze, filename: &str, sha: &str, bytes: bytes::Bytes) {
     let Some(uploader) = state.uploader.clone() else {
         return;
     };
+    let (request_id, origin) = (req.request_id, req.origin.clone());
     let Ok(permit) = Arc::clone(&state.repairs).try_acquire_owned() else {
         tracing::debug!(id = request_id, sha256 = %sha, "repair skipped: enough already in flight");
         return;
@@ -637,10 +650,13 @@ fn repair(state: &AppState, request_id: u64, filename: &str, sha: &str, bytes: b
             let Some(artifact) = analyze::upload_artifact(&filename, &sha, bytes.len()) else {
                 return;
             };
-            if let Err(error) = uploader.submit_artifact_bytes_durable(artifact, &bytes) {
+            if let Err(error) =
+                uploader.submit_artifact_bytes_durable(artifact, &bytes, origin.as_ref())
+            {
                 tracing::error!(
                     id = request_id,
                     sha256 = %sha,
+                    origin = origin.as_ref().map(Origin::as_str),
                     %error,
                     "upload: could not stage cached artifact for hopper"
                 );
@@ -781,13 +797,14 @@ async fn analyze_url(state: &Arc<AppState>, req: &V1Analyze, url: String) -> Res
         state.config.fetch.selection_bits(),
     ));
     if attachment.leads() {
-        tracing::info!(id = request_id, url = %url, "--> POST /v1/analyze");
+        tracing::info!(id = request_id, url = %url, origin = req.origin.as_ref().map(Origin::as_str), "--> POST /v1/analyze");
         analyze::lead(
             state,
             request_id,
             attachment.flight(),
             Job::Url(url.clone()),
             req.follow,
+            req.origin.clone(),
         );
     } else {
         tracing::info!(id = request_id, url = %url, "--> POST /v1/analyze (joined a run already in flight)");
@@ -853,13 +870,14 @@ async fn analyze_purl(state: &Arc<AppState>, req: &V1Analyze) -> Response {
         state.config.fetch.selection_bits(),
     ));
     if attachment.leads() {
-        tracing::info!(id = request_id, purl = %purl, "--> POST /v1/analyze");
+        tracing::info!(id = request_id, purl = %purl, origin = req.origin.as_ref().map(Origin::as_str), "--> POST /v1/analyze");
         analyze::lead(
             state,
             request_id,
             attachment.flight(),
             Job::Purl(purl.clone()),
             req.follow,
+            req.origin.clone(),
         );
     } else {
         tracing::info!(id = request_id, purl = %purl, "--> POST /v1/analyze (joined a run already in flight)");
@@ -2860,7 +2878,7 @@ mod tests {
     async fn a_second_purl_is_refused() -> anyhow::Result<()> {
         let (_router, state) = super::super::assemble(super::super::ServerConfig::default())?;
         let q = V1LookupQuery::parse(Some("purl=npm%2Fa%401.0.0&purl=npm%2Fb%401.0.0"));
-        let Err(refusal) = V1Analyze::parse(&state, 1, q) else {
+        let Err(refusal) = V1Analyze::parse(&state, 1, q, None) else {
             anyhow::bail!("two purls were accepted");
         };
         assert_eq!(refusal.status(), StatusCode::BAD_REQUEST);

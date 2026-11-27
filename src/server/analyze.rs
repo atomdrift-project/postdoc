@@ -20,7 +20,7 @@ use super::{AnalysisOutcome, AnalysisPermit, AppState, InFlightRequest, RequestG
 use postdoc::scanners::{Input, Scanners};
 use scan::analysis::{Analysis, ModelResources, RequestPhase, Timeline};
 use scan::engine::{HopperRoute, ScanResult};
-use scan::upload::Uploader;
+use scan::upload::{Origin, Uploader};
 
 /// Request-scoped traversal and storage behavior.
 #[derive(Clone, Copy)]
@@ -137,12 +137,17 @@ fn acquire(state: &AppState, size_hint: Option<u64>) -> Result<AnalysisPermit, A
 ///
 /// The analysis is server-owned work, not part of the request: the leader
 /// hanging up does not abandon its followers, and shutdown drains it.
+///
+/// `origin` is who the leader asked on behalf of; every artifact the analysis
+/// files in hopper names it. A follower's origin is not recorded: the bytes
+/// are filed once, for whoever asked first.
 pub(super) fn lead(
     state: &Arc<AppState>,
     request_id: u64,
     flight: &Arc<Flight>,
     job: Job,
     follow: RequestFollow,
+    origin: Option<Origin>,
 ) {
     let publisher = state.flights.publisher(flight);
     let (resources, permit) = match admit(state, request_id, flight.key(), job.size_hint()) {
@@ -154,6 +159,7 @@ pub(super) fn lead(
         request_id,
         flight: Arc::clone(flight),
         follow,
+        origin,
     };
     state.tasks.spawn(async move {
         let outcome = leader.run(job, resources, permit).await;
@@ -167,6 +173,7 @@ struct Leader {
     request_id: u64,
     flight: Arc<Flight>,
     follow: RequestFollow,
+    origin: Option<Origin>,
 }
 
 impl Leader {
@@ -190,6 +197,7 @@ impl Leader {
         let slow_rule_ms = self.state.config.slow_rule_ms;
         let policy = self.follow.policy;
         let uploader = self.state.uploader.clone();
+        let origin = self.origin.clone();
         let corpus = self.state.corpus.clone();
         let scanners = Arc::clone(&self.state.config.scanners);
         // Captured here, on the runtime, for the one corpus call the PURL
@@ -212,21 +220,32 @@ impl Leader {
                 deps_for_upload: uploader.is_some(),
                 ..Analysis::new("", &resources, slow_rule_ms)
             };
+            let hopper = uploader
+                .as_deref()
+                .map(|uploader| (uploader, origin.as_ref()));
             match job {
                 Job::Bytes { filename, bytes } => {
-                    classify_upload(&filename, bytes, analysis, uploader.as_deref(), &scanners)
+                    classify_upload(&filename, bytes, analysis, hopper, &scanners)
                 }
                 Job::Purl(purl) => classify_purl(
                     &purl,
                     analysis,
-                    uploader.as_deref(),
+                    hopper,
                     corpus.as_deref().map(|corpus| (corpus, &runtime)),
                     &scanners,
                 ),
-                Job::Url(url) => classify_url(&url, analysis, uploader.as_deref(), &scanners),
+                Job::Url(url) => classify_url(&url, analysis, hopper, &scanners),
             }
         };
-        let outcome = RequestGuard::new(&self.state, self.request_id, entry, permit)
+        let freeze = super::idle::freezes_worker(self.origin.as_ref().map(Origin::as_str));
+        if !freeze {
+            tracing::info!(
+                id = self.request_id,
+                origin = self.origin.as_ref().map(Origin::as_str),
+                "background caller: the idle worker keeps running beside this analysis",
+            );
+        }
+        let outcome = RequestGuard::new(&self.state, self.request_id, entry, permit, freeze)
             .run(work)
             .await;
 
@@ -254,10 +273,11 @@ impl Leader {
         let purl = self.flight.key().purl().map(str::to_owned);
         let url = self.flight.key().url().map(str::to_owned);
         let refresh = self.follow.refresh;
+        let origin = self.origin.clone();
         let filed = tokio::task::spawn_blocking(move || {
             index_verdict(&result, purl.as_deref(), url.as_deref(), refresh);
             if let Some(uploader) = &state.uploader {
-                renew(uploader, &mut result, purl);
+                renew(uploader, &mut result, purl, origin.as_ref());
             }
             result
         })
@@ -410,11 +430,16 @@ pub(super) async fn index_query<T: Send + 'static>(
 /// Fetched dependencies go first, so each one's row exists before its own
 /// verdict lands, then the result — under its own sha256, unless
 /// `classify_purl`'s registry fallback redirected or suppressed it (see
-/// [`HopperRoute`]).
-fn renew(uploader: &Uploader, result: &mut ScanResult, purl: Option<String>) {
+/// [`HopperRoute`]). Each dependency's upload names `origin`.
+fn renew(
+    uploader: &Uploader,
+    result: &mut ScanResult,
+    purl: Option<String>,
+    origin: Option<&Origin>,
+) {
     let deps = std::mem::take(&mut result.dependency_results);
     if !deps.is_empty() {
-        uploader.submit_dependencies(deps, &result.version, &result.analyzed_at);
+        uploader.submit_dependencies(deps, &result.version, &result.analyzed_at, origin);
     }
     let sha = match &result.hopper_route {
         HopperRoute::Suppress => return,
@@ -437,16 +462,19 @@ fn renew(uploader: &Uploader, result: &mut ScanResult, purl: Option<String>) {
 /// its queue; and durably — written once to the uploader's own staging — so
 /// its queue never holds the upload in memory. A failure to stage the offer is
 /// logged: the verdict stands.
+///
+/// `hopper` is the uploader and who the request is on behalf of, when there
+/// is a hopper to offer to.
 fn classify_upload(
     filename: &str,
     bytes: bytes::Bytes,
     template: Analysis<'_>,
-    uploader: Option<&Uploader>,
+    hopper: Option<(&Uploader, Option<&Origin>)>,
     scanners: &Scanners,
 ) -> anyhow::Result<ScanResult> {
     // Held past the analysis only when hopper or a scanner needs the bytes;
     // otherwise they go as soon as cleave is done with them.
-    let kept = (uploader.is_some() || !scanners.is_empty()).then(|| bytes.clone());
+    let kept = (hopper.is_some() || !scanners.is_empty()).then(|| bytes.clone());
     let phase = template.phase;
     let mut result = scan::analysis::classify_bytes(
         bytes,
@@ -466,15 +494,16 @@ fn classify_upload(
             );
         });
     }
-    if let (Some(uploader), Some(bytes)) = (uploader, kept)
+    if let (Some((uploader, origin)), Some(bytes)) = (hopper, kept)
         && let Some(artifact) = upload_artifact(filename, &result.sha256, bytes.len())
         && let Err(error) = timed(phase, "hopper:offer", || {
-            uploader.submit_artifact_bytes_durable(artifact, &bytes)
+            uploader.submit_artifact_bytes_durable(artifact, &bytes, origin)
         })
     {
         tracing::error!(
             sha256 = %result.sha256,
             file = %filename,
+            origin = origin.map(Origin::as_str),
             %error,
             "upload: could not stage artifact for hopper; the verdict stands",
         );
@@ -522,7 +551,7 @@ pub(super) fn upload_artifact(
 fn classify_purl(
     purl: &str,
     template: Analysis<'_>,
-    uploader: Option<&Uploader>,
+    hopper: Option<(&Uploader, Option<&Origin>)>,
     corpus: Option<(&Corpus, &Handle)>,
     scanners: &Scanners,
 ) -> anyhow::Result<ScanResult> {
@@ -579,7 +608,7 @@ fn classify_purl(
     if let Some((name, bytes)) = fallback {
         mark("purl:registry-document");
         let hopper_route =
-            offer_registry_fallback(corpus, uploader, purl, &name, registry_provenance.as_ref());
+            offer_registry_fallback(corpus, hopper, purl, &name, registry_provenance.as_ref());
         let mut result = scan::analysis::classify_bytes(
             bytes::Bytes::from(bytes),
             Analysis {
@@ -625,16 +654,19 @@ fn classify_purl(
     // never ingested, so the verdict alone lands nowhere either — queuing
     // artifacts then result keeps the row unclaimable for only the width of
     // the queue, not the width of an analysis.
-    if let Some(uploader) = uploader {
+    if let Some((uploader, origin)) = hopper {
         timed(phase, "hopper:offer", || {
-            uploader.submit_artifacts(scan::engine::collect_upload_artifacts(
-                Path::new(&name),
-                &result.sha256,
-                result.size_bytes,
-                scan::engine::upload_collector(),
-                registry_provenance.as_ref(),
-                Some(&rec),
-            ));
+            uploader.submit_artifacts(
+                scan::engine::collect_upload_artifacts(
+                    Path::new(&name),
+                    &result.sha256,
+                    result.size_bytes,
+                    scan::engine::upload_collector(),
+                    registry_provenance.as_ref(),
+                    Some(&rec),
+                ),
+                origin,
+            );
         });
     }
     Ok(result)
@@ -645,7 +677,7 @@ fn classify_purl(
 fn classify_url(
     url: &str,
     template: Analysis<'_>,
-    uploader: Option<&Uploader>,
+    hopper: Option<(&Uploader, Option<&Origin>)>,
     scanners: &Scanners,
 ) -> anyhow::Result<ScanResult> {
     use fletch::RefLocator;
@@ -676,16 +708,19 @@ fn classify_url(
         );
     });
     // See `classify_purl` on why this waits for the verdict.
-    if let Some(uploader) = uploader {
+    if let Some((uploader, origin)) = hopper {
         timed(phase, "hopper:offer", || {
-            uploader.submit_artifacts(scan::engine::collect_upload_artifacts(
-                Path::new(&name),
-                &result.sha256,
-                result.size_bytes,
-                scan::engine::upload_collector(),
-                None,
-                Some(&rec),
-            ));
+            uploader.submit_artifacts(
+                scan::engine::collect_upload_artifacts(
+                    Path::new(&name),
+                    &result.sha256,
+                    result.size_bytes,
+                    scan::engine::upload_collector(),
+                    None,
+                    Some(&rec),
+                ),
+                origin,
+            );
         });
     }
     Ok(result)
@@ -712,7 +747,7 @@ fn classify_url(
 /// handle it was given.
 fn offer_registry_fallback(
     corpus: Option<(&Corpus, &Handle)>,
-    uploader: Option<&Uploader>,
+    hopper: Option<(&Uploader, Option<&Origin>)>,
     purl: &str,
     name: &str,
     registry_provenance: Option<&scan::provenance::RegistryProvenance>,
@@ -727,11 +762,11 @@ fn offer_registry_fallback(
     let Some(real_sha) = record.sha256 else {
         return HopperRoute::Suppress;
     };
-    if let Some(uploader) = uploader
+    if let Some((uploader, origin)) = hopper
         && let Some(artifact) =
             scan::engine::registry_fallback_artifact(name, &real_sha, purl, registry_provenance)
     {
-        uploader.submit_artifacts(vec![artifact]);
+        uploader.submit_artifacts(vec![artifact], origin);
     }
     HopperRoute::Redirect(real_sha)
 }
@@ -881,6 +916,93 @@ mod tests {
         assert_eq!(artifact.sha256, sha);
         assert_eq!(artifact.size, 5);
         assert!(!artifact.backfill, "a bare upload claims no provenance");
+    }
+
+    /// Who asked is staged with the bytes and sent with their upload, so
+    /// hopper records the artifact as `upload:poppy` rather than under the
+    /// uploader's own name — even though the upload leaves long after the
+    /// request that named poppy has been answered.
+    #[test]
+    fn an_uploads_origin_reaches_hopper() {
+        use std::io::{Read, Write};
+
+        /// One whole request: the headers, then the body by its length.
+        fn read_request(stream: &mut std::net::TcpStream) -> String {
+            let mut request = Vec::new();
+            let mut buf = [0u8; 8192];
+            let body_start = loop {
+                let n = stream.read(&mut buf).expect("read");
+                assert!(n > 0, "connection closed before the headers ended");
+                request.extend_from_slice(&buf[..n]);
+                if let Some(at) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                    break at + 4;
+                }
+            };
+            let head = String::from_utf8_lossy(&request[..body_start]).to_ascii_lowercase();
+            let length: usize = head
+                .lines()
+                .find_map(|line| line.strip_prefix("content-length:"))
+                .map_or(0, |v| v.trim().parse().expect("content-length"));
+            while request.len() < body_start + length {
+                let n = stream.read(&mut buf).expect("read body");
+                assert!(n > 0, "connection closed mid-body");
+                request.extend_from_slice(&buf[..n]);
+            }
+            String::from_utf8_lossy(&request).into_owned()
+        }
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind mock hopper");
+        let base = format!("http://{}", listener.local_addr().expect("addr"));
+        let hopper = std::thread::spawn(move || {
+            let mut requests = Vec::new();
+            for reply in [r#"{"known":[]}"#, "{}"] {
+                let (mut stream, _) = listener.accept().expect("accept");
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+                    .expect("read timeout");
+                requests.push(read_request(&mut stream));
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{reply}",
+                    reply.len()
+                )
+                .expect("reply");
+            }
+            requests
+        });
+
+        let uploader = Uploader::new(&base, "postdoc-test".into());
+        let sha = "ab".repeat(32);
+        let artifact = upload_artifact("left-pad-1.3.0.tgz", &sha, 5).expect("artifact");
+        let origin = Origin::from_request(None, Some("poppy/1 (+https://example.test)"));
+        uploader
+            .submit_artifact_bytes_durable(artifact, b"hello", origin.as_ref())
+            .expect("staged");
+        drop(uploader); // Waits for the queue to drain.
+
+        let requests = hopper.join().expect("mock hopper");
+        assert!(
+            requests[0].starts_with("POST /v1/intake/held "),
+            "{}",
+            requests[0]
+        );
+        let upload = &requests[1];
+        assert!(upload.starts_with("POST /v1/intake/upload "), "{upload}");
+        assert!(
+            upload
+                .to_ascii_lowercase()
+                .contains("\r\natomdrift-origin: poppy\r\n"),
+            "{upload}"
+        );
+        assert!(
+            upload.contains("user-agent: atomdrift-scan/"),
+            "the uploader still names itself: {upload}"
+        );
+        assert!(
+            upload.contains("hello"),
+            "the staged bytes were sent: {upload}"
+        );
     }
 
     /// A fetched root's bytes live in fletch's blob cache, keyed by locator —

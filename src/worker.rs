@@ -2410,6 +2410,7 @@ impl WorkerShared {
         let max_buffer_bytes = staged_buffer_bytes();
         let input_budget = InputBudget::new(max_buffer_bytes);
         hopper.input_budget = Some(Arc::clone(&input_budget));
+        hopper.llm = config.rules.interpret.is_some();
         let spool_mem_threshold = std::env::var("SCAN_SPOOL_THRESHOLD_MB")
             .ok()
             .and_then(|value| value.parse::<u64>().ok())
@@ -4547,6 +4548,10 @@ struct Hopper {
     /// The analyzer tools this host has, comma-separated, so hopper routes it
     /// only work it can finish.
     tools: String,
+    /// Whether this worker runs the LLM interpretation pass. Hopper hands its
+    /// describe level — hostile and suspicious samples still missing an LLM
+    /// description — only to a worker that does.
+    llm: bool,
     /// Bearer token; hopper requires it on all of `/v1/*`, and
     /// does not exempt loopback. See [`scan::hopper::token`].
     token: Option<&'static str>,
@@ -4561,6 +4566,7 @@ impl std::fmt::Debug for Hopper {
             .field("base", &self.base.as_str())
             .field("worker", &self.worker)
             .field("tools", &self.tools)
+            .field("llm", &self.llm)
             .field("token", &self.token.map(|_| "<redacted>"))
             .field("input_budget", &self.input_budget)
             .finish_non_exhaustive()
@@ -4595,6 +4601,7 @@ impl Hopper {
             base,
             worker: worker.to_owned(),
             tools: scan::tools::available_names().join(","),
+            llm: false,
             token: hopper::token(),
             input_budget: None,
         })
@@ -4642,6 +4649,9 @@ impl Hopper {
             pairs.push(("load1", format!("{load:.2}")));
         }
         pairs.push(("tools", self.tools.clone()));
+        // Sent either way: hopper reads a missing field as capable, so only
+        // an explicit "0" keeps describe work away from this worker.
+        pairs.push(("llm", if self.llm { "1" } else { "0" }.to_owned()));
         pairs
     }
 
@@ -7547,6 +7557,28 @@ mod tests {
         );
     }
 
+    /// Hopper gates its describe level on `llm`: only a worker with an LLM
+    /// interpreter configured may claim samples waiting on a description.
+    #[test]
+    fn identity_says_whether_the_worker_runs_an_llm() {
+        let llm = |hopper: &Hopper| {
+            let form = hopper.poll_form(1, 1);
+            form_urlencoded::parse(form.as_bytes())
+                .find(|(k, _)| k == "llm")
+                .map(|(_, v)| v.into_owned())
+        };
+        let mut config = test_config("http://hopper.test");
+        let shared = test_shared(&config, |_| {});
+        assert_eq!(
+            llm(&shared.hopper).as_deref(),
+            Some("0"),
+            "no interpreter configured"
+        );
+        config.rules.interpret = Some(scan::interpret::InterpretConfig::default());
+        let shared = test_shared(&config, |_| {});
+        assert_eq!(llm(&shared.hopper).as_deref(), Some("1"));
+    }
+
     #[test]
     fn poll_and_heartbeat_forms_carry_the_routing_signals() {
         let hopper = test_hopper("http://hopper.test");
@@ -7554,7 +7586,15 @@ mod tests {
         let keys: HashSet<String> = form_urlencoded::parse(poll.as_bytes())
             .map(|(k, _)| k.into_owned())
             .collect();
-        for key in ["count", "slots", "max_bytes", "worker", "version", "tools"] {
+        for key in [
+            "count",
+            "slots",
+            "max_bytes",
+            "worker",
+            "version",
+            "tools",
+            "llm",
+        ] {
             assert!(keys.contains(key), "poll form lacks {key}: {poll}");
         }
         assert!(form_urlencoded::parse(poll.as_bytes()).any(|(k, v)| k == "count" && v == "3"));

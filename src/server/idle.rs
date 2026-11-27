@@ -89,6 +89,28 @@ impl Busy {
     }
 }
 
+/// Request origins ([`scan::upload::Origin`]) whose analyses leave the idle
+/// worker running.
+///
+/// Promoter is background triage of the same queue the worker drains: nobody
+/// waits on its answer, and its stream of uploads would otherwise keep the
+/// worker frozen for as long as promoter runs, as it did on uruk-hai (promoter
+/// and an idle worker on one host). Running beside it costs promoter nothing
+/// it needs: the worker is nice 19, best-effort I/O and first in line for the
+/// OOM killer.
+///
+/// An origin is the caller's own claim — its `Atomdrift-Origin`, or its
+/// User-Agent's product token — and that is acceptable here: only an
+/// authenticated caller reaches an analysis, and all the claim buys is a
+/// slower answer for itself.
+const BACKGROUND_ORIGINS: &[&str] = &["promoter"];
+
+/// Whether an analysis on behalf of `origin` freezes the idle worker: every
+/// one does, unless it is one of [`BACKGROUND_ORIGINS`].
+pub(super) fn freezes_worker(origin: Option<&str>) -> bool {
+    !origin.is_some_and(|origin| BACKGROUND_ORIGINS.contains(&origin))
+}
+
 /// Raised while one request — or one analysis — is outstanding.
 #[derive(Debug)]
 pub(super) struct BusyToken {
@@ -444,6 +466,38 @@ mod tests {
         );
         drop(second);
         assert!(!busy.is_busy(), "the last holder leaving ends the window");
+    }
+
+    #[test]
+    fn only_a_background_origin_leaves_the_worker_running() {
+        use scan::upload::Origin;
+        let origin = |header: Option<&str>, ua: Option<&str>| Origin::from_request(header, ua);
+        for (header, ua) in [
+            (None, Some("promoter (atomdrift sample triage)")),
+            (None, Some("Promoter/1.2")),
+            // Relayed: beamline is the last hop, promoter the caller.
+            (Some("promoter"), Some("beamline/1")),
+        ] {
+            let origin = origin(header, ua);
+            assert!(
+                !freezes_worker(origin.as_ref().map(Origin::as_str)),
+                "{header:?} {ua:?}"
+            );
+        }
+        for (header, ua) in [
+            (None, Some("beamline/1")),
+            (None, Some("Go-http-client/1.1")),
+            (None, Some("promoterx/1.0")),
+            (None, Some("curl/8.5 promoter")),
+            (Some("poppy"), Some("promoter/1")),
+            (None, None),
+        ] {
+            let origin = origin(header, ua);
+            assert!(
+                freezes_worker(origin.as_ref().map(Origin::as_str)),
+                "{header:?} {ua:?}"
+            );
+        }
     }
 
     #[test]

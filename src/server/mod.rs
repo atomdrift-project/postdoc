@@ -483,20 +483,23 @@ pub(super) struct RequestGuard {
     /// Held here so the slot and core are released when the guard drops.
     _permit: AnalysisPermit,
     /// Keeps the idle worker frozen for the whole analysis, which outlives the
-    /// handler whenever the client hangs up before it finishes.
-    _busy: idle::BusyToken,
+    /// handler whenever the client hangs up before it finishes. `None` for a
+    /// background caller ([`idle::freezes_worker`]).
+    _busy: Option<idle::BusyToken>,
     /// Counts the analysis in scan's lane sizing until the guard drops.
     _active: ActiveRequest,
 }
 
 impl RequestGuard {
     /// Register an admitted analysis for the watchdog and hold its capacity
-    /// until the guard drops.
+    /// until the guard drops. `freeze` says whether the idle worker stops for
+    /// it ([`idle::freezes_worker`]).
     fn new(
         state: &Arc<AppState>,
         request_id: u64,
         entry: InFlightRequest,
         permit: AnalysisPermit,
+        freeze: bool,
     ) -> Self {
         let cancellation = Arc::clone(&entry.cancellation);
         let abort = Arc::clone(&entry.abort);
@@ -508,7 +511,7 @@ impl RequestGuard {
             cancellation,
             abort,
             _permit: permit,
-            _busy: state.enter_busy(),
+            _busy: freeze.then(|| state.enter_busy()),
             _active: ActiveRequest::begin(),
         }
     }
@@ -1023,11 +1026,8 @@ impl AppState {
     }
 
     /// Mark the server busy until the returned token drops, freezing the
-    /// companion worker for exactly that window.
-    ///
-    /// Taken at handler entry — before the memory check, before the multipart
-    /// parse, before the upload streams — because the cores have to be free by
-    /// the time the analysis wants them, not by the time it starts.
+    /// companion worker for exactly that window. Taken when an analysis is
+    /// admitted, and held until it finishes, even if its caller hung up.
     pub(super) fn enter_busy(&self) -> idle::BusyToken {
         self.busy.enter(self.idle_worker.as_ref())
     }

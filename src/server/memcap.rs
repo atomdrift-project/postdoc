@@ -194,7 +194,7 @@ mod tests {
             RequestPhase::with_label("req#1 huge.tgz"),
         );
         entry.phase.set("cleave:analyze");
-        let guard = RequestGuard::new(&state, 1, entry, permit().await?);
+        let guard = RequestGuard::new(&state, 1, entry, permit().await?, true);
         let flag = Arc::clone(&oldest);
         let run = tokio::spawn(guard.run(move || {
             // An analysis that only stops when asked to.
@@ -211,7 +211,7 @@ mod tests {
             Arc::clone(&younger),
             RequestPhase::with_label("req#2 small.tgz"),
         );
-        let _young = RequestGuard::new(&state, 2, entry, permit().await?);
+        let _young = RequestGuard::new(&state, 2, entry, permit().await?, true);
 
         abort_oldest(&state);
         let outcome = tokio::time::timeout(Duration::from_secs(10), run).await??;
