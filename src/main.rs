@@ -216,9 +216,9 @@ enum Command {
         /// `$HOPPER_TOKEN`); without it hopper rejects the poll with 401.
         ///
         /// Accepts the comma list `serve --hopper` takes, so one deploy
-        /// variable can feed both, but a worker uses only the primary — the
-        /// last address. A replica refuses worker routes outright, so the
-        /// earlier ones are not a fallback here.
+        /// variable can feed both, but a worker uses one address: the first
+        /// that says it is the primary, asked once at startup. A replica
+        /// refuses worker routes outright, so it is skipped.
         #[arg(long, env = "SCAN_HOPPER")]
         url: String,
 
@@ -463,8 +463,8 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             // worker and an atomscan worker start on identical footing — the
             // same model bundle, operating point, slot count, memory ceiling
             // and validation gate.
-            // A replica refuses worker routes, so only the primary address of
-            // a comma list is usable; the earlier ones are not a fallback.
+            // A replica refuses worker routes, so only a primary address of a
+            // comma list is usable; this picks the first that answers as one.
             let Some(hopper_url) = scan::hopper::worker_endpoint(&url) else {
                 anyhow::bail!("--url names no hopper address");
             };

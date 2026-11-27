@@ -114,9 +114,11 @@ impl Drop for BusyToken {
 
 /// Build the command for the companion worker.
 ///
-/// `hopper` is the primary address only. Claiming is a worker route and a
-/// replica answers those with 403, so the comma list the server takes for
-/// lookups and renewals cannot be passed through here.
+/// `hopper` is the server's `--hopper` as given. Claiming is a worker route
+/// and a replica answers those with 403, so the child picks its primary from
+/// the list itself, at its own startup (`scan::hopper::worker_endpoint`): a
+/// restarted child asks again rather than inherit a choice made when the server
+/// started.
 ///
 /// `traits_dir` is the server's own `--traits-dir`, and it has to be passed
 /// explicitly: the server applies it as an in-process override
@@ -374,10 +376,10 @@ pub(super) fn start(
         tracing::info!("idle worker disabled: no --hopper to claim work from");
         return None;
     };
-    let Some(primary) = scan::hopper::worker_endpoint(hopper) else {
+    if scan::hopper::endpoints(hopper).is_empty() {
         tracing::info!("idle worker disabled: --hopper names no address");
         return None;
-    };
+    }
     let Some(cache) = cache_dir() else {
         tracing::warn!(
             "idle worker disabled: no writable cache directory to give it, and \
@@ -397,7 +399,7 @@ pub(super) fn start(
     // server runs.
     let scanner_args = scanners.args();
     let worker = Arc::new(Worker {
-        hopper: primary,
+        hopper: hopper.to_owned(),
         name: format!("{name}-idle"),
         cache,
         slots,
