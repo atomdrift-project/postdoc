@@ -204,9 +204,10 @@ llm_arg=\$(printf '%s' "\${${SERVICE_NAME}_llm}" | sed "s/'/'\\\\\\\\''/g")
 
 # -r -R 5 supervises and restarts forever after any exit, so an OOM kill or a
 # panic self-heals. RUST_BACKTRACE=1 so a panic names the frame that raised it;
-# the cost is paid only on a panic, which is already a lost job.
+# RUST_LIB_BACKTRACE=0 keeps ordinary errors from capturing one each, so the
+# cost is paid only on a panic, which is already a lost job.
 command_args="-c -f -r -R 5 -P \${pidfile} -o \${${SERVICE_NAME}_logfile} -u ${SERVICE_USER} \\
-  /usr/bin/env PATH=${SERVICE_PATH} MALLOC_CONF=\${malloc_conf} RUST_BACKTRACE=1 SCAN_LLM='\${llm_arg}' ${LLM_MODEL_ENV} \\
+  /usr/bin/env PATH=${SERVICE_PATH} MALLOC_CONF=\${malloc_conf} RUST_BACKTRACE=1 RUST_LIB_BACKTRACE=0 SCAN_LLM='\${llm_arg}' ${LLM_MODEL_ENV} \\
   ${RC_EXEC_ARGS}"
 
 # daemon(8) -u switches user with setusercontext(3), which applies the login

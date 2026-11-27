@@ -96,6 +96,13 @@ impl ApiError {
         }
     }
 
+    /// The server stopped this analysis to protect itself (the memory cap).
+    /// The message says why and where the analysis was, which is the
+    /// artifact's own content, never a server path.
+    pub(super) fn aborted(message: String) -> Self {
+        Self::new(StatusCode::SERVICE_UNAVAILABLE, "aborted", message)
+    }
+
     /// A refusal for want of capacity: a router answers it by trying another
     /// worker, which is why it is a fast 429 rather than a queue.
     pub(super) fn at_capacity(

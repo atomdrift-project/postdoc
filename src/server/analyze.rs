@@ -18,7 +18,7 @@ use super::error::ApiError;
 use super::flight::{Flight, FlightKey, Outcome};
 use super::{AnalysisOutcome, AnalysisPermit, AppState, InFlightRequest, RequestGuard};
 use postdoc::scanners::{Input, Scanners};
-use scan::analysis::{Analysis, ModelResources, RequestPhase};
+use scan::analysis::{Analysis, ModelResources, RequestPhase, Timeline};
 use scan::engine::{HopperRoute, ScanResult};
 use scan::upload::Uploader;
 
@@ -178,7 +178,12 @@ impl Leader {
     ) -> Outcome {
         let phase = RequestPhase::with_label(format!("req#{} {}", self.request_id, job.name()));
         self.flight.set_phase(phase.clone());
-        let entry = InFlightRequest::new(job.name(), self.flight.cancellation(), phase.clone());
+        let entry = InFlightRequest::new(
+            job.name(),
+            self.flight.key().sha256(),
+            self.flight.cancellation(),
+            phase.clone(),
+        );
         let cancellation = Arc::clone(&entry.cancellation);
         let started = Instant::now();
 
@@ -226,12 +231,14 @@ impl Leader {
             .await;
 
         let elapsed_ms = scan::duration_ms(started.elapsed());
+        let phases = phase.timeline();
+        self.state.phase_durations.record(&phases);
         match record(
             &self.state,
             self.request_id,
             self.flight.key(),
             elapsed_ms,
-            &phase.timeline(),
+            &phases,
             outcome,
         ) {
             Ok(result) => self.file(result).await,
@@ -273,7 +280,7 @@ fn record(
     request_id: u64,
     key: &FlightKey,
     elapsed_ms: u64,
-    phases: &str,
+    phases: &Timeline,
     outcome: AnalysisOutcome,
 ) -> Result<Box<ScanResult>, ApiError> {
     match outcome {
@@ -315,6 +322,10 @@ fn record(
         AnalysisOutcome::Timeout(secs) => {
             tracing::warn!(id = request_id, key = %key, elapsed_ms, timeout_secs = secs, "<-- 504 analysis timeout");
             Err(ApiError::timeout(secs))
+        }
+        AnalysisOutcome::Aborted(reason) => {
+            tracing::error!(id = request_id, key = %key, elapsed_ms, phases = %phases, reason = %reason, "<-- 503 analysis aborted");
+            Err(ApiError::aborted(reason))
         }
     }
 }
@@ -436,6 +447,7 @@ fn classify_upload(
     // Held past the analysis only when hopper or a scanner needs the bytes;
     // otherwise they go as soon as cleave is done with them.
     let kept = (uploader.is_some() || !scanners.is_empty()).then(|| bytes.clone());
+    let phase = template.phase;
     let mut result = scan::analysis::classify_bytes(
         bytes,
         Analysis {
@@ -444,17 +456,21 @@ fn classify_upload(
         },
     )?;
     if let Some(bytes) = &kept {
-        scanners.run(
-            &mut result,
-            Input::Bytes {
-                bytes,
-                name: filename,
-            },
-        );
+        timed(phase, "scanners", || {
+            scanners.run(
+                &mut result,
+                Input::Bytes {
+                    bytes,
+                    name: filename,
+                },
+            );
+        });
     }
     if let (Some(uploader), Some(bytes)) = (uploader, kept)
         && let Some(artifact) = upload_artifact(filename, &result.sha256, bytes.len())
-        && let Err(error) = uploader.submit_artifact_bytes_durable(artifact, &bytes)
+        && let Err(error) = timed(phase, "hopper:offer", || {
+            uploader.submit_artifact_bytes_durable(artifact, &bytes)
+        })
     {
         tracing::error!(
             sha256 = %result.sha256,
@@ -464,6 +480,17 @@ fn classify_upload(
         );
     }
     Ok(result)
+}
+
+/// Run `work` and count its wall time as `part` of the phase entered last —
+/// `classify:report`, for the scanners and hopper offers that follow it.
+fn timed<T>(phase: Option<&RequestPhase>, part: &'static str, work: impl FnOnce() -> T) -> T {
+    let started = Instant::now();
+    let out = work();
+    if let Some(p) = phase {
+        p.add_part(part, started.elapsed());
+    }
+    out
 }
 
 /// The hopper offer for `size` uploaded bytes named `filename`, before the
@@ -578,13 +605,15 @@ fn classify_purl(
     )?;
     // Not on the registry fallback above: that is the registry's document,
     // not the artifact, and its verdict is redirected or suppressed.
-    scanners.run(
-        &mut result,
-        Input::Bytes {
-            bytes: &bytes,
-            name: &name,
-        },
-    );
+    timed(phase, "scanners", || {
+        scanners.run(
+            &mut result,
+            Input::Bytes {
+                bytes: &bytes,
+                name: &name,
+            },
+        );
+    });
 
     // Offer the artifact — bytes, registry record, and fetch provenance —
     // before its verdict, exactly as the CLI (`scan purl --hopper`) and the
@@ -597,14 +626,16 @@ fn classify_purl(
     // artifacts then result keeps the row unclaimable for only the width of
     // the queue, not the width of an analysis.
     if let Some(uploader) = uploader {
-        uploader.submit_artifacts(scan::engine::collect_upload_artifacts(
-            Path::new(&name),
-            &result.sha256,
-            result.size_bytes,
-            scan::engine::upload_collector(),
-            registry_provenance.as_ref(),
-            Some(&rec),
-        ));
+        timed(phase, "hopper:offer", || {
+            uploader.submit_artifacts(scan::engine::collect_upload_artifacts(
+                Path::new(&name),
+                &result.sha256,
+                result.size_bytes,
+                scan::engine::upload_collector(),
+                registry_provenance.as_ref(),
+                Some(&rec),
+            ));
+        });
     }
     Ok(result)
 }
@@ -619,7 +650,8 @@ fn classify_url(
 ) -> anyhow::Result<ScanResult> {
     use fletch::RefLocator;
 
-    if let Some(p) = template.phase {
+    let phase = template.phase;
+    if let Some(p) = phase {
         p.set("url:payload");
     }
     // Propagated as-is: `anyhow!` on an `anyhow::Error` rebuilds it from its
@@ -634,23 +666,27 @@ fn classify_url(
             ..template
         },
     )?;
-    scanners.run(
-        &mut result,
-        Input::Bytes {
-            bytes: &bytes,
-            name: &name,
-        },
-    );
+    timed(phase, "scanners", || {
+        scanners.run(
+            &mut result,
+            Input::Bytes {
+                bytes: &bytes,
+                name: &name,
+            },
+        );
+    });
     // See `classify_purl` on why this waits for the verdict.
     if let Some(uploader) = uploader {
-        uploader.submit_artifacts(scan::engine::collect_upload_artifacts(
-            Path::new(&name),
-            &result.sha256,
-            result.size_bytes,
-            scan::engine::upload_collector(),
-            None,
-            Some(&rec),
-        ));
+        timed(phase, "hopper:offer", || {
+            uploader.submit_artifacts(scan::engine::collect_upload_artifacts(
+                Path::new(&name),
+                &result.sha256,
+                result.size_bytes,
+                scan::engine::upload_collector(),
+                None,
+                Some(&rec),
+            ));
+        });
     }
     Ok(result)
 }

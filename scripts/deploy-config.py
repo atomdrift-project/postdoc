@@ -146,7 +146,10 @@ def main():
         home, service_path, idle = args
         for name, value in (("HOME", home), ("PATH", service_path), ("SCAN_LLM", os.environ.get("LLM", "")),
                             ("SCAN_LLM_MODEL", os.environ.get("LLM_MODEL", "")), ("POSTDOC_IDLE_MEMORY_MAX", idle),
-                            ("RUST_BACKTRACE", "1")):
+                            # Panics keep their backtrace; ordinary errors stop
+                            # capturing one each (anyhow/std capture when only
+                            # RUST_BACKTRACE is set), a cost seen on hot paths.
+                            ("RUST_BACKTRACE", "1"), ("RUST_LIB_BACKTRACE", "0")):
             if name == "SCAN_LLM_MODEL" and not value:
                 continue
             print("Environment=" + json.dumps(name + "=" + value.replace("%", "%%"), ensure_ascii=False))

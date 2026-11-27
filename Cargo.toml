@@ -142,14 +142,18 @@ tree-sitter-language = { git = "https://github.com/tstromberg/tree-sitter" }
 # pre-commit` refuses a commit while these lines are active, which is the
 # point: a committed path override builds against crates that exist on no
 # other machine. When the sibling changes land, comment this out and
-# `cargo update -p atomdrift-scan -p isomer -p cleave`.
+# `cargo update -p atomdrift-scan -p isomer -p cleave -p fletch`.
 #
 # Patching by source URL rather than adding path dependencies keeps one copy
 # of each crate in the graph. isomer reaches scan and cleave through the same
 # URLs, so without this its `scan::Classification` and postdoc's would be two
 # unrelated types that happen to share a name.
-
-
+[patch."https://github.com/atomdrift-project/cleave.git"]
+cleave = { path = "../cleave" }
+[patch."https://github.com/atomdrift-project/scan.git"]
+atomdrift-scan = { path = "../scan" }
+[patch."https://github.com/atomdrift-project/fletch.git"]
+fletch = { path = "../fletch" }
 
 [profile.release]
 strip = "debuginfo"

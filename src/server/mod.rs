@@ -28,6 +28,7 @@ mod flight;
 mod handlers;
 mod idle;
 mod latency;
+mod memcap;
 mod metrics;
 mod v1;
 
@@ -44,7 +45,7 @@ use std::net::SocketAddr;
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, PoisonError, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError, RwLock};
 use std::time::{Duration, Instant};
 use tokio::signal;
 use tokio::sync::{Notify, Semaphore, watch};
@@ -382,6 +383,8 @@ mod config_tests {
 /// One admitted analysis, as the watchdog reports it.
 struct InFlightRequest {
     name: String,
+    /// The uploaded bytes' digest, for an upload.
+    sha256: Option<String>,
     started_at: Instant,
     /// Shared with the blocking task; set to true to request cooperative cancellation.
     cancellation: Arc<AtomicBool>,
@@ -390,17 +393,57 @@ struct InFlightRequest {
     phase: RequestPhase,
     /// OS thread ID of the blocking thread servicing this request (0 until started).
     thread_id: AtomicU64,
+    /// Raised when the server stops this analysis for its own sake (the
+    /// memory cap), so the caller is told why instead of losing the answer.
+    abort: Arc<Abort>,
 }
 
 impl InFlightRequest {
-    fn new(name: &str, cancellation: Arc<AtomicBool>, phase: RequestPhase) -> Self {
+    fn new(
+        name: &str,
+        sha256: Option<&str>,
+        cancellation: Arc<AtomicBool>,
+        phase: RequestPhase,
+    ) -> Self {
         Self {
             name: name.to_owned(),
+            sha256: sha256.map(str::to_owned),
             started_at: Instant::now(),
             cancellation,
             phase,
             thread_id: AtomicU64::new(0),
+            abort: Arc::default(),
         }
+    }
+
+    /// The archive member and rule this analysis is working on now, as cleave
+    /// files them under its cancellation flag.
+    fn progress(&self) -> cleave::breadcrumb::Progress {
+        cleave::breadcrumb::progress(&self.cancellation)
+    }
+}
+
+/// A server-initiated stop of one analysis: why, and a wakeup for the request
+/// waiting on it, which answers with the reason at once rather than when the
+/// analysis next notices its cancellation flag.
+#[derive(Debug, Default)]
+struct Abort {
+    reason: OnceLock<String>,
+    raised: Notify,
+}
+
+impl Abort {
+    /// Stop the analysis for `reason`. The first reason wins; returns whether
+    /// this call was it.
+    fn raise(&self, reason: String, cancellation: &AtomicBool) -> bool {
+        if self.reason.set(reason).is_err() {
+            return false;
+        }
+        cancellation.store(true, Ordering::Release);
+        // A permit is kept if the request is not waiting yet, so it cannot
+        // miss the wakeup.
+        self.raised.notify_one();
+        true
     }
 }
 
@@ -436,6 +479,7 @@ pub(super) struct RequestGuard {
     request_id: u64,
     state: Arc<AppState>,
     cancellation: Arc<AtomicBool>,
+    abort: Arc<Abort>,
     /// Held here so the slot and core are released when the guard drops.
     _permit: AnalysisPermit,
     /// Keeps the idle worker frozen for the whole analysis, which outlives the
@@ -455,12 +499,14 @@ impl RequestGuard {
         permit: AnalysisPermit,
     ) -> Self {
         let cancellation = Arc::clone(&entry.cancellation);
+        let abort = Arc::clone(&entry.abort);
         state.in_flight.insert(request_id, entry);
         state.jobs.started.fetch_add(1, Ordering::Relaxed);
         Self {
             request_id,
             state: Arc::clone(state),
             cancellation,
+            abort,
             _permit: permit,
             _busy: state.enter_busy(),
             _active: ActiveRequest::begin(),
@@ -469,10 +515,11 @@ impl RequestGuard {
 
     /// Run `work` on a blocking thread, bounded by `--analysis-timeout`.
     ///
-    /// The guard is dropped when the work returns. On timeout it follows the
-    /// blocking task instead — tokio cannot stop a blocking thread, only ask it
-    /// via the cancellation flag — so the thread's slot and core stay
-    /// accounted for as long as it runs.
+    /// The guard is dropped when the work returns. On timeout, or when the
+    /// server aborts the analysis, it follows the blocking task instead —
+    /// tokio cannot stop a blocking thread, only ask it via the cancellation
+    /// flag — so the thread's slot and core stay accounted for as long as it
+    /// runs, while the caller gets its answer now.
     pub(super) async fn run(
         self,
         work: impl FnOnce() -> anyhow::Result<scan::engine::ScanResult> + Send + 'static,
@@ -493,24 +540,36 @@ impl RequestGuard {
             result
         });
         let timeout_secs = self.state.config.analysis_timeout_secs;
-        let joined = if timeout_secs == 0 {
-            handle.await
-        } else {
-            match tokio::time::timeout(Duration::from_secs(timeout_secs), &mut handle).await {
-                Ok(joined) => joined,
-                Err(_) => {
-                    self.follow(handle);
-                    return AnalysisOutcome::Timeout(timeout_secs);
-                }
+        let timeout = async {
+            if timeout_secs == 0 {
+                std::future::pending::<()>().await;
+            } else {
+                tokio::time::sleep(Duration::from_secs(timeout_secs)).await;
             }
         };
-        match joined {
-            Ok(result) => AnalysisOutcome::Ok(result.map(Box::new)),
-            Err(e) => AnalysisOutcome::JoinError(e),
+        let abort = Arc::clone(&self.abort);
+        tokio::select! {
+            joined = &mut handle => match (joined, abort.reason.get()) {
+                // The abort's own cancellation ended the run first: still the
+                // abort's answer, not a generic failure.
+                (Ok(Err(_)), Some(reason)) => AnalysisOutcome::Aborted(reason.clone()),
+                (Ok(result), _) => AnalysisOutcome::Ok(result.map(Box::new)),
+                (Err(e), _) => AnalysisOutcome::JoinError(e),
+            },
+            () = timeout => {
+                self.follow(handle);
+                AnalysisOutcome::Timeout(timeout_secs)
+            }
+            () = abort.raised.notified() => {
+                let reason = abort.reason.get().cloned().unwrap_or_default();
+                self.follow(handle);
+                AnalysisOutcome::Aborted(reason)
+            }
         }
     }
 
-    /// Keep the slot and core until a timed-out blocking task returns.
+    /// Keep the slot and core until a timed-out or aborted blocking task
+    /// returns.
     ///
     /// A blocking thread cannot be stopped, only asked: the cancellation flag,
     /// which cleave polls between members. Until it answers it is still using
@@ -554,6 +613,9 @@ pub(super) enum AnalysisOutcome {
     /// until cleave observes the cancellation flag, and keeps its slot and
     /// core until then.
     Timeout(u64),
+    /// The server stopped the analysis (the memory cap); carries the reason
+    /// the caller is told. The blocking thread is followed as on a timeout.
+    Aborted(String),
 }
 
 /// Upper bounds, in bytes, of each size bucket; the last is open-ended.
@@ -823,6 +885,10 @@ struct AppState {
     stuck_orphans: AtomicUsize,
     overloaded_since: Mutex<Option<Instant>>,
     in_flight: dashmap::DashMap<u64, InFlightRequest>,
+    /// Analyses stopped to bring RSS back under `--max-rss-gb`.
+    cap_aborts: AtomicU64,
+    /// Where analyses spent their time, per phase.
+    phase_durations: metrics::PhaseDurations,
     /// Machine-wide cores busy between consecutive `/_/stats` reads.
     cpu_busy: CpuBusy,
     /// Raised when the server stops, so background tasks wind down with it.
@@ -1274,6 +1340,8 @@ fn assemble(config: ServerConfig) -> anyhow::Result<(Router, Arc<AppState>)> {
         overloaded_since: Mutex::new(None),
         flights: Arc::new(flight::Flights::default()),
         in_flight: dashmap::DashMap::new(),
+        cap_aborts: AtomicU64::new(0),
+        phase_durations: metrics::PhaseDurations::default(),
         shutdown,
         tasks: Arc::new(Tasks::default()),
         jobs: Jobs::default(),
@@ -1436,12 +1504,24 @@ fn spawn_watchdog(state: &Arc<AppState>) {
                 }
                 let phase = entry.phase.current();
                 let tid = entry.thread_id.load(Ordering::Relaxed);
+                // Which member and which rule: a phase of `archive:tar.gz`
+                // alone sent the last wedge to eu-stack to find out. A rule
+                // past cleave's 90s deadline shows here while it still runs.
+                let progress = entry.progress();
+                let member = progress.member.as_ref().map(|s| s.name.as_str());
+                let member_secs = progress.member.as_ref().map(|s| s.age.as_secs());
+                let rule = progress.rule.as_ref().map(|s| s.name.as_str());
+                let rule_secs = progress.rule.as_ref().map(|s| s.age.as_secs());
                 if entry.cancellation.load(Ordering::Acquire) {
                     tracing::error!(
                         request_id = entry.key(),
                         name = %entry.name,
                         elapsed_secs,
                         phase,
+                        member,
+                        member_secs,
+                        "trait" = rule,
+                        trait_secs = rule_secs,
                         thread_id = tid,
                         stuck_orphans = stuck,
                         active_tasks = active,
@@ -1453,6 +1533,10 @@ fn spawn_watchdog(state: &Arc<AppState>) {
                         name = %entry.name,
                         elapsed_secs,
                         phase,
+                        member,
+                        member_secs,
+                        "trait" = rule,
+                        trait_secs = rule_secs,
                         thread_id = tid,
                         stuck_orphans = stuck,
                         active_tasks = active,
@@ -1486,18 +1570,23 @@ pub(crate) async fn run(config: ServerConfig) -> anyhow::Result<()> {
     // growth from allocator fragmentation across thousands of analyses.
     cleave::memory_tracker::configure_jemalloc_low_memory();
 
+    let (app, state) = assemble(config)?;
     // Enforces the RSS ceiling on wall-clock time, independent of request
     // traffic: memory can grow between requests (fragmentation, background
     // YARA work). Skipped when throttling is disabled. Sustained overload
-    // exits so the supervisor restarts us before the kernel OOM-kills us.
-    let _rss_logger = config.max_rss_bytes.map(|limit| {
-        cleave::memory_tracker::start_periodic_logging(Duration::from_secs(10), limit.get(), || {
-            tracing::error!("RSS over the cap for >30s; exiting to avoid an OOM kill");
-            std::process::exit(1);
-        })
+    // aborts the oldest analysis first, and exits — so the supervisor
+    // restarts us before the kernel OOM-kills us — only if that did not help.
+    // See [`memcap`].
+    let _rss_logger = state.config.max_rss_bytes.map(|limit| {
+        let mut cap = memcap::MemoryCap::new(&state);
+        cleave::memory_tracker::start_periodic_logging(
+            memcap::CHECK_EVERY,
+            limit.get(),
+            move || {
+                cap.overloaded();
+            },
+        )
     });
-
-    let (app, state) = assemble(config)?;
     // Here rather than in `assemble`, which tests build servers with.
     metrics::spawn_pusher(&state);
     let config = &state.config;

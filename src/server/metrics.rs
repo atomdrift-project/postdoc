@@ -22,11 +22,12 @@
 //! - Named `<service>.<noun>.<verb>`, with the same resource attributes, so the
 //!   series carry `job="postdoc"` and `instance="<host>-<pid>"`.
 //!
-//! Hand-written rather than the OpenTelemetry SDK: every series is a counter or
-//! a gauge read from state that already exists, the receiver accepts OTLP as
-//! JSON, and serde and reqwest are already here.
+//! Hand-written rather than the OpenTelemetry SDK: every series is a counter, a
+//! gauge or a cumulative histogram read from state that already exists, the
+//! receiver accepts OTLP as JSON, and serde and reqwest are already here.
 
 use std::collections::BTreeMap;
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -82,10 +83,64 @@ impl Outcomes {
     }
 }
 
+/// Upper bounds of the phase-duration buckets, in milliseconds: from a
+/// replayed cache hit to an analysis that runs into the timeout.
+const PHASE_BOUNDS_MS: [u64; 14] = [
+    10, 50, 100, 250, 500, 1_000, 2_500, 5_000, 10_000, 30_000, 60_000, 120_000, 300_000, 600_000,
+];
+
+/// One phase's cumulative duration histogram: a count per bucket of
+/// [`PHASE_BOUNDS_MS`], the last for everything above them.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct Histogram {
+    buckets: [u64; PHASE_BOUNDS_MS.len() + 1],
+    sum_ms: u64,
+}
+
+impl Histogram {
+    fn count(&self) -> u64 {
+        self.buckets.iter().sum()
+    }
+}
+
+/// Where every analysis's wall time went, per phase of its timeline — the
+/// completion line's `phases` field, aggregated.
+///
+/// Keyed by the phase names the code sets (and `pre` / `other`), so the series
+/// count is bounded by the code. Parts of a phase are recorded beside it:
+/// summing every phase double counts the parts of `classify:report`.
+#[derive(Debug, Default)]
+pub(super) struct PhaseDurations(Mutex<BTreeMap<String, Histogram>>);
+
+impl PhaseDurations {
+    pub(super) fn record(&self, timeline: &scan::analysis::Timeline) {
+        let mut phases = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        for (phase, ms) in timeline.phases() {
+            let bucket = PHASE_BOUNDS_MS.partition_point(|&bound| bound < ms);
+            let histogram = phases.entry(phase.to_owned()).or_default();
+            histogram.buckets[bucket] += 1;
+            histogram.sum_ms = histogram.sum_ms.saturating_add(ms);
+        }
+    }
+
+    fn snapshot(&self) -> Vec<(String, Histogram)> {
+        let phases = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        phases.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Kind {
     Counter,
     Gauge,
+    Histogram,
+}
+
+/// One data point's value.
+#[derive(Debug)]
+enum Point {
+    Int(u64),
+    Histogram(Histogram),
 }
 
 /// One metric and its current values.
@@ -97,7 +152,7 @@ struct Family {
     unit: &'static str,
     kind: Kind,
     help: &'static str,
-    points: Vec<(Vec<(&'static str, String)>, u64)>,
+    points: Vec<(Vec<(&'static str, String)>, Point)>,
 }
 
 impl Family {
@@ -113,7 +168,7 @@ impl Family {
 
     fn gauge(name: &'static str, unit: &'static str, help: &'static str, value: u64) -> Self {
         let mut family = Self::new(name, unit, Kind::Gauge, help);
-        family.points.push((Vec::new(), value));
+        family.points.push((Vec::new(), Point::Int(value)));
         family
     }
 }
@@ -132,18 +187,54 @@ fn collect(state: &AppState) -> Vec<Family> {
                 ("ecosystem", ecosystem.to_owned()),
                 ("outcome", ended.to_owned()),
             ],
-            n,
+            Point::Int(n),
         ));
+    }
+
+    let mut phases = Family::new(
+        "postdoc.analysis.phase.duration",
+        "s",
+        Kind::Histogram,
+        "Wall time of each analysis phase, and of each part of classify:report, by phase.",
+    );
+    for (phase, histogram) in state.phase_durations.snapshot() {
+        phases
+            .points
+            .push((vec![("phase", phase)], Point::Histogram(histogram)));
     }
 
     let mut families = vec![
         analyses,
+        phases,
         Family::gauge(
             "postdoc.analyses.running",
             "",
             "Analyses running now.",
             state.in_flight.len() as u64,
         ),
+        Family::gauge(
+            "postdoc.analyses.oldest_age",
+            "s",
+            "Age of the oldest analysis running now; 0 when none is.",
+            state
+                .in_flight
+                .iter()
+                .map(|entry| entry.started_at.elapsed().as_secs())
+                .max()
+                .unwrap_or(0),
+        ),
+        Family {
+            points: vec![(
+                Vec::new(),
+                Point::Int(state.cap_aborts.load(Ordering::Relaxed)),
+            )],
+            ..Family::new(
+                "postdoc.memory.cap_aborts",
+                "",
+                Kind::Counter,
+                "Analyses aborted to bring RSS back under --max-rss-gb.",
+            )
+        },
         Family::gauge(
             "postdoc.slots",
             "",
@@ -199,7 +290,7 @@ fn collect(state: &AppState) -> Vec<Family> {
         ] {
             lookups
                 .points
-                .push((vec![("result", result.to_owned())], n));
+                .push((vec![("result", result.to_owned())], Point::Int(n)));
         }
         let mut requests = Family::new(
             "postdoc.corpus.requests",
@@ -214,7 +305,7 @@ fn collect(state: &AppState) -> Vec<Family> {
                         ("address", a.address.clone()),
                         ("result", result.to_owned()),
                     ],
-                    n,
+                    Point::Int(n),
                 ));
             }
         }
@@ -232,7 +323,7 @@ fn collect(state: &AppState) -> Vec<Family> {
         for (result, n) in [("uploaded", s.uploaded), ("failed", s.failed)] {
             renewals
                 .points
-                .push((vec![("result", result.to_owned())], n as u64));
+                .push((vec![("result", result.to_owned())], Point::Int(n as u64)));
         }
         families.push(renewals);
         families.push(Family::gauge(
@@ -277,7 +368,8 @@ fn attributes<'a>(pairs: impl IntoIterator<Item = (&'a str, &'a str)>) -> Value 
 }
 
 /// One OTLP `ExportMetricsServiceRequest`, as JSON. Counters are cumulative
-/// sums from `start_ns`, which is what the receiver turns into `_total`.
+/// sums from `start_ns`, which is what the receiver turns into `_total`;
+/// histograms are cumulative from it too, in seconds.
 fn otlp_json(families: &[Family], resource: &Resource, start_ns: u128, now_ns: u128) -> Value {
     let (start, now) = (start_ns.to_string(), now_ns.to_string());
     let metrics: Vec<Value> = families
@@ -288,12 +380,24 @@ fn otlp_json(families: &[Family], resource: &Resource, start_ns: u128, now_ns: u
                 .points
                 .iter()
                 .map(|(labels, value)| {
-                    json!({
+                    let mut point = json!({
                         "attributes": attributes(labels.iter().map(|(k, v)| (*k, v.as_str()))),
                         "startTimeUnixNano": start,
                         "timeUnixNano": now,
-                        "asInt": value.to_string(),
-                    })
+                    });
+                    match value {
+                        Point::Int(n) => point["asInt"] = n.to_string().into(),
+                        Point::Histogram(h) => {
+                            point["count"] = h.count().to_string().into();
+                            point["sum"] = (h.sum_ms as f64 / 1_000.0).into();
+                            point["bucketCounts"] = h.buckets.iter().map(u64::to_string).collect();
+                            point["explicitBounds"] = PHASE_BOUNDS_MS
+                                .iter()
+                                .map(|&ms| ms as f64 / 1_000.0)
+                                .collect();
+                        }
+                    }
+                    point
                 })
                 .collect();
             let data = match family.kind {
@@ -306,6 +410,13 @@ fn otlp_json(families: &[Family], resource: &Resource, start_ns: u128, now_ns: u
                     }),
                 ),
                 Kind::Gauge => ("gauge", json!({"dataPoints": points})),
+                Kind::Histogram => (
+                    "histogram",
+                    json!({
+                        "aggregationTemporality": 2,
+                        "dataPoints": points,
+                    }),
+                ),
             };
             let mut metric = json!({
                 "name": family.name,
@@ -460,7 +571,7 @@ mod tests {
         let mut counter = Family::new("postdoc.analyses.finished", "", Kind::Counter, "h");
         counter
             .points
-            .push((vec![("outcome", "unretrievable".into())], 7));
+            .push((vec![("outcome", "unretrievable".into())], Point::Int(7)));
         let empty = Family::new("postdoc.corpus.lookups", "", Kind::Counter, "h");
         let gauge = Family::gauge("postdoc.uptime", "s", "h", 42);
         let resource = Resource {
@@ -490,6 +601,74 @@ mod tests {
         );
         assert_eq!(metrics[1]["unit"], "s");
         assert_eq!(metrics[1]["gauge"]["dataPoints"][0]["asInt"], "42");
+    }
+
+    /// The parts of `classify:report` are exported beside it, each under its
+    /// own `phase`, and with `other` they add up to it.
+    #[test]
+    fn phase_durations_break_down_classify_report() {
+        let phase = scan::analysis::RequestPhase::with_label("req#1 t");
+        phase.set("cleave:analyze");
+        phase.set("classify:report");
+        std::thread::sleep(Duration::from_millis(20));
+        phase.add_part("fetch+graft", Duration::from_millis(12));
+        phase.add_part("interpret", Duration::from_millis(3));
+        let durations = PhaseDurations::default();
+        durations.record(&phase.timeline());
+        durations.record(&phase.timeline());
+        let snapshot = durations.snapshot();
+        let sum = |want: &str| {
+            snapshot
+                .iter()
+                .find_map(|(name, h)| (name == want).then_some(h.sum_ms))
+                .unwrap_or_default()
+        };
+        assert!(sum("classify:report") >= 40, "{snapshot:?}");
+        assert_eq!(sum("fetch+graft"), 24, "{snapshot:?}");
+        assert_eq!(
+            sum("fetch+graft") + sum("interpret") + sum("other"),
+            sum("classify:report"),
+            "{snapshot:?}"
+        );
+        assert!(snapshot.iter().all(|(_, h)| h.count() == 2), "{snapshot:?}");
+
+        let family = Family {
+            points: snapshot
+                .into_iter()
+                .map(|(name, h)| (vec![("phase", name)], Point::Histogram(h)))
+                .collect(),
+            ..Family::new("postdoc.analysis.phase.duration", "s", Kind::Histogram, "h")
+        };
+        let resource = Resource {
+            host: "h".into(),
+            instance: "h-1".into(),
+            environment: "test".into(),
+        };
+        let body = otlp_json(&[family], &resource, 1, 2);
+        let metric = &body["resourceMetrics"][0]["scopeMetrics"][0]["metrics"][0];
+        assert_eq!(metric["name"], "postdoc.analysis.phase.duration");
+        assert_eq!(metric["unit"], "s");
+        let histogram = &metric["histogram"];
+        assert_eq!(histogram["aggregationTemporality"], 2);
+        let fetch = histogram["dataPoints"]
+            .as_array()
+            .and_then(|points| {
+                points.iter().find(|p| {
+                    p["attributes"][0]
+                        == json!({"key": "phase", "value": {"stringValue": "fetch+graft"}})
+                })
+            })
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(fetch["count"], "2");
+        assert_eq!(fetch["sum"], 0.024);
+        // 12ms lands in the (10ms, 50ms] bucket.
+        assert_eq!(fetch["bucketCounts"][1], "2");
+        assert_eq!(
+            fetch["bucketCounts"].as_array().map(Vec::len),
+            Some(PHASE_BOUNDS_MS.len() + 1)
+        );
+        assert_eq!(fetch["explicitBounds"][0], 0.01);
     }
 
     #[test]

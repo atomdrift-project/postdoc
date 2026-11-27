@@ -89,6 +89,14 @@ impl FlightKey {
         }
     }
 
+    /// The digest of the uploaded bytes, for an upload.
+    pub(super) fn sha256(&self) -> Option<&str> {
+        match self {
+            Self::Sha(sha) | Self::ShaFollow(sha, _) => Some(sha),
+            Self::Purl(_) | Self::PurlFollow(_, _) | Self::Url(_) | Self::UrlFollow(_, _) => None,
+        }
+    }
+
     /// The package this analysis was requested by, when it was requested by
     /// one. Uploads carry a digest and a filename, never a locator.
     pub(super) fn purl(&self) -> Option<&str> {
