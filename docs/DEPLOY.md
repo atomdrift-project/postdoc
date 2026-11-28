@@ -214,27 +214,26 @@ Unix deployments also copy `~/.tok/llm`, when present, into the service's home
 with mode 0600. `LLM_TOKEN_FILE` overrides its source path. The server and its
 idle child use this credential when the configured LLM endpoint requires one.
 
-On Linux and FreeBSD, `make deploy-server` and `make deploy-worker` automatically
-enable the isotope13 zero-day rule feed when a subscription token is available:
-each ruleset the moment it clears QA, instead of the delayed open-source roll-up.
+On Linux and FreeBSD, `make deploy-server` and `make deploy-worker` run the
+zero-day rule feed when a subscription token is available: each ruleset the
+moment it clears QA, instead of the open-source roll-up.
 Deployment reads `ISOTOPE13_TOKEN`, then `~/.tok/isotope13`
 (`ISOTOPE13_TOKEN_FILE` overrides the source path), or reuses the service's
 installed token when the source is absent. It adds `--feed zero-day` to the service
 command and installs the token as `<state>/.config/atomdrift/isotope13-api.json`,
 mode 0600. The resolved `ENRICHED` setting is saved in the deployment manifest,
-so a rollout keeps it. With no token, deployment uses public rules;
+so a rollout keeps it. With no token, deployment adds `--feed oss`;
 `ENRICHED=1` requires a token and fails deployment if none is available.
-`ENRICHED=0` skips token provisioning. `--feed` changes only which
-rules postdoc analyzes with: postdoc is what isotope13's remote analysis runs
-on, so it never asks isotope13 for a verdict, and `--analyze=remote` is refused.
-Without `--feed`, postdoc uses the zero-day feed whenever it finds a token
-(falling back to whatever the plan opens), so `ENRICHED=0` does not undo an
-earlier `ENRICHED=1`: remove the installed `isotope13-api.json` to go back to
-the open-source rules. A token refused at startup stops the service from
-starting; one refused at a later renewal is logged at error level while the
-installed rules go on serving.
-Windows deployments do not install the token yet; set `ISOTOPE13_TOKEN` in the
-service environment there.
+`ENRICHED=0` skips token provisioning and runs the open-source feed.
+`--feed` changes only which rules postdoc analyzes with: postdoc serves other
+machines, so it never asks Uplink for a verdict, and refuses scan's `--local`
+and `--offline`. Without `--feed`, postdoc runs the zero-day feed (`auto` when
+`CLEAVE_TRAITS_DIR` supplies the rules). A missing or refused token stops the
+service from starting; one refused at a later renewal is logged at error level
+while the installed rules go on serving. `postdoc login` signs an operator's
+own account in, for running postdoc by hand.
+Windows deployments do not install the token yet, and name no feed: set
+`SCAN_TOKEN` in the service environment, or the service will not start.
 
 ## The three platforms are treated alike
 

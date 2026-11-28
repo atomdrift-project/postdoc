@@ -177,11 +177,15 @@ fn worker_command(
         cmd.env("CLEAVE_TRAITS_DIR", dir);
     }
     // The same rules tree for the same reason: the feed the server resolved
-    // (from its flag, its saved choice, its token, or a fall back after a
-    // refusal) is process state the child cannot inherit, and a worker on
-    // another feed's tree would report results under a version the server
-    // never runs.
-    cmd.arg("--feed").arg(feed.slug());
+    // (from its flag, its default, its plan, or a fall back after a refusal)
+    // is process state the child cannot inherit, and a worker on another
+    // feed's tree would report results under a version the server never runs.
+    // A traits override that is not the feed's own tree supplies the rules
+    // instead, and cleave refuses a feed named beside one: the child is left
+    // on `auto`, as the server was.
+    let own_tree = traits_dir.is_none_or(|dir| dir == cleave::traits_repo::installed_dir(feed));
+    cmd.arg("--feed")
+        .arg(if own_tree { feed.slug() } else { "auto" });
     cmd
         // The server owns updating. Two processes refreshing the same traits
         // checkout and models directory would race each other over a git tree,
@@ -508,7 +512,7 @@ mod tests {
             "host-idle",
             &dir,
             None,
-            cleave::feed::Feed::OssDelayed,
+            cleave::feed::Feed::Oss,
             4,
             None,
         )
@@ -530,7 +534,7 @@ mod tests {
                 "--nice",
                 "19",
                 "--feed",
-                "oss-delayed",
+                "oss",
                 "--no-update"
             ],
             "the child must honor the configured idle slots and background priority",
@@ -561,7 +565,7 @@ mod tests {
             "host-idle",
             &cache,
             None,
-            cleave::feed::Feed::OssDelayed,
+            cleave::feed::Feed::Oss,
             96,
             Some(std::ffi::OsStr::new("8")),
         )
@@ -592,7 +596,7 @@ mod tests {
             "host-idle",
             &dir,
             Some(&traits),
-            cleave::feed::Feed::OssDelayed,
+            cleave::feed::Feed::Oss,
             4,
             None,
         )
@@ -603,6 +607,13 @@ mod tests {
             .and_then(|(_, value)| value);
         assert_eq!(forwarded, Some(traits.as_os_str()));
         assert!(!cmd.get_args().any(|arg| arg == "--traits-dir"));
+        // That tree supplies the rules; naming a feed beside it is refused.
+        let args: Vec<_> = cmd.get_args().collect();
+        let at = args.iter().position(|a| *a == "--feed");
+        assert_eq!(
+            at.and_then(|i| args.get(i + 1)).copied(),
+            Some(std::ffi::OsStr::new("auto"))
+        );
     }
 
     /// The feed is process state, invisible to a child, so the server must
@@ -614,11 +625,12 @@ mod tests {
         use cleave::feed::Feed;
         let dir = PathBuf::from("/tmp/scan-idle-test");
         for feed in Feed::ALL {
+            let tree = cleave::traits_repo::installed_dir(feed);
             let cmd = worker_command(
                 "http://hopper.example",
                 "host-idle",
                 &dir,
-                None,
+                Some(&tree),
                 feed,
                 4,
                 None,

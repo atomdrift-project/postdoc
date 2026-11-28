@@ -28,7 +28,9 @@ Environment variables read at startup:
 
 | Variable               | Effect                                                       |
 | ---------------------- | ------------------------------------------------------------ |
-| `CLEAVE_TRAITS_DIR`    | Traits directory.                                            |
+| `CLEAVE_TRAITS_DIR`    | Traits directory. Its rules serve whatever the feed; with no `--feed`, the feed is `auto`. |
+| `SCAN_FEED`            | Rule feed, as `--feed`: `zero-day` (the default), `supporter`, `oss` or `auto`. |
+| `SCAN_TOKEN`           | Atomdrift sign-in for a paid feed, in place of the saved `isotope13-api.json`. |
 | `CLEAVE_RAYON_THREADS` | Override the global analysis pool's width. Default is atomscan's: physical cores, plus half again on a wide x86 SMT host (all logical CPUs below 8 cores). |
 | `SCAN_MODELS_REPO`   | Model repository URL.                                        |
 | `SCAN_WHALE_POOL_THREADS` | Threads in each whale's private pool (below); `0` sends whales to the global pool. Default: a quarter of the physical cores, 2–16. |

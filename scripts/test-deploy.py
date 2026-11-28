@@ -459,7 +459,7 @@ class DeployTests(unittest.TestCase):
         result = host.run(ENRICHED="0")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse((host.home / ".config/atomdrift/isotope13-api.json").exists())
-        self.assertNotIn("--feed", (host.units / "postdoc.service").read_text())
+        self.assertIn('"--feed" "oss"', (host.units / "postdoc.service").read_text())
 
     def test_enriched_auto_detection_rejects_blank_source_before_service_changes(self):
         host = self.host()

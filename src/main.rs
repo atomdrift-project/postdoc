@@ -93,7 +93,7 @@ use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 
 mod admission;
 mod allocator;
@@ -180,11 +180,12 @@ impl DaemonArgs {
 /// Worker and server coordination for the Atomdrift analysis fleet.
 #[derive(Debug, Parser)]
 #[command(version, about, max_term_width = 100)]
-// Scan's wording for these describes remote verdicts, and postdoc never asks
-// isotope13 for one: it is what isotope13's remote analysis runs on.
-// `--uplink` is still accepted, so a shared `ATOMDRIFT_UPLINK` does not break a
-// host, but only `always` changes anything, and that is refused.
-#[command(mut_arg("uplink", |arg| arg.hide(true)))]
+// Scan's `--local` and `--offline` keep a scan on one machine. postdoc serves
+// other machines, so it can honor neither: they are hidden, and refused.
+#[command(mut_arg("local", |arg| arg.hide(true)))]
+#[command(mut_arg("offline", |arg| arg.hide(true)))]
+// The fleet analyzes with the zero-day feed. See `feed_choice`.
+#[command(mut_arg("feed", |arg| arg.default_value("zero-day")))]
 struct Cli {
     /// Scan's own global flags, flattened rather than restated.
     ///
@@ -273,6 +274,25 @@ enum Command {
     },
     /// Show postdoc's version and which rules it analyzes with.
     Version,
+    /// Sign in to Atomdrift, for the zero-day and supporter feeds. Shared
+    /// with atomscan, cleave and hood.
+    Login,
+}
+
+/// The feed postdoc runs on: `--feed` (or `SCAN_FEED`), defaulting to the
+/// zero-day feed the fleet analyzes with. A `CLEAVE_TRAITS_DIR` tree supplies
+/// the rules itself, and cleave refuses a feed named beside one, so with one
+/// set and no feed named the default is `auto`.
+fn feed_choice(
+    feed: cleave::feed::Choice,
+    source: Option<clap::parser::ValueSource>,
+    traits_override: bool,
+) -> cleave::feed::Choice {
+    if traits_override && source == Some(clap::parser::ValueSource::DefaultValue) {
+        cleave::feed::Choice::Auto
+    } else {
+        feed
+    }
 }
 
 /// Windows counterpart of [`jemalloc`].
@@ -354,6 +374,9 @@ fn main() -> ExitCode {
     }
     // SAFETY: as above — still before any thread or environment read.
     unsafe { scan::runtime::install() };
+    // A drop-in for atomscan's daemons, so a sign-in comes as scan's
+    // `SCAN_TOKEN`.
+    cleave::feed::set_token_env(scan::env::SCAN_TOKEN.name);
 
     // Still single-threaded: every dependency and helper inherits this root.
     // Keep it alive until run returns; a later startup reaps it after a crash.
@@ -364,7 +387,13 @@ fn main() -> ExitCode {
             return ExitCode::from(EXIT_ERROR);
         }
     };
-    let cli = Cli::parse();
+    let matches = Cli::command().get_matches();
+    let mut cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
+    cli.global.feed = feed_choice(
+        cli.global.feed,
+        matches.value_source("feed"),
+        scan::env::text(scan::env::CLEAVE_TRAITS_DIR).is_some(),
+    );
     let _spool_scratch = if matches!(&cli.command, Command::Worker { .. }) {
         if let Some(root) = std::env::var_os("SCAN_SPOOL_ROOT") {
             // SAFETY: startup is still single-threaded. Large downloaded
@@ -412,23 +441,6 @@ fn main() -> ExitCode {
     // Reclaim stale and oversized caches on a recurring loop, as a
     // never-exiting daemon needs.
     scan::cache_cleanup::start(true);
-    // The rule feed picks the rules tree, so it is decided before anything
-    // resolves one: `--feed`, else the saved choice, else zero-day when this
-    // host holds a token. A paid feed named with `--feed` connects the host
-    // before the first refresh (`sign_in` is a no-op otherwise). It means the
-    // rules and nothing else here: postdoc is what isotope13's remote analysis
-    // runs on, so it never asks isotope13 for a verdict itself.
-    if let Err(error) = cleave::feed::resolve(cli.global.feed) {
-        eprintln!("postdoc: {error}");
-        return ExitCode::from(EXIT_ERROR);
-    }
-    if let Err(error) = cleave::rule_update::sign_in() {
-        eprintln!("postdoc: {error}");
-        return ExitCode::from(EXIT_ERROR);
-    }
-    // Stabilize trait discovery before any cleave shared resource initializes.
-    scan::traits_repo::prepare_runtime_env();
-
     match run(cli) {
         Ok(code) => code,
         Err(error) => {
@@ -439,18 +451,37 @@ fn main() -> ExitCode {
 }
 
 fn run(cli: Cli) -> anyhow::Result<ExitCode> {
-    anyhow::ensure!(
-        cli.global.uplink != Some(scan::remote::Uplink::Always),
-        "--uplink=always has no meaning for postdoc: it is the remote analysis"
-    );
+    for (set, flag) in [
+        (cli.global.local, "--local (or SCAN_LOCAL)"),
+        (cli.global.offline, "--offline"),
+    ] {
+        anyhow::ensure!(
+            !set,
+            "{flag} has no meaning for postdoc: it serves other machines"
+        );
+    }
+    // The rule feed picks the rules tree, so it is decided before anything
+    // resolves one. A daemon on a named paid feed is signed in before the
+    // first refresh, and a refusal stops it starting; `login` signs in
+    // itself, and `version` only reports.
+    cleave::feed::resolve(cli.global.feed)?;
+    if matches!(cli.command, Command::Worker { .. } | Command::Serve { .. }) {
+        cleave::rule_update::sign_in()?;
+    }
+    // Stabilize trait discovery before any cleave shared resource initializes.
+    scan::traits_repo::prepare_runtime_env();
     let command = cli.command;
     match command {
-        // The edition was chosen in `main` the way every command's is.
+        // The feed was resolved above, the way every command's is.
         Command::Version => {
             println!(
                 "{}",
                 cleave::version_report("postdoc", env!("CARGO_PKG_VERSION"))
             );
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Login => {
+            cleave::rule_update::login()?;
             Ok(ExitCode::SUCCESS)
         }
         Command::Worker {
@@ -591,28 +622,72 @@ fn publish_bloom_filters(mode: scan::Mode) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::CommandFactory;
 
     #[test]
     fn the_command_line_is_well_formed() {
         Cli::command().debug_assert();
     }
 
-    /// postdoc never asks isotope13 for a verdict, so its help must not offer one.
+    /// postdoc serves other machines, so its help must not offer to keep a
+    /// scan on this one.
     #[test]
-    fn the_help_offers_no_remote_verdicts() {
+    fn the_help_offers_no_local_mode() {
         let mut command = Cli::command();
         let help = command.render_long_help().to_string();
-        assert!(!help.contains("--uplink"), "--uplink is listed:\n{help}");
-        assert!(
-            !help.contains("remote verdicts"),
-            "the help promises remote verdicts:\n{help}"
-        );
+        for flag in ["--local", "--offline", "Uplink"] {
+            assert!(!help.contains(flag), "{flag} is listed:\n{help}");
+        }
         // Rendering the root propagated the global flags to its subcommands.
         let serve = command
             .find_subcommand_mut("serve")
-            .map(|serve| serve.render_long_help().to_string());
-        assert!(serve.is_some_and(|help| help.contains("--feed") && !help.contains("--uplink")));
+            .map(|serve| serve.render_long_help().to_string())
+            .unwrap_or_default();
+        assert!(serve.contains("[default: zero-day]"), "{serve}");
+        assert!(!serve.contains("--local"), "{serve}");
+    }
+
+    /// The fleet runs on the zero-day feed unless a feed is named, or a
+    /// traits override supplies the rules.
+    #[test]
+    fn the_feed_defaults_to_zero_day() {
+        use cleave::feed::Choice;
+        let feed = |args: &[&str], traits_override| {
+            let matches = Cli::command().try_get_matches_from(args).unwrap();
+            let cli = Cli::from_arg_matches(&matches).unwrap();
+            feed_choice(
+                cli.global.feed,
+                matches.value_source("feed"),
+                traits_override,
+            )
+        };
+        let serve = ["postdoc", "serve", "--token-file", "/t"];
+        assert_eq!(feed(&serve, false), Choice::ZeroDay);
+        assert_eq!(feed(&serve, true), Choice::Auto);
+        // Named after the subcommand, as hopper's own worker command does.
+        let named = [
+            "postdoc",
+            "worker",
+            "--url",
+            "http://h:8081",
+            "--feed",
+            "zero-day",
+        ];
+        assert_eq!(feed(&named, true), Choice::ZeroDay, "named stays named");
+        let auto = [
+            "postdoc",
+            "--feed",
+            "auto",
+            "worker",
+            "--url",
+            "http://h:8081",
+        ];
+        assert_eq!(feed(&auto, false), Choice::Auto);
+    }
+
+    #[test]
+    fn login_parses() {
+        let cli = Cli::try_parse_from(["postdoc", "login"]).unwrap();
+        assert!(matches!(cli.command, Command::Login));
     }
 
     #[test]

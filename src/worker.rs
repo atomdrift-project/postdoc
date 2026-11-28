@@ -1521,6 +1521,12 @@ impl JobSource {
 /// malicious. Dispatched ahead of every other staged job.
 const TIER_SIGHTED: &str = "sighted";
 
+/// Hopper's claim tier for samples the LLM gate admitted that are still
+/// missing an LLM description. When hopper holds the sample's LLM input
+/// ([`ClaimJob::has_llm_input`]), a worker with an interpreter runs only the
+/// LLM pass from it (see [`describe_only`]).
+const TIER_MISSING_LLM: &str = "missing_llm";
+
 /// Take the next job from the reorder window: a sighted job first, then one
 /// staged longer than `max_wait`, then by size in `order`.
 fn pick_from_reorder(
@@ -1599,6 +1605,12 @@ struct ClaimJob {
     /// sending it, which is treated as ordinary work.
     #[serde(default)]
     tier: String,
+    /// Whether hopper holds an LLM input for this sample
+    /// (`/v1/files/{sha256}/llm-input`): what another worker's unfinished LLM
+    /// pass left behind. Only ever set on [`TIER_MISSING_LLM`]; absent from an
+    /// older hopper, which is the same as false.
+    #[serde(default)]
+    has_llm_input: bool,
 }
 
 impl ClaimJob {
@@ -1616,9 +1628,20 @@ struct PrefetchedJob {
     /// `Err(Refused)` = job rejected without attempting download (e.g.
     /// oversized); do not retry, post the error result directly.
     data: std::result::Result<PrefetchData, PrefetchError>,
+    /// Hopper's LLM input for the job, staged in place of its payload: the job
+    /// then runs only its LLM pass, and `data` says no payload was fetched.
+    llm_input: Option<StagedLlmInput>,
     /// Local-queue id assigned by the prefetcher when the job is staged; passed
     /// to `WorkerMetrics::complete` once analysis finishes. 0 until staged.
     queue_id: u64,
+}
+
+/// An encoded [`scan::engine::LlmInput`] fetched from hopper, held against the
+/// input budget like a payload until its job runs. Decoded only then, so a
+/// staged input costs its compressed size.
+struct StagedLlmInput {
+    blob: bytes::Bytes,
+    _reservation: Option<InputReservation>,
 }
 
 /// Absolute per-job size cap, advertised to hopper as `max_bytes` so it never
@@ -1774,7 +1797,8 @@ impl std::fmt::Display for Refusal {
 /// Why a prefetch did not produce bytes.
 #[derive(Debug)]
 enum PrefetchError {
-    /// Download attempted and failed — `run_job` retries it directly.
+    /// No payload staged — the download failed, or was skipped for an LLM
+    /// input — so `run_job` downloads it directly.
     Transient(anyhow::Error),
     /// Download not attempted; permanent for this sample.
     Refused(Refusal),
@@ -2370,6 +2394,10 @@ struct WorkerShared {
     llm_deferred: AtomicU64,
     llm_skipped: AtomicU64,
     llm_reposted: AtomicU64,
+    /// Describe jobs running their LLM pass alone (see [`describe_only`]). No
+    /// analysis holds a memory reservation for them, so the heartbeat names
+    /// them from here to keep their claims from lapsing.
+    describing: Mutex<Vec<Arc<str>>>,
     metrics: WorkerMetrics,
     poll_state: PollState,
     stop: Stop,
@@ -2529,6 +2557,7 @@ impl WorkerShared {
             llm_deferred: AtomicU64::new(0),
             llm_skipped: AtomicU64::new(0),
             llm_reposted: AtomicU64::new(0),
+            describing: Mutex::new(Vec::new()),
             metrics: WorkerMetrics::new(),
             poll_state: PollState::default(),
             stop: Stop::new(),
@@ -2863,8 +2892,9 @@ fn report_tail(done: std::result::Result<(), tokio::task::JoinError>, slot: usiz
 }
 
 /// A job's tail: analyze, post the ML verdict, then — off the completion path
-/// — the LLM second opinion. Holds its place in `analyzing` and its tail
-/// permit until it returns.
+/// — the LLM second opinion. A describe job staged with hopper's LLM input
+/// runs only that second opinion, unless the input turns out unusable. Holds
+/// its place in `analyzing` and its tail permit until it returns.
 async fn finish_job(
     shared: Arc<WorkerShared>,
     resources: Arc<ModelResources>,
@@ -2876,8 +2906,26 @@ async fn finish_job(
     let PrefetchedJob {
         job,
         data,
+        llm_input,
         queue_id,
     } = pj;
+    if let Some(staged) = llm_input {
+        match describe_only(&shared, &resources, &job, staged).await {
+            Ok(()) => {
+                complete_job(&shared, queue_id).await;
+                return;
+            }
+            Err(why) => {
+                shared.hopper.llm_inputs.fell_back(why);
+                tracing::info!(
+                    worker_id = slot,
+                    sha256 = %job.sha256,
+                    reason = why.as_str(),
+                    "describe job falls back to a full analysis",
+                );
+            }
+        }
+    }
     let outcome = run_job(&shared, &resources, &job, data).await;
     if let Err(e) = &outcome {
         tracing::warn!(
@@ -2892,14 +2940,13 @@ async fn finish_job(
         shared.metrics.record_error(&e.to_string());
     }
     // Phase 1: post the ML verdict now. Keep a copy only when a second opinion
-    // is pending, so a possible re-post has something to amend.
+    // is pending, so a possible re-post has something to amend — or, without
+    // an interpreter, an input to leave on hopper.
     let (post, later) = match outcome {
         Ok(out) => {
-            let later = out
-                .result
-                .pending_llm
-                .is_some()
-                .then(|| (out.result.clone(), out.elapsed));
+            let later = (out.result.pending_llm.is_some()
+                && (resources.interpret.is_some() || shared.hopper.takes_llm_input(&out.result)))
+            .then(|| (out.result.clone(), out.elapsed));
             let verdict = Verdict {
                 result: out.result,
                 deps: out.deps,
@@ -2910,6 +2957,25 @@ async fn finish_job(
         Err(e) => (Post::Failed(e.to_string()), None),
     };
     shared.hopper.post_result(&job.sha256, post).await;
+    complete_job(&shared, queue_id).await;
+    // Phase 2: the second opinion, off the completion path.
+    if let Some((result, elapsed)) = later {
+        let describe = job.tier == TIER_MISSING_LLM;
+        second_opinion(
+            &shared,
+            llm_pass(&resources),
+            result,
+            elapsed,
+            &job.sha256,
+            describe,
+        )
+        .await;
+    }
+}
+
+/// Count a job whose result is posted, stopping a `--max-jobs` run at its
+/// limit and returning memory every hundred jobs.
+async fn complete_job(shared: &WorkerShared, queue_id: u64) {
     shared.metrics.complete(queue_id);
     let n = shared.completed.fetch_add(1, Ordering::Release) + 1;
     // Checked here, where completions happen: a slot parked on an empty
@@ -2922,10 +2988,6 @@ async fn finish_job(
         // what returns it to the OS, which is the half the admission gate can
         // actually see.
         let _ = tokio::task::spawn_blocking(reclaim_memory).await;
-    }
-    // Phase 2: the second opinion, off the completion path.
-    if let Some((result, elapsed)) = later {
-        second_opinion(&shared, &resources, result, elapsed, &job.sha256).await;
     }
 }
 
@@ -3206,6 +3268,7 @@ impl SummaryTicker {
         let [regex_str, regex_raw] = cleave::regex_store_usage();
         let (corpus_checks, corpus_skips) = scan::corpus_precheck::counters();
         let (purl_checks, purl_skips) = scan::corpus_precheck::purl_counters();
+        let ledger = &shared.hopper.llm_inputs;
         tracing::info!(
             rss_mb = cleave::memory_tracker::current_rss().map(|rss| rss / MIB),
             jemalloc_allocated_mb = heap.map(|stats| stats.0 / MIB),
@@ -3240,6 +3303,16 @@ impl SummaryTicker {
             llm_deferred = shared.llm_deferred.load(Ordering::Relaxed),
             llm_skipped = shared.llm_skipped.load(Ordering::Relaxed),
             llm_reposted = shared.llm_reposted.load(Ordering::Relaxed),
+            llm_inputs_uploaded = ledger.uploaded.load(Ordering::Relaxed),
+            llm_inputs_too_large = ledger.too_large.load(Ordering::Relaxed),
+            llm_inputs_unsupported = ledger.unsupported.load(Ordering::Relaxed),
+            llm_inputs_failed = ledger.upload_failed.load(Ordering::Relaxed),
+            describe_llm_only = ledger.llm_only.load(Ordering::Relaxed),
+            describe_full_absent = ledger.fallbacks(DescribeFallback::Absent),
+            describe_full_fetch_failed = ledger.fallbacks(DescribeFallback::FetchFailed),
+            describe_full_unreadable = ledger.fallbacks(DescribeFallback::Unreadable),
+            describe_full_unfit = ledger.fallbacks(DescribeFallback::Unfit),
+            describe_full_no_opinion = ledger.fallbacks(DescribeFallback::NoOpinion),
             corpus_checks,
             corpus_skips,
             purl_checks,
@@ -3610,7 +3683,17 @@ impl WorkerShared {
             last_want: self.poll_state.last_want.load(Ordering::Acquire),
             last_claim: self.poll_state.last_claim.load(Ordering::Acquire),
             buffer_room: self.poll_state.buffer_room.load(Ordering::Acquire),
-            active_shas: self.admission.in_flight_shas(),
+            active_shas: {
+                let mut shas = self.admission.in_flight_shas();
+                shas.extend(
+                    self.describing
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .iter()
+                        .cloned(),
+                );
+                shas
+            },
             metrics: self.metrics.snapshot(),
         }
     }
@@ -3858,11 +3941,75 @@ async fn prefetch_one(
     spool: &Arc<SpoolState>,
     job: ClaimJob,
 ) -> PrefetchedJob {
-    let data = stage_payload(hopper, data_dir, spool, &job).await;
+    let llm_input = stage_llm_input(hopper, &job).await;
+    let data = match llm_input {
+        Some(_) => Err(PrefetchError::Transient(anyhow::anyhow!(
+            "payload not prefetched: the job was staged to run from hopper's LLM input"
+        ))),
+        None => stage_payload(hopper, data_dir, spool, &job).await,
+    };
     PrefetchedJob {
         job,
         data,
+        llm_input,
         queue_id: 0,
+    }
+}
+
+/// Fetch hopper's LLM input for a describe job this worker can serve with the
+/// LLM pass alone. `None` — the job is analyzed in full — when it is not such
+/// a job, or the input cannot be had; the reason is counted and logged.
+async fn stage_llm_input(hopper: &Hopper, job: &ClaimJob) -> Option<StagedLlmInput> {
+    // A worker without an interpreter is kept off this tier by hopper, and
+    // never takes the shortcut if it gets one anyway.
+    if job.tier != TIER_MISSING_LLM || !hopper.llm || sha256_from_hex(&job.sha256).is_none() {
+        return None;
+    }
+    let ledger = &hopper.llm_inputs;
+    if !job.has_llm_input {
+        ledger.fell_back(DescribeFallback::Absent);
+        tracing::debug!(sha256 = %job.sha256, "describe job without an LLM input on hopper; analyzing in full");
+        return None;
+    }
+    let mut reservation = match &hopper.input_budget {
+        Some(budget) => match budget.reserve(MAX_LLM_INPUT_BODY).await {
+            Ok(reservation) => Some(reservation),
+            Err(e) => {
+                ledger.fell_back(DescribeFallback::FetchFailed);
+                tracing::warn!(sha256 = %job.sha256, error = %format!("{e:#}"), "LLM input not staged; analyzing in full");
+                return None;
+            }
+        },
+        None => None,
+    };
+    match hopper.fetch_llm_input(&job.sha256).await {
+        Ok(Some(blob)) => {
+            if let Some(reservation) = &mut reservation {
+                reservation.shrink(blob.len());
+            }
+            tracing::info!(
+                sha256 = %job.sha256,
+                bytes = blob.len(),
+                "LLM input staged; the job runs its LLM pass alone",
+            );
+            Some(StagedLlmInput {
+                blob,
+                _reservation: reservation,
+            })
+        }
+        Ok(None) => {
+            ledger.fell_back(DescribeFallback::Absent);
+            tracing::info!(
+                sha256 = %job.sha256,
+                "hopper no longer holds the LLM input (expired or already described); analyzing in full",
+            );
+            None
+        }
+        Err(e) => {
+            ledger.fell_back(DescribeFallback::FetchFailed);
+            tracing::warn!(sha256 = %job.sha256, error = %format!("{e:#}"), "LLM input fetch failed; analyzing in full");
+            None
+        }
     }
 }
 
@@ -4456,44 +4603,92 @@ impl SlowPhase {
     }
 }
 
+/// A job's LLM pass on this worker's interpreter: folds a grade into the
+/// result and says whether that changed it
+/// ([`scan::engine::apply_pending_interpretation`]). A closure, so the tails
+/// that run it can be driven without a model.
+type LlmPass = Box<dyn FnOnce(&mut scan::engine::ScanResult) -> bool + Send>;
+
+/// The LLM pass `resources` runs; `None` without an interpreter.
+fn llm_pass(resources: &Arc<ModelResources>) -> Option<LlmPass> {
+    resources.interpret.as_ref()?;
+    let resources = Arc::clone(resources);
+    Some(Box::new(move |result| {
+        resources.interpret.as_ref().is_some_and(|cfg| {
+            scan::engine::apply_pending_interpretation(result, cfg, &resources.model)
+        })
+    }))
+}
+
 /// Phase 2 of the two-phase post: the LLM second opinion, run after the ML
 /// verdict is already on hopper, re-posting only if it changed anything.
 /// `Required` admissions wait for backlog room; `Optional` ones are skipped
 /// when there is none, so a saturated endpoint serves the cases that can
-/// change a verdict.
+/// change a verdict. A `describe` job (hopper's [`TIER_MISSING_LLM`]) waits
+/// whatever its tier, as [`run_llm_only`] does: the description is what
+/// hopper handed it out for, and skipping it would waste the analysis.
+///
+/// A pass that does not complete — no interpreter (`pass` is `None`), skipped
+/// under load, or a failed call — leaves its input on hopper, so a worker with
+/// an interpreter can run it later without analyzing the sample again.
 async fn second_opinion(
     shared: &WorkerShared,
-    resources: &Arc<ModelResources>,
+    pass: Option<LlmPass>,
     mut result: scan::engine::ScanResult,
     elapsed: Duration,
     sha256: &str,
+    describe: bool,
 ) {
+    let Some(tier) = result.pending_llm.as_ref().map(|p| p.admitted.tier) else {
+        return;
+    };
+    let Some(pass) = pass else {
+        hand_off(shared, result, elapsed, sha256, "no interpreter").await;
+        return;
+    };
     let llm_queue = Arc::clone(&shared.llm_queue);
-    let Some(permit) = (match result.pending_llm.as_ref().map(|p| p.admitted.tier) {
-        Some(scan::interpret::LlmAdmission::Required) => llm_queue.acquire_owned().await.ok(),
-        Some(scan::interpret::LlmAdmission::Optional) => {
-            let permit = llm_queue.try_acquire_owned().ok();
-            if permit.is_none() {
-                shared.llm_skipped.fetch_add(1, Ordering::Relaxed);
-            }
-            permit
+    let permit = if describe || tier == scan::interpret::LlmAdmission::Required {
+        llm_queue.acquire_owned().await.ok()
+    } else {
+        let permit = llm_queue.try_acquire_owned().ok();
+        if permit.is_none() {
+            shared.llm_skipped.fetch_add(1, Ordering::Relaxed);
         }
-        None => None,
-    }) else {
+        permit
+    };
+    let Some(permit) = permit else {
+        hand_off(shared, result, elapsed, sha256, "skipped under load").await;
         return;
     };
     shared.llm_deferred.fetch_add(1, Ordering::Relaxed);
-    let resources = Arc::clone(resources);
+    // The pass takes the pending input; a copy is kept to hand on should the
+    // call fail.
+    let pending = result.pending_llm.clone();
     // The backlog permit covers the blocking LLM call and nothing after it.
-    let amended = tokio::task::spawn_blocking(move || {
+    let Ok((changed, result)) = tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        let changed = resources.interpret.as_ref().is_some_and(|cfg| {
-            scan::engine::apply_pending_interpretation(&mut result, cfg, &resources.model)
-        });
-        changed.then_some(result)
+        let changed = pass(&mut result);
+        (changed, result)
     })
-    .await;
-    if let Ok(Some(result)) = amended {
+    .await
+    else {
+        return;
+    };
+    let failed = matches!(
+        result.interpretation,
+        Some(scan::interpret::Interpretation::Failed(_))
+    );
+    let (result, encoded) = match pending {
+        Some(pending) if failed && shared.hopper.takes_llm_input(&result) => {
+            let analysis_ms = scan::duration_ms(elapsed);
+            match encode_llm_input(result, pending, analysis_ms).await {
+                Some((result, encoded)) => (result, Some(encoded)),
+                None => return,
+            }
+        }
+        _ => (result, None),
+    };
+    if changed {
         shared.llm_reposted.fetch_add(1, Ordering::Relaxed);
         let verdict = Verdict {
             result,
@@ -4504,6 +4699,203 @@ async fn second_opinion(
             .hopper
             .post_result(sha256, Post::Amended(verdict))
             .await;
+    }
+    if let Some(encoded) = encoded {
+        shared
+            .hopper
+            .leave_llm_input(sha256, encoded, "LLM call failed")
+            .await;
+    }
+}
+
+/// Leave `result`'s pending LLM pass on hopper, when hopper's describe tier
+/// will want it. `why` says why this worker is not running it.
+async fn hand_off(
+    shared: &WorkerShared,
+    mut result: scan::engine::ScanResult,
+    elapsed: Duration,
+    sha256: &str,
+    why: &'static str,
+) {
+    if !shared.hopper.takes_llm_input(&result) {
+        return;
+    }
+    let Some(pending) = result.pending_llm.take() else {
+        return;
+    };
+    if let Some((_, encoded)) = encode_llm_input(result, pending, scan::duration_ms(elapsed)).await
+    {
+        shared.hopper.leave_llm_input(sha256, encoded, why).await;
+    }
+}
+
+/// [`scan::engine::LlmInput::encode`] off the async threads, handing `result`
+/// back. `None` only when the blocking task could not run.
+async fn encode_llm_input(
+    result: scan::engine::ScanResult,
+    pending: scan::engine::PendingLlm,
+    analysis_ms: u64,
+) -> Option<(
+    scan::engine::ScanResult,
+    std::result::Result<bytes::Bytes, scan::engine::LlmInputError>,
+)> {
+    tokio::task::spawn_blocking(move || {
+        let encoded =
+            scan::engine::LlmInput::encode(&result, &pending, analysis_ms).map(bytes::Bytes::from);
+        (result, encoded)
+    })
+    .await
+    .ok()
+}
+
+/// Serve a describe job from hopper's LLM input: decode it, check it is this
+/// sample's and that this worker can run it, then run the LLM pass alone
+/// ([`run_llm_only`]). The analysis never runs. `Err` says why the job must be
+/// analyzed in full instead; nothing has been posted then.
+async fn describe_only(
+    shared: &WorkerShared,
+    resources: &Arc<ModelResources>,
+    job: &ClaimJob,
+    staged: StagedLlmInput,
+) -> std::result::Result<(), DescribeFallback> {
+    let input = decode_staged(job, &staged).await?;
+    let Some(pass) = llm_pass(resources) else {
+        tracing::warn!(sha256 = %job.sha256, "describe job on a worker without an interpreter");
+        return Err(DescribeFallback::Unfit);
+    };
+    if !input.fits(&resources.model) {
+        tracing::info!(
+            sha256 = %job.sha256,
+            "LLM input's verdict was placed on another deploy level or grid than this model's",
+        );
+        return Err(DescribeFallback::Unfit);
+    }
+    run_llm_only(shared, &job.sha256, input, pass, staged.blob).await
+}
+
+/// Decode a staged LLM input off the async threads and check it is `job`'s.
+async fn decode_staged(
+    job: &ClaimJob,
+    staged: &StagedLlmInput,
+) -> std::result::Result<scan::engine::LlmInput, DescribeFallback> {
+    let blob = staged.blob.clone();
+    let decoded = tokio::task::spawn_blocking(move || scan::engine::LlmInput::decode(&blob))
+        .await
+        .ok()
+        .flatten();
+    let Some(input) = decoded else {
+        tracing::warn!(
+            sha256 = %job.sha256,
+            bytes = staged.blob.len(),
+            format = scan::engine::LLM_INPUT_FORMAT,
+            "LLM input from hopper does not decode (another format, or corrupt)",
+        );
+        return Err(DescribeFallback::Unreadable);
+    };
+    if !input.sha256().eq_ignore_ascii_case(&job.sha256) {
+        tracing::warn!(
+            sha256 = %job.sha256,
+            input_sha256 = %input.sha256(),
+            "LLM input from hopper is for another sample",
+        );
+        return Err(DescribeFallback::Unreadable);
+    }
+    Ok(input)
+}
+
+/// Run a decoded LLM input's pass and post the amendment exactly as
+/// [`second_opinion`] would have, so hopper records the `llm` juror on the
+/// verdict it already holds. Hopper queued the job for this pass alone, so it
+/// waits for backlog room whatever its tier. A failed call still posts its
+/// failure, as phase 2 does, and puts `blob` back for another try.
+async fn run_llm_only(
+    shared: &WorkerShared,
+    sha256: &str,
+    input: scan::engine::LlmInput,
+    pass: LlmPass,
+    blob: bytes::Bytes,
+) -> std::result::Result<(), DescribeFallback> {
+    let elapsed = Duration::from_millis(input.analysis_ms());
+    let tier = input.tier();
+    let mut result = input.into_result();
+    let _describing = Describing::enter(shared, sha256);
+    let Ok(permit) = Arc::clone(&shared.llm_queue).acquire_owned().await else {
+        return Err(DescribeFallback::NoOpinion);
+    };
+    let started = Instant::now();
+    let joined = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        pass(&mut result).then_some(result)
+    })
+    .await;
+    let Ok(Some(result)) = joined else {
+        return Err(DescribeFallback::NoOpinion);
+    };
+    let failed = matches!(
+        result.interpretation,
+        Some(scan::interpret::Interpretation::Failed(_))
+    );
+    let put_back = failed && shared.hopper.takes_llm_input(&result);
+    shared
+        .hopper
+        .llm_inputs
+        .llm_only
+        .fetch_add(1, Ordering::Relaxed);
+    tracing::info!(
+        sha256 = %sha256,
+        tier = ?tier,
+        verdict = %result.classification,
+        llm_failed = failed,
+        llm_ms = scan::duration_ms(started.elapsed()),
+        "describe job served by its LLM pass alone",
+    );
+    let verdict = Verdict {
+        result,
+        deps: Vec::new(),
+        elapsed,
+    };
+    shared
+        .hopper
+        .post_result(sha256, Post::Amended(verdict))
+        .await;
+    if put_back {
+        shared
+            .hopper
+            .leave_llm_input(sha256, Ok(blob), "LLM call failed")
+            .await;
+    }
+    Ok(())
+}
+
+/// A describe job's sha256 in [`WorkerShared::describing`] while its LLM pass
+/// runs, so the heartbeat renews its claim.
+struct Describing<'a> {
+    shared: &'a WorkerShared,
+    sha256: Arc<str>,
+}
+
+impl<'a> Describing<'a> {
+    fn enter(shared: &'a WorkerShared, sha256: &str) -> Self {
+        let sha256: Arc<str> = Arc::from(sha256);
+        shared
+            .describing
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(Arc::clone(&sha256));
+        Self { shared, sha256 }
+    }
+}
+
+impl Drop for Describing<'_> {
+    fn drop(&mut self) {
+        let mut describing = self
+            .shared
+            .describing
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(at) = describing.iter().position(|s| *s == self.sha256) {
+            describing.swap_remove(at);
+        }
     }
 }
 
@@ -4549,14 +4941,111 @@ struct Hopper {
     /// only work it can finish.
     tools: String,
     /// Whether this worker runs the LLM interpretation pass. Hopper hands its
-    /// describe level — hostile and suspicious samples still missing an LLM
+    /// describe level — samples the LLM gate admitted still missing an LLM
     /// description — only to a worker that does.
     llm: bool,
     /// Bearer token; hopper requires it on all of `/v1/*`, and
     /// does not exempt loopback. See [`scan::hopper::token`].
     token: Option<&'static str>,
     input_budget: Option<Arc<InputBudget>>,
+    /// What became of the LLM inputs this worker sent and fetched.
+    llm_inputs: LlmInputLedger,
 }
+
+/// Why a describe job ([`TIER_MISSING_LLM`]) on a worker with an interpreter
+/// was analyzed in full instead of running its LLM pass alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DescribeFallback {
+    /// Hopper holds no input: none was sent, it expired, or the sample was
+    /// described meanwhile.
+    Absent,
+    /// The input could not be fetched or staged.
+    FetchFailed,
+    /// The input did not decode (another format, corrupt), or is for another
+    /// sample.
+    Unreadable,
+    /// The interpreter went away, or the model would blend a grade into the
+    /// stored verdict differently than the model that reached it.
+    Unfit,
+    /// The LLM pass produced nothing to post.
+    NoOpinion,
+}
+
+impl DescribeFallback {
+    const ALL: [Self; 5] = [
+        Self::Absent,
+        Self::FetchFailed,
+        Self::Unreadable,
+        Self::Unfit,
+        Self::NoOpinion,
+    ];
+
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Absent => "absent",
+            Self::FetchFailed => "fetch_failed",
+            Self::Unreadable => "unreadable",
+            Self::Unfit => "unfit",
+            Self::NoOpinion => "no_opinion",
+        }
+    }
+}
+
+/// What became of LLM inputs: the ones this worker left on hopper for a
+/// worker with an interpreter, and the describe jobs it served from one or
+/// analyzed in full instead. Reported on the worker summary.
+#[derive(Debug, Default)]
+struct LlmInputLedger {
+    /// Inputs hopper accepted.
+    uploaded: AtomicU64,
+    /// Inputs not sent, or refused, for their size.
+    too_large: AtomicU64,
+    /// Inputs not sent because hopper has no route for them.
+    unsupported: AtomicU64,
+    /// Inputs lost: unencodable, hopper unreachable, refused, or unaware of
+    /// the sample.
+    upload_failed: AtomicU64,
+    /// Set the first time hopper answers the route as missing: an older
+    /// hopper, which no upload can succeed against until this worker restarts.
+    route_missing: AtomicBool,
+    /// Describe jobs served by their LLM pass alone.
+    llm_only: AtomicU64,
+    /// Describe jobs analyzed in full, by [`DescribeFallback`].
+    fallbacks: [AtomicU64; DescribeFallback::ALL.len()],
+}
+
+impl LlmInputLedger {
+    fn fell_back(&self, why: DescribeFallback) {
+        self.fallbacks[why as usize].fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn fallbacks(&self, why: DescribeFallback) -> u64 {
+        self.fallbacks[why as usize].load(Ordering::Relaxed)
+    }
+}
+
+/// What hopper did with an LLM input it was sent.
+#[derive(Debug, PartialEq, Eq)]
+enum LlmInputPut {
+    /// Stored, or declined because the sample is already described (204).
+    Stored,
+    /// Over hopper's cap (413).
+    TooLarge,
+    /// Hopper does not know the sample (404 `unknown_artifact`).
+    UnknownSample,
+    /// Hopper has no such route (an older hopper: 404, 405) or no store for
+    /// it (501).
+    RouteMissing,
+    /// Anything else, with why.
+    Failed(String),
+}
+
+/// The most an LLM input may be: hopper's cap on one.
+const MAX_LLM_INPUT_BODY: usize = 16 << 20;
+
+/// Per-request deadline for an LLM input's upload or fetch. A slow hopper
+/// costs a tail this long at most; the input is best effort.
+const LLM_INPUT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Written out so the bearer token can never reach a log line or a panic
 /// message through a `{:?}`.
@@ -4604,6 +5093,7 @@ impl Hopper {
             llm: false,
             token: hopper::token(),
             input_budget: None,
+            llm_inputs: LlmInputLedger::default(),
         })
     }
 
@@ -5208,6 +5698,144 @@ impl Hopper {
             );
         }
         provenance
+    }
+
+    /// `/v1/files/{sha256}/llm-input`; hopper takes the digest in lowercase.
+    fn llm_input_url(&self, sha256: &str) -> Url {
+        self.url(["v1", "files", &sha256.to_ascii_lowercase(), "llm-input"])
+    }
+
+    /// Fetch the LLM input hopper holds for `sha256`. `Ok(None)` when it holds
+    /// none (404: never sent, expired, or the sample is already described).
+    async fn fetch_llm_input(&self, sha256: &str) -> Result<Option<bytes::Bytes>> {
+        let url = self.llm_input_url(sha256);
+        let resp = self
+            .get(url.clone())
+            .timeout(LLM_INPUT_TIMEOUT)
+            .send()
+            .await
+            .with_context(|| format!("LLM input request failed: url={url}"))?;
+        let status = resp.status();
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if !status.is_success() {
+            let body = error_excerpt(resp).await;
+            anyhow::bail!("LLM input request: url={url} status={status} body={body}");
+        }
+        read_capped(resp, MAX_LLM_INPUT_BODY)
+            .await
+            .map(Some)
+            .with_context(|| format!("LLM input body: url={url}"))
+    }
+
+    /// Send hopper an LLM input for `sha256`. Raw bytes with no
+    /// `Content-Encoding`: the input compresses itself.
+    async fn store_llm_input(&self, sha256: &str, blob: bytes::Bytes) -> LlmInputPut {
+        let url = self.llm_input_url(sha256);
+        let request = self
+            .authed(self.client.put(url))
+            .timeout(LLM_INPUT_TIMEOUT)
+            .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+            .body(blob);
+        let resp = match request.send().await {
+            Ok(resp) => resp,
+            Err(e) => return LlmInputPut::Failed(hopper::error_chain(&e)),
+        };
+        let status = resp.status();
+        if status.is_success() {
+            return LlmInputPut::Stored;
+        }
+        let body = error_excerpt(resp).await;
+        match status {
+            reqwest::StatusCode::PAYLOAD_TOO_LARGE => LlmInputPut::TooLarge,
+            reqwest::StatusCode::NOT_FOUND if body.contains("unknown_artifact") => {
+                LlmInputPut::UnknownSample
+            }
+            reqwest::StatusCode::NOT_FOUND
+            | reqwest::StatusCode::METHOD_NOT_ALLOWED
+            | reqwest::StatusCode::NOT_IMPLEMENTED => LlmInputPut::RouteMissing,
+            _ => LlmInputPut::Failed(format!("status={status} body={body}")),
+        }
+    }
+
+    /// Whether `result`, leaving its LLM pass unfinished, should leave its
+    /// input here: a sample the LLM gate admitted, at either tier and
+    /// whatever its verdict, with an upload body to amend, for a hopper that
+    /// takes inputs. Hopper's describe tier queues exactly the admitted
+    /// samples no LLM has described (the `llm_admission` of the verdict it
+    /// is posted), so every one of them may be handed out to be described.
+    /// Admitted means the pass is still pending or has run (and failed: a
+    /// pass that worked leaves nothing to store); a sample the gate turned
+    /// away is never queued, so its input would only take up room.
+    fn takes_llm_input(&self, result: &scan::engine::ScanResult) -> bool {
+        let admitted = result.pending_llm.is_some() || result.interpretation.is_some();
+        if !admitted || result.upload.is_none() {
+            return false;
+        }
+        if self.llm_inputs.route_missing.load(Ordering::Relaxed) {
+            self.llm_inputs.unsupported.fetch_add(1, Ordering::Relaxed);
+            return false;
+        }
+        true
+    }
+
+    /// Leave a sample's unfinished LLM pass here for a worker that can run
+    /// it. `why` says why this worker did not. Best effort and never retried:
+    /// every outcome is counted and logged, and a lost input only means the
+    /// describe job analyzes in full.
+    async fn leave_llm_input(
+        &self,
+        sha256: &str,
+        encoded: std::result::Result<bytes::Bytes, scan::engine::LlmInputError>,
+        why: &'static str,
+    ) {
+        let ledger = &self.llm_inputs;
+        let blob = match encoded {
+            Ok(blob) => blob,
+            Err(scan::engine::LlmInputError::TooLarge(bytes)) => {
+                ledger.too_large.fetch_add(1, Ordering::Relaxed);
+                tracing::info!(sha256 = %sha256, bytes, why, "LLM input over the size limit; not uploaded");
+                return;
+            }
+            Err(e) => {
+                ledger.upload_failed.fetch_add(1, Ordering::Relaxed);
+                tracing::warn!(sha256 = %sha256, why, error = %e, "LLM input not encoded; not uploaded");
+                return;
+            }
+        };
+        let bytes = blob.len();
+        let started = Instant::now();
+        let elapsed_ms = || scan::duration_ms(started.elapsed());
+        match self.store_llm_input(sha256, blob).await {
+            LlmInputPut::Stored => {
+                ledger.uploaded.fetch_add(1, Ordering::Relaxed);
+                tracing::info!(sha256 = %sha256, bytes, why, elapsed_ms = elapsed_ms(), "LLM input left on hopper for a worker with an interpreter");
+            }
+            LlmInputPut::TooLarge => {
+                ledger.too_large.fetch_add(1, Ordering::Relaxed);
+                tracing::warn!(sha256 = %sha256, bytes, why, "hopper refused the LLM input as too large");
+            }
+            LlmInputPut::RouteMissing => {
+                ledger.unsupported.fetch_add(1, Ordering::Relaxed);
+                if !ledger.route_missing.swap(true, Ordering::Relaxed) {
+                    tracing::warn!(
+                        sha256 = %sha256,
+                        hopper = %self.base,
+                        "hopper does not take LLM inputs (an older hopper); not sending any \
+                         until this worker restarts",
+                    );
+                }
+            }
+            LlmInputPut::UnknownSample => {
+                ledger.upload_failed.fetch_add(1, Ordering::Relaxed);
+                tracing::warn!(sha256 = %sha256, why, "hopper does not know the sample; LLM input not stored");
+            }
+            LlmInputPut::Failed(error) => {
+                ledger.upload_failed.fetch_add(1, Ordering::Relaxed);
+                tracing::warn!(sha256 = %sha256, bytes, why, error = %error, elapsed_ms = elapsed_ms(), "LLM input upload failed");
+            }
+        }
     }
 }
 
@@ -5885,6 +6513,7 @@ mod tests {
             file_type: "data".to_string(),
             has_provenance: false,
             tier: String::new(),
+            has_llm_input: false,
         }
     }
 
@@ -6621,6 +7250,7 @@ mod tests {
                 bytes: bytes::Bytes::from_static(b"payload"),
                 reservation: Some(reservation),
             })),
+            llm_input: None,
             queue_id: 0,
         })
         .unwrap_or_else(|_| panic!("queue closed"));
@@ -6943,8 +7573,10 @@ mod tests {
                 file_type: "data".to_string(),
                 has_provenance: false,
                 tier: tier.to_string(),
+                has_llm_input: false,
             },
             data: Ok(PrefetchData::Local),
+            llm_input: None,
             queue_id: 0,
         }
     }
@@ -7712,5 +8344,673 @@ mod tests {
                 "duration_ms": 0,
             })
         );
+    }
+
+    // --- LLM inputs: the describe tier's LLM-only shortcut ------------------
+
+    /// One request a [`recording_hopper`] received.
+    #[derive(Debug, Clone)]
+    struct Seen {
+        method: String,
+        target: String,
+        /// The request head, lowercased.
+        head: String,
+        body: Vec<u8>,
+    }
+
+    type SeenLog = Arc<Mutex<Vec<Seen>>>;
+
+    /// A hopper that records every request and answers each with
+    /// `answer(request)`: a status line and a body.
+    async fn recording_hopper(
+        answer: impl Fn(&Seen) -> (&'static str, Vec<u8>) + Send + Sync + 'static,
+    ) -> (String, SeenLog) {
+        use tokio::io::AsyncReadExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let seen: SeenLog = Arc::default();
+        let log = Arc::clone(&seen);
+        let answer = Arc::new(answer);
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let log = Arc::clone(&log);
+                let answer = Arc::clone(&answer);
+                tokio::spawn(async move {
+                    let mut buf = Vec::new();
+                    let mut tmp = [0u8; 8192];
+                    let header_end = loop {
+                        if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                            break pos + 4;
+                        }
+                        match stream.read(&mut tmp).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                        }
+                    };
+                    let head = String::from_utf8_lossy(&buf[..header_end]).to_ascii_lowercase();
+                    let length: usize = head
+                        .lines()
+                        .find_map(|line| line.strip_prefix("content-length:"))
+                        .map_or(0, |v| v.trim().parse().unwrap());
+                    while buf.len() < header_end + length {
+                        match stream.read(&mut tmp).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                        }
+                    }
+                    let mut words = head.split_whitespace();
+                    let seen = Seen {
+                        method: words.next().unwrap_or_default().to_uppercase(),
+                        target: words.next().unwrap_or_default().to_string(),
+                        body: buf[header_end..].to_vec(),
+                        head,
+                    };
+                    let (status, body) = answer(&seen);
+                    log.lock().unwrap().push(seen);
+                    respond(&mut stream, status, &body).await;
+                });
+            }
+        });
+        (base, seen)
+    }
+
+    fn requests(seen: &SeenLog) -> Vec<(String, String)> {
+        seen.lock()
+            .unwrap()
+            .iter()
+            .map(|s| (s.method.clone(), s.target.clone()))
+            .collect()
+    }
+
+    const DESCRIBE_SHA: &str = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+
+    fn llm_input_target(sha: &str) -> String {
+        format!("/v1/files/{sha}/llm-input")
+    }
+
+    /// An LLM input for `sha` as another worker would have left it: a verdict
+    /// of class `class` (0 benign, 1 suspicious, 2 hostile) the gate admitted
+    /// at `tier`, with its upload body. Written out by hand, in format 1, so
+    /// a change to the format shows up here as well as in scan.
+    fn input_blob(sha: &str, class: u8, tier: &str) -> Vec<u8> {
+        let decision = serde_json::json!({
+            "class": class, "probability": 0.97, "threshold": 0.65, "level": 12
+        });
+        let stored = serde_json::json!({
+            "sha256": sha,
+            "path": "pkg/evil-1.0.0.tgz",
+            "file_type": "npm",
+            "size_bytes": 4096,
+            "version": "v20.20",
+            "analyzed_at": "2026-11-27T00:00:00Z",
+            "analysis_ms": 1234,
+            "classification": class,
+            "probability": 0.97,
+            "threshold": 0.65,
+            "level": 12,
+            "ctx": "FILE pkg/evil.js\nH exfiltrates ~/.npmrc to https://203.0.113.7/x\n",
+            "admitted": {
+                "tier": tier, "ml_class": class, "ml_prob": 0.97,
+                "levels": {"fired": 12, "active": 25, "grid_max": 100},
+                "hostile_finding": true, "suspicious_finding": true
+            },
+            "upload": {
+                "level": 25,
+                "ruleset": "r1",
+                "files": [{
+                    "sha256": sha, "size": 4096, "file_type": "npm",
+                    "judged": {
+                        "verdict": decision, "by": "ml", "verdict_in": null,
+                        "ml": decision, "ml_in": null, "mods": [], "skip": [],
+                        "floor": null, "floor_in": null
+                    },
+                    "ident": null, "top": [], "report": null, "members": [], "extra": false
+                }],
+                "refs": [],
+                "drift": [],
+                "scanners": {},
+                "llm_gate": tier.to_ascii_lowercase()
+            }
+        });
+        let json = serde_json::to_vec(&stored).unwrap();
+        let mut blob = b"ADLI".to_vec();
+        blob.push(scan::engine::LLM_INPUT_FORMAT);
+        blob.extend(zstd::encode_all(json.as_slice(), 3).unwrap());
+        blob
+    }
+
+    fn decoded(blob: &[u8]) -> scan::engine::LlmInput {
+        scan::engine::LlmInput::decode(blob).expect("the fixture input decodes")
+    }
+
+    /// A result whose LLM pass is pending, as phase 1 leaves it.
+    fn pending_result(class: u8, tier: &str) -> scan::engine::ScanResult {
+        decoded(&input_blob(DESCRIBE_SHA, class, tier)).into_result()
+    }
+
+    /// An LLM pass that answers with a grade.
+    fn graded_pass() -> LlmPass {
+        Box::new(|result: &mut scan::engine::ScanResult| {
+            result.pending_llm = None;
+            result.interpretation = Some(scan::interpret::Interpretation::Graded(
+                scan::interpret::Graded {
+                    grade: scan::interpret::LlmGrade::Hostile,
+                    outcome: result.classification,
+                    corroborated: true,
+                    suspicious_finding: true,
+                    readable: true,
+                    may_soften: false,
+                    blended: 0.99,
+                    interpretation: "steals npm credentials".to_string(),
+                    model: "test-8B".to_string(),
+                    analyzer_directed: false,
+                    cached: false,
+                    before: scan::interpret::MlVerdict {
+                        class: result.classification,
+                        prob: result.probability,
+                        lvl: result.level,
+                    },
+                },
+            ));
+            true
+        })
+    }
+
+    /// An LLM pass whose call fails.
+    fn failed_pass() -> LlmPass {
+        Box::new(|result: &mut scan::engine::ScanResult| {
+            result.pending_llm = None;
+            result.interpretation = Some(scan::interpret::Interpretation::Failed(
+                scan::interpret::Failed {
+                    class: result.classification,
+                    prob: result.probability,
+                    model: "test-8B".to_string(),
+                    analyzer_directed: false,
+                    error: "endpoint timed out".to_string(),
+                },
+            ));
+            true
+        })
+    }
+
+    fn never_runs() -> LlmPass {
+        Box::new(|_: &mut scan::engine::ScanResult| panic!("the LLM pass must not run"))
+    }
+
+    /// Every request answered 204, except a result post, which gets 200.
+    async fn accepting_hopper() -> (String, SeenLog) {
+        recording_hopper(|seen| {
+            if seen.method == "PUT" {
+                ("204 No Content", Vec::new())
+            } else {
+                ("200 OK", b"{}".to_vec())
+            }
+        })
+        .await
+    }
+
+    /// The single LLM input uploaded to `seen`, checked for hopper's contract.
+    fn uploaded_input(seen: &SeenLog) -> scan::engine::LlmInput {
+        let seen = seen.lock().unwrap();
+        let puts: Vec<_> = seen.iter().filter(|s| s.method == "PUT").collect();
+        assert_eq!(puts.len(), 1, "one input uploaded: {seen:?}");
+        let put = puts[0];
+        assert_eq!(put.target, llm_input_target(DESCRIBE_SHA));
+        assert!(put.head.contains("content-type: application/octet-stream"));
+        assert!(
+            !put.head.contains("content-encoding"),
+            "the blob compresses itself"
+        );
+        decoded(&put.body)
+    }
+
+    #[tokio::test]
+    async fn a_worker_without_an_interpreter_leaves_the_input_on_hopper() {
+        let (base, seen) = accepting_hopper().await;
+        let shared = test_shared(&test_config(&base), |_| {});
+        second_opinion(
+            &shared,
+            None,
+            pending_result(2, "Required"),
+            secs(3),
+            DESCRIBE_SHA,
+            false,
+        )
+        .await;
+        let input = uploaded_input(&seen);
+        assert_eq!(input.sha256(), DESCRIBE_SHA);
+        assert_eq!(input.analysis_ms(), 3000, "stamped with the analysis time");
+        assert_eq!(shared.hopper.llm_inputs.uploaded.load(Ordering::Relaxed), 1);
+    }
+
+    /// Hopper queues every sample the gate admitted to be described, whatever
+    /// its verdict: a benign one admitted on its findings (a suspicious trait
+    /// the model read as benign) whose `Optional` pass was skipped leaves its
+    /// input, as a flagged one does. Before 2026-11-27 a benign verdict never
+    /// did.
+    #[tokio::test]
+    async fn an_admitted_benign_verdict_skipped_under_load_leaves_its_input() {
+        let (base, seen) = accepting_hopper().await;
+        let shared = test_shared(&test_config(&base), |shared| {
+            shared.llm_queue = Arc::new(Semaphore::new(0));
+        });
+        let result = pending_result(0, "Optional");
+        assert!(shared.hopper.takes_llm_input(&result));
+        second_opinion(
+            &shared,
+            Some(never_runs()),
+            result,
+            secs(1),
+            DESCRIBE_SHA,
+            false,
+        )
+        .await;
+        let input = uploaded_input(&seen);
+        assert_eq!(input.tier(), scan::interpret::LlmAdmission::Optional);
+        assert_eq!(shared.llm_skipped.load(Ordering::Relaxed), 1);
+    }
+
+    /// A sample the gate turned away has no pass to leave: hopper never
+    /// queues it to be described.
+    #[tokio::test]
+    async fn a_sample_the_gate_turned_away_leaves_no_input() {
+        let (base, seen) = accepting_hopper().await;
+        let shared = test_shared(&test_config(&base), |_| {});
+        let mut result = pending_result(0, "Optional");
+        result.pending_llm = None;
+        assert!(!shared.hopper.takes_llm_input(&result));
+        second_opinion(&shared, None, result.clone(), secs(1), DESCRIBE_SHA, false).await;
+        hand_off(&shared, result, secs(1), DESCRIBE_SHA, "no interpreter").await;
+        assert!(requests(&seen).is_empty());
+    }
+
+    /// A describe job that fell back to a full analysis waits for its pass
+    /// whatever its tier, as the LLM-only path does: an `Optional` one is not
+    /// skipped under load, and runs once there is room.
+    #[tokio::test]
+    async fn a_describe_jobs_optional_pass_waits_for_room() {
+        let (base, seen) = accepting_hopper().await;
+        let shared = test_shared(&test_config(&base), |shared| {
+            shared.llm_queue = Arc::new(Semaphore::new(0));
+        });
+        let result = pending_result(0, "Optional");
+        let room = async {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            assert!(requests(&seen).is_empty(), "nothing posted while waiting");
+            shared.llm_queue.add_permits(1);
+        };
+        tokio::join!(
+            second_opinion(
+                &shared,
+                Some(graded_pass()),
+                result,
+                secs(1),
+                DESCRIBE_SHA,
+                true
+            ),
+            room,
+        );
+        assert_eq!(shared.llm_skipped.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            requests(&seen),
+            [("POST".to_string(), "/v1/work/result".to_string())],
+            "the description is posted, and no input is left",
+        );
+    }
+
+    #[tokio::test]
+    async fn an_optional_pass_skipped_under_load_leaves_the_input_on_hopper() {
+        let (base, seen) = accepting_hopper().await;
+        let shared = test_shared(&test_config(&base), |shared| {
+            shared.llm_queue = Arc::new(Semaphore::new(0));
+        });
+        let result = pending_result(1, "Optional");
+        second_opinion(
+            &shared,
+            Some(never_runs()),
+            result,
+            secs(1),
+            DESCRIBE_SHA,
+            false,
+        )
+        .await;
+        uploaded_input(&seen);
+        assert_eq!(shared.llm_skipped.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn a_failed_call_posts_its_failure_and_leaves_the_input_on_hopper() {
+        let (base, seen) = accepting_hopper().await;
+        let shared = test_shared(&test_config(&base), |_| {});
+        let result = pending_result(2, "Required");
+        second_opinion(
+            &shared,
+            Some(failed_pass()),
+            result,
+            secs(1),
+            DESCRIBE_SHA,
+            false,
+        )
+        .await;
+        assert_eq!(
+            requests(&seen),
+            [
+                ("POST".to_string(), "/v1/work/result".to_string()),
+                ("PUT".to_string(), llm_input_target(DESCRIBE_SHA)),
+            ],
+            "the failure is posted as phase 2 posts it, then the input is left",
+        );
+        let input = uploaded_input(&seen);
+        assert_eq!(input.tier(), scan::interpret::LlmAdmission::Required);
+        let resumed = input.into_result();
+        assert!(
+            resumed.pending_llm.is_some(),
+            "the uploaded input is still pending"
+        );
+        assert!(resumed.interpretation.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_graded_pass_uploads_no_input() {
+        let (base, seen) = accepting_hopper().await;
+        let shared = test_shared(&test_config(&base), |_| {});
+        let result = pending_result(2, "Required");
+        second_opinion(
+            &shared,
+            Some(graded_pass()),
+            result,
+            secs(1),
+            DESCRIBE_SHA,
+            false,
+        )
+        .await;
+        assert_eq!(
+            requests(&seen),
+            [("POST".to_string(), "/v1/work/result".to_string())]
+        );
+        assert_eq!(shared.hopper.llm_inputs.uploaded.load(Ordering::Relaxed), 0);
+    }
+
+    /// The LLM-only path posts the amendment phase 2 would have — the `llm`
+    /// juror on the artifact's line — and never touches an analysis.
+    #[tokio::test]
+    async fn a_describe_job_runs_its_llm_pass_alone_and_posts_an_amendment() {
+        let (base, seen) = accepting_hopper().await;
+        let shared = test_shared(&test_config(&base), |_| {});
+        let blob = input_blob(DESCRIBE_SHA, 2, "Optional");
+        let input = decoded(&blob);
+        run_llm_only(&shared, DESCRIBE_SHA, input, graded_pass(), blob.into())
+            .await
+            .expect("served");
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 1, "only the amendment: {seen:?}");
+        assert_eq!(seen[0].target, "/v1/work/result");
+        let body = zstd::decode_all(seen[0].body.as_slice()).expect("zstd body");
+        let artifact: serde_json::Value = body
+            .split(|&b| b == b'\n')
+            .nth(1)
+            .map(|line| serde_json::from_slice(line).expect("artifact line"))
+            .expect("an artifact line");
+        assert_eq!(artifact["sha256"], DESCRIBE_SHA);
+        assert_eq!(artifact["llm"]["class"], "hostile");
+        assert_eq!(artifact["llm"]["reason"], "steals npm credentials");
+        assert_eq!(
+            artifact["verdict"]["llm_admission"], "optional",
+            "the amendment says what the gate decided, as the first post did"
+        );
+        assert_eq!(
+            shared.blocking_started.load(Ordering::Relaxed),
+            0,
+            "no analysis ran"
+        );
+        assert_eq!(shared.hopper.llm_inputs.llm_only.load(Ordering::Relaxed), 1);
+        assert!(
+            shared.describing.lock().unwrap().is_empty(),
+            "the claim leaves the heartbeat once posted"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_describe_job_whose_call_fails_puts_the_input_back() {
+        let (base, seen) = accepting_hopper().await;
+        let shared = test_shared(&test_config(&base), |_| {});
+        let blob = input_blob(DESCRIBE_SHA, 2, "Required");
+        let input = decoded(&blob);
+        run_llm_only(
+            &shared,
+            DESCRIBE_SHA,
+            input,
+            failed_pass(),
+            blob.clone().into(),
+        )
+        .await
+        .expect("served");
+        assert_eq!(
+            requests(&seen),
+            [
+                ("POST".to_string(), "/v1/work/result".to_string()),
+                ("PUT".to_string(), llm_input_target(DESCRIBE_SHA)),
+            ],
+        );
+        let put = seen.lock().unwrap()[1].body.clone();
+        assert_eq!(put, blob, "the same input goes back");
+    }
+
+    fn describe_job(sha: &str, has_llm_input: bool) -> ClaimJob {
+        ClaimJob {
+            tier: TIER_MISSING_LLM.to_string(),
+            has_llm_input,
+            ..claim_job(sha, "samples/evil.tgz", 7)
+        }
+    }
+
+    fn llm_hopper(base: &str) -> Hopper {
+        let mut hopper = test_hopper(base);
+        hopper.llm = true;
+        hopper
+    }
+
+    /// A describe job stages hopper's input instead of downloading the sample.
+    #[tokio::test]
+    async fn a_describe_job_stages_the_llm_input_instead_of_the_payload() {
+        let blob = input_blob(DESCRIBE_SHA, 2, "Required");
+        let served = blob.clone();
+        let (base, seen) = recording_hopper(move |_| ("200 OK", served.clone())).await;
+        let pj = prefetch_one(
+            &llm_hopper(&base),
+            None,
+            &test_spool(1 << 20),
+            describe_job(DESCRIBE_SHA, true),
+        )
+        .await;
+        assert_eq!(
+            requests(&seen),
+            [("GET".to_string(), llm_input_target(DESCRIBE_SHA))]
+        );
+        assert_eq!(pj.llm_input.as_ref().map(|s| s.blob.to_vec()), Some(blob));
+        assert!(
+            matches!(pj.data, Err(PrefetchError::Transient(_))),
+            "no payload staged"
+        );
+    }
+
+    /// A worker without an interpreter never takes the shortcut, whatever the
+    /// claim says.
+    #[tokio::test]
+    async fn a_worker_without_an_interpreter_never_stages_an_llm_input() {
+        let payload = b"payload".to_vec();
+        let served = payload.clone();
+        let (base, seen) = recording_hopper(move |_| ("200 OK", served.clone())).await;
+        let sha = sha256_hex(&payload);
+        let pj = prefetch_one(
+            &test_hopper(&base),
+            None,
+            &test_spool(1 << 20),
+            describe_job(&sha, true),
+        )
+        .await;
+        assert!(pj.llm_input.is_none());
+        assert_eq!(
+            requests(&seen),
+            [("GET".to_string(), format!("/v1/files/{sha}"))]
+        );
+    }
+
+    /// Hopper no longer holding the input (404) means a full analysis: the
+    /// payload is downloaded as for any job.
+    #[tokio::test]
+    async fn a_missing_llm_input_falls_back_to_the_payload() {
+        let payload = b"payload".to_vec();
+        let served = payload.clone();
+        let (base, seen) = recording_hopper(move |seen| {
+            if seen.target.ends_with("/llm-input") {
+                ("404 Not Found", br#"{"error":"no_llm_input"}"#.to_vec())
+            } else {
+                ("200 OK", served.clone())
+            }
+        })
+        .await;
+        let sha = sha256_hex(&payload);
+        let hopper = llm_hopper(&base);
+        let pj = prefetch_one(
+            &hopper,
+            None,
+            &test_spool(1 << 20),
+            describe_job(&sha, true),
+        )
+        .await;
+        assert!(pj.llm_input.is_none());
+        assert!(
+            matches!(pj.data, Ok(PrefetchData::Memory(_))),
+            "payload staged"
+        );
+        assert_eq!(
+            requests(&seen),
+            [
+                ("GET".to_string(), llm_input_target(&sha)),
+                ("GET".to_string(), format!("/v1/files/{sha}")),
+            ]
+        );
+        assert_eq!(hopper.llm_inputs.fallbacks(DescribeFallback::Absent), 1);
+    }
+
+    fn staged(blob: Vec<u8>) -> StagedLlmInput {
+        StagedLlmInput {
+            blob: blob.into(),
+            _reservation: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_or_foreign_input_falls_back() {
+        let job = describe_job(DESCRIBE_SHA, true);
+        let mut corrupt = input_blob(DESCRIBE_SHA, 2, "Required");
+        let tail = corrupt.len() - 6;
+        corrupt[tail] ^= 0xff;
+        let mut newer = input_blob(DESCRIBE_SHA, 2, "Required");
+        newer[4] = scan::engine::LLM_INPUT_FORMAT + 1;
+        let other_sample = input_blob(&"f".repeat(64), 2, "Required");
+        for (blob, what) in [
+            (corrupt, "corrupt"),
+            (newer, "another format"),
+            (b"not an input".to_vec(), "not an input"),
+            (other_sample, "another sample's"),
+        ] {
+            assert_eq!(
+                decode_staged(&job, &staged(blob)).await.err(),
+                Some(DescribeFallback::Unreadable),
+                "{what}"
+            );
+        }
+        let upper = describe_job(&DESCRIBE_SHA.to_ascii_uppercase(), true);
+        let blob = input_blob(DESCRIBE_SHA, 2, "Required");
+        assert!(
+            decode_staged(&upper, &staged(blob)).await.is_ok(),
+            "a digest's case is not a different sample"
+        );
+    }
+
+    /// An older hopper has no upload route. That is said once, and no input is
+    /// sent again until restart.
+    #[tokio::test]
+    async fn an_older_hopper_is_reported_once_and_not_asked_again() {
+        let captured = CapturedLog::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(captured.clone())
+            .with_ansi(false)
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let (base, seen) =
+            recording_hopper(|_| ("404 Not Found", b"404 page not found".to_vec())).await;
+        let shared = test_shared(&test_config(&base), |_| {});
+        for _ in 0..3 {
+            second_opinion(
+                &shared,
+                None,
+                pending_result(2, "Required"),
+                secs(1),
+                DESCRIBE_SHA,
+                false,
+            )
+            .await;
+        }
+        assert_eq!(requests(&seen).len(), 1, "asked once");
+        let ledger = &shared.hopper.llm_inputs;
+        assert!(ledger.route_missing.load(Ordering::Relaxed));
+        assert_eq!(ledger.unsupported.load(Ordering::Relaxed), 3);
+        assert_eq!(ledger.uploaded.load(Ordering::Relaxed), 0);
+        let log = captured.0.lock().unwrap();
+        let text = String::from_utf8_lossy(&log);
+        assert_eq!(
+            text.matches("does not take LLM inputs").count(),
+            1,
+            "{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unknown_sample_or_oversized_input_is_counted_not_latched() {
+        let (base, _seen) = recording_hopper(|seen| match seen.body.len() {
+            0 => ("413 Payload Too Large", Vec::new()),
+            _ => ("404 Not Found", br#"{"error":"unknown_artifact"}"#.to_vec()),
+        })
+        .await;
+        let hopper = test_hopper(&base);
+        hopper
+            .leave_llm_input(DESCRIBE_SHA, Ok(bytes::Bytes::from_static(b"x")), "test")
+            .await;
+        hopper
+            .leave_llm_input(DESCRIBE_SHA, Ok(bytes::Bytes::new()), "test")
+            .await;
+        let ledger = &hopper.llm_inputs;
+        assert_eq!(ledger.upload_failed.load(Ordering::Relaxed), 1);
+        assert_eq!(ledger.too_large.load(Ordering::Relaxed), 1);
+        assert!(!ledger.route_missing.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn a_claim_says_whether_hopper_holds_an_llm_input() {
+        let jobs: ClaimResponse = serde_json::from_str(
+            r#"{"jobs":[
+                {"sha256":"a","path":"p","size_bytes":1,"tier":"missing_llm","has_llm_input":true},
+                {"sha256":"b","path":"p","size_bytes":1}
+            ]}"#,
+        )
+        .unwrap();
+        assert!(jobs.jobs[0].has_llm_input);
+        assert!(!jobs.jobs[1].has_llm_input, "absent is false");
+    }
+
+    #[test]
+    fn the_heartbeat_renews_a_describe_jobs_claim() {
+        let shared = test_shared(&test_config("http://127.0.0.1:1"), |_| {});
+        {
+            let _describing = Describing::enter(&shared, DESCRIBE_SHA);
+            assert_eq!(
+                shared.heartbeat_report().active_shas,
+                [Arc::<str>::from(DESCRIBE_SHA)]
+            );
+        }
+        assert!(shared.heartbeat_report().active_shas.is_empty());
     }
 }

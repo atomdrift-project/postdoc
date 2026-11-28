@@ -7,7 +7,9 @@ All notable changes to postdoc. Versions follow [semantic versioning](https://se
 ### Features
 
 - Follow references two levels deep by default, since a shallow answer gets cached for every host that asks.
-- Accept scan's renamed `--uplink` flag, and refuse its always mode, which means nothing here.
+- Breaking: analyze with the zero-day feed unless `--feed` names another; a host without a token stops at startup.
+- Sign in with `postdoc login`, or supply `SCAN_TOKEN`; `--feed` takes auto, zero-day, supporter or oss.
+- Refuse scan's `--local` and `--offline`, which cannot apply to a server for other machines.
 - Breaking: `serve` refuses to start without a token, and every route but health demands it.
 - Breaking: `/_/health` answers one plain-text word; load and uptime moved to the stats route.
 - Breaking: remove five diagnostic routes nobody called; metrics still ship over OTLP.

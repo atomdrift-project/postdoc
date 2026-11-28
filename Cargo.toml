@@ -84,6 +84,10 @@ zstd = { version = "0.13", optional = true }
 burton = { git = "https://github.com/atomdrift-project/burton.git" }
 fletch = { git = "https://github.com/atomdrift-project/fletch.git" }
 
+[dev-dependencies]
+# Writes the LLM inputs a hopper fixture hands back. Already in the graph.
+zstd = "0.13"
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
@@ -148,6 +152,10 @@ tree-sitter-language = { git = "https://github.com/tstromberg/tree-sitter" }
 # of each crate in the graph. isomer reaches scan and cleave through the same
 # URLs, so without this its `scan::Classification` and postdoc's would be two
 # unrelated types that happen to share a name.
+[patch."https://github.com/atomdrift-project/scan.git"]
+atomdrift-scan = { path = "../scan" }
+[patch."https://github.com/atomdrift-project/cleave.git"]
+cleave = { path = "../cleave" }
 
 [profile.release]
 strip = "debuginfo"
