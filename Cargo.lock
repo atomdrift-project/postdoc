@@ -309,7 +309,7 @@ dependencies = [
 [[package]]
 name = "atomdrift-scan"
 version = "3.0.0-beta.4"
-source = "git+https://github.com/atomdrift-project/scan.git#0d93fcc47f24a8006c82eef9d2ae739edc4649ea"
+source = "git+https://github.com/atomdrift-project/scan.git#8b3240d4f088c450fcf68948d1af4bf128585728"
 dependencies = [
  "anyhow",
  "axum",
@@ -2788,7 +2788,7 @@ checksum = "a6cb138bb79a146c1bd460005623e142ef0181e3d0219cb493e02f7d08a35695"
 [[package]]
 name = "isomer"
 version = "0.5.0"
-source = "git+https://github.com/atomdrift-project/isomer.git#184cc31776dab5877bfeb6313a1dc0fa74594b95"
+source = "git+https://github.com/atomdrift-project/isomer.git#26a3d2114d4f80fcd5557198ced695e1b2c0684c"
 dependencies = [
  "anyhow",
  "atomdrift-scan",
