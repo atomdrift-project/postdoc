@@ -24,6 +24,9 @@
 #   HOPPER_TOKEN_FILE  hopper bearer token (default ~/.tok/hopper; TOKEN_FILE is a legacy alias)
 #   SCAN_TOKEN_FILE   API bearer token for Beamline (default ~/.tok/scan)
 #   LLM_TOKEN_FILE    LLM endpoint bearer token (default ~/.tok/llm)
+#   RULES_TOKEN_FILE  zero-day rule feed token (default ~/.tok/rules)
+#   FEED         `oss` runs the open-source feed, needing no rules token
+#   TRAITS_DIR   CLEAVE_TRAITS_DIR: a local rules tree, in place of a feed
 
 set -eu
 
@@ -97,6 +100,10 @@ UNIT_ENV=$(python3 "$DEPLOY_DIR/deploy-config.py" unit-env "$STATE_HOME" "$SERVI
 UNIT_HOME=$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1].replace("%", "%%")))' "$STATE_HOME")
 UNIT_BIN=$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1].replace("%", "%%")))' "$BIN_PATH")
 UNIT_WORKDIR=$(printf '%s' "$STATE_HOME" | sed 's/%/%%/g')
+# ProtectHome=tmpfs hides /home; the bind exposes a rules tree kept there.
+TRAITS_LINE=""
+[ -z "${TRAITS_DIR:-}" ] ||
+    TRAITS_LINE="BindReadOnlyPaths=$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1].replace("%", "%%")))' "$TRAITS_DIR")"
 
 # --- Retire atomscan ---------------------------------------------------------
 #
@@ -200,6 +207,7 @@ Group=${SERVICE_USER}
 
 ReadWritePaths=${UNIT_HOME}
 BindPaths=${UNIT_HOME}
+${TRAITS_LINE}
 WorkingDirectory=${UNIT_WORKDIR}
 ExecStart=${UNIT_BIN} ${EXEC_ARGS}
 Restart=always

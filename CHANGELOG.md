@@ -9,6 +9,9 @@ All notable changes to postdoc. Versions follow [semantic versioning](https://se
 - Follow references two levels deep by default, since a shallow answer gets cached for every host that asks.
 - Breaking: analyze with the zero-day feed unless `--feed` names another; a host without a token stops at startup.
 - Sign in with `postdoc login`, or supply `SCAN_TOKEN`; `--feed` takes auto, zero-day, supporter or oss.
+- Breaking: deploys require the zero-day feed's token in `~/.tok/rules` (`RULES_TOKEN_FILE`); `FEED=oss` runs without one.
+- Deploy against a local rules tree with `TRAITS_DIR`.
+- Windows deploys install the rules token and name the feed, as Linux and FreeBSD do.
 - Refuse scan's `--local` and `--offline`, which cannot apply to a server for other machines.
 - Breaking: `serve` refuses to start without a token, and every route but health demands it.
 - Breaking: `/_/health` answers one plain-text word; load and uptime moved to the stats route.
@@ -62,7 +65,7 @@ First release. postdoc replaces `atomscan serve` and `atomscan worker`.
 - Claim and judge hopper artifacts with `postdoc worker`, a drop-in for atomscan worker.
 - Serve scan's existing v1 HTTP API with `postdoc serve`, a drop-in for atomscan serve.
 - Accept uploads up to 1 GiB by default, so promoter's larger archives and images need no flag.
-- Pick the rule feed (zero-day, supporter, oss-delayed) with `--feed`, the saved choice, or a held token, as atomscan does.
+- Pick the rule feed (zero-day, supporter, oss) with `--feed`, the saved choice, or a held token, as atomscan does.
 - Fail over LLM requests across an ordered chain of endpoints.
 - Push server metrics over OTLP, configured by the standard OpenTelemetry environment variables.
 - Reap temporary files and download spools a crashed process abandoned on the next startup.

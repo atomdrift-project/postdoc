@@ -12,8 +12,8 @@ import urllib.error
 import urllib.request
 
 KEYS = ("BIND", "ALLOW_CIDR", "WORKERS", "DATA_DIR", "MAX_RSS_GB", "IDLE",
-        "LLM", "LLM_MODEL", "MEMORY_MAX", "MEMORY_LOW", "IDLE_MEMORY_MAX", "NICE", "ENRICHED",
-        "SCANNERS")
+        "LLM", "LLM_MODEL", "MEMORY_MAX", "MEMORY_LOW", "IDLE_MEMORY_MAX", "NICE", "FEED",
+        "TRAITS_DIR", "SCANNERS")
 
 
 def arguments(mode, url, home):
@@ -25,13 +25,12 @@ def arguments(mode, url, home):
             raise ValueError(key + " must be a valid slot count")
     if os.environ.get("MAX_RSS_GB") and int(os.environ["MAX_RSS_GB"]) < -1:
         raise ValueError("MAX_RSS_GB must be -1 or nonnegative")
-    if os.environ.get("ENRICHED", "0") not in ("0", "1"):
-        raise ValueError("ENRICHED must be 0 or 1")
     args = [mode]
-    # The zero-day rule feed when the token is installed beside the service,
-    # else the open-source feed. Named either way, so a refused token stops
-    # startup rather than quietly falling back to another feed.
-    args += ["--feed", "zero-day" if os.environ.get("ENRICHED") == "1" else "oss"]
+    # Named, so a refused token stops startup rather than falling back to
+    # another feed. A TRAITS_DIR tree supplies the rules, and cleave refuses a
+    # feed named beside one.
+    if not os.environ.get("TRAITS_DIR"):
+        args += ["--feed", os.environ.get("FEED") or "zero-day"]
     if mode == "worker":
         args += ["--url", url, "--nice", os.environ.get("WORKER_NICE", "0")]
     else:
@@ -136,20 +135,23 @@ def main():
         mode, url, home, binary = args
         text = shlex.join([binary, *arguments(mode, url, home)])
         print(text.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$").replace("`", "\\`"))
-    elif command == "rc-model":
-        text = shlex.quote("SCAN_LLM_MODEL=" + os.environ["LLM_MODEL"]) if os.environ.get("LLM_MODEL") else ""
+    elif command == "rc-env":
+        text = " ".join(shlex.quote(name + "=" + os.environ[key])
+                        for key, name in (("LLM_MODEL", "SCAN_LLM_MODEL"), ("TRAITS_DIR", "CLEAVE_TRAITS_DIR"))
+                        if os.environ.get(key))
         print(text.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$").replace("`", "\\`"))
     elif command == "shell-value":
         print(shlex.quote(args[0]))
     elif command == "unit-env":
         home, service_path, idle = args
         for name, value in (("HOME", home), ("PATH", service_path), ("SCAN_LLM", os.environ.get("LLM", "")),
-                            ("SCAN_LLM_MODEL", os.environ.get("LLM_MODEL", "")), ("POSTDOC_IDLE_MEMORY_MAX", idle),
+                            ("SCAN_LLM_MODEL", os.environ.get("LLM_MODEL", "")),
+                            ("CLEAVE_TRAITS_DIR", os.environ.get("TRAITS_DIR", "")), ("POSTDOC_IDLE_MEMORY_MAX", idle),
                             # Panics keep their backtrace; ordinary errors stop
                             # capturing one each (anyhow/std capture when only
                             # RUST_BACKTRACE is set), a cost seen on hot paths.
                             ("RUST_BACKTRACE", "1"), ("RUST_LIB_BACKTRACE", "0")):
-            if name == "SCAN_LLM_MODEL" and not value:
+            if name in ("SCAN_LLM_MODEL", "CLEAVE_TRAITS_DIR") and not value:
                 continue
             print("Environment=" + json.dumps(name + "=" + value.replace("%", "%%"), ensure_ascii=False))
     elif command == "save":

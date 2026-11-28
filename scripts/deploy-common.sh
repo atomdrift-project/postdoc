@@ -101,24 +101,25 @@ prepare_credentials() {
         [ "$llm_key_available" -eq 1 ] ||
             die "no usable LLM credential for the configured endpoints; provide LLM_TOKEN_FILE, OPENROUTER_TOKEN_FILE, or SCAN_LLM_KEY (LLM= explicitly disables LLM analysis)"
     fi
-    # Provision the operator's subscription for the service automatically.
-    # Keep an installed token usable on redeploy when its source is absent.
-    # An explicit ENRICHED setting still controls whether we provision it.
-    ISOTOPE13_TOKEN_FILE=${ISOTOPE13_TOKEN_FILE:-$HOME/.tok/isotope13}
-    if [ -n "${ISOTOPE13_TOKEN:-}" ]; then
-        (umask 077; printf '%s\n' "$ISOTOPE13_TOKEN" > "$DEPLOY_TMP/isotope13-token")
-        ISOTOPE13_TOKEN_FILE=$DEPLOY_TMP/isotope13-token
+    # The rules: a TRAITS_DIR tree, the open-source feed, or by default the
+    # zero-day feed, whose token is required. An installed token serves when
+    # the source is absent.
+    RULES_TOKEN_FILE=${RULES_TOKEN_FILE:-$HOME/.tok/rules}
+    RULES_INSTALLED=$STATE_HOME/.config/atomdrift/isotope13-api.json
+    if [ -n "${TRAITS_DIR:-}" ]; then
+        [ -z "${FEED:-}" ] || die "set FEED or TRAITS_DIR, not both"
+        case "$TRAITS_DIR" in /*) ;; *) die "TRAITS_DIR must be an absolute path" ;; esac
+        [ -d "$TRAITS_DIR" ] || die "TRAITS_DIR $TRAITS_DIR is not a directory"
+        return
     fi
-    if [ -z "${ENRICHED+x}" ]; then
-        if [ -e "$ISOTOPE13_TOKEN_FILE" ] || $SUDO grep -q '[^[:space:]]' "$STATE_HOME/.config/atomdrift/isotope13-api.json" 2>/dev/null; then
-            ENRICHED=1
-            export ENRICHED
-        fi
-    fi
-    case "${ENRICHED:-0}" in
-        0) ;;
-        1) check_token "$ISOTOPE13_TOKEN_FILE" "$STATE_HOME/.config/atomdrift/isotope13-api.json" required ;;
-        *) die "ENRICHED must be 0 or 1" ;;
+    case "${FEED:-zero-day}" in
+        oss) ;;
+        zero-day)
+            check_token "$RULES_TOKEN_FILE" "$RULES_INSTALLED" optional
+            token_present "$RULES_TOKEN_FILE" || $SUDO grep -q '[^[:space:]]' "$RULES_INSTALLED" 2>/dev/null ||
+                die "the zero-day feed needs a token in $RULES_TOKEN_FILE; FEED=oss or TRAITS_DIR runs without one"
+            ;;
+        *) die "FEED must be zero-day or oss" ;;
     esac
 }
 install_credentials() {
@@ -126,14 +127,14 @@ install_credentials() {
     if [ "$MODE" = serve ]; then install_token "$SCAN_TOKEN_FILE" scan; fi
     install_token "$LLM_TOKEN_FILE" llm
     install_token "$OPENROUTER_TOKEN_FILE" openrouter
-    if [ "${ENRICHED:-0}" = 1 ] && token_present "$ISOTOPE13_TOKEN_FILE"; then
+    if [ -z "${TRAITS_DIR:-}" ] && [ "${FEED:-zero-day}" = zero-day ] && token_present "$RULES_TOKEN_FILE"; then
         # Rendered here, not passed on a command line: the token never reaches argv.
         (umask 077; python3 -c 'import json, sys
 token = next(line.strip() for line in open(sys.argv[1]) if line.strip())
-print(json.dumps({"token": token}))' "$ISOTOPE13_TOKEN_FILE" > "$DEPLOY_TMP/isotope13-api.json") \
-            || die "could not read $ISOTOPE13_TOKEN_FILE"
+print(json.dumps({"token": token}))' "$RULES_TOKEN_FILE" > "$DEPLOY_TMP/isotope13-api.json") \
+            || die "could not read $RULES_TOKEN_FILE"
         $SUDO install -d -m0700 -o "$SERVICE_USER" -g "$SERVICE_USER" "$STATE_HOME/.config" "$STATE_HOME/.config/atomdrift"
-        install_changed "$DEPLOY_TMP/isotope13-api.json" "$STATE_HOME/.config/atomdrift/isotope13-api.json" 0600 "$SERVICE_USER" "$SERVICE_USER"
+        install_changed "$DEPLOY_TMP/isotope13-api.json" "$RULES_INSTALLED" 0600 "$SERVICE_USER" "$SERVICE_USER"
     fi
 }
 prepare_arguments() {

@@ -4,8 +4,8 @@ Install postdoc as a Windows service - `worker` or `serve`.
 
 .DESCRIPTION
 Same contract as the systemd and rc.d paths: the binary owns its defaults and
-this passes the hopper URL and installs the separate API and hopper
-credentials. What differs is the supervision, which is NSSM.
+this passes the hopper URL and rule feed and installs the separate API,
+hopper and rules credentials. What differs is the supervision, which is NSSM.
 
 .EXAMPLE
 scripts\deploy-windows.ps1 -Mode worker -Url https://hopper.example
@@ -28,7 +28,13 @@ param(
     # API bearer token used by Beamline as SCAN_TOKEN.
     [string]$ScanTokenFile = $(if ($env:SCAN_TOKEN_FILE) { $env:SCAN_TOKEN_FILE } else { Join-Path $HOME '.tok\scan' }),
     [string]$LlmTokenFile = $(if ($env:LLM_TOKEN_FILE) { $env:LLM_TOKEN_FILE } else { Join-Path $HOME '.tok\llm' }),
-    [string]$OpenRouterTokenFile = $(if ($env:OPENROUTER_TOKEN_FILE) { $env:OPENROUTER_TOKEN_FILE } else { Join-Path $HOME '.tok\openrouter' })
+    [string]$OpenRouterTokenFile = $(if ($env:OPENROUTER_TOKEN_FILE) { $env:OPENROUTER_TOKEN_FILE } else { Join-Path $HOME '.tok\openrouter' }),
+    # Zero-day rule feed token.
+    [string]$RulesTokenFile = $(if ($env:RULES_TOKEN_FILE) { $env:RULES_TOKEN_FILE } else { Join-Path $HOME '.tok\rules' }),
+    # `oss` runs the open-source feed, needing no rules token.
+    [string]$Feed = $env:FEED,
+    # CLEAVE_TRAITS_DIR: a local rules tree, in place of a feed.
+    [string]$TraitsDir = $env:TRAITS_DIR
 )
 
 $ErrorActionPreference = 'Stop'
@@ -60,6 +66,10 @@ $ServiceHome = if ($env:POSTDOC_SERVICE_HOME) {
     else { Join-Path $env:SystemRoot 'System32\config\systemprofile' }
 }
 $TokDir      = Join-Path $ServiceHome '.tok'
+# Unlike ~/.tok, the config directory follows USERPROFILE, which the service
+# sets to $StateHome.
+$RulesDir    = Join-Path $StateHome 'AppData\Roaming\atomdrift'
+$RulesTokDst = Join-Path $RulesDir 'isotope13-api.json'
 
 $identity = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
 if (-not $identity.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -105,6 +115,24 @@ foreach ($spec in $tokenSpecs) {
             Die "no usable $($spec.Name) credential at $($spec.Source) or $installed"
         }
     }
+}
+# The rules: a TraitsDir tree, the open-source feed, or by default the
+# zero-day feed, whose token is required. An installed token serves when the
+# source is absent.
+$installRulesToken = $false
+if ($TraitsDir) {
+    if ($Feed) { Die 'set FEED or TRAITS_DIR, not both' }
+    if (-not [IO.Path]::IsPathRooted($TraitsDir)) { Die 'TRAITS_DIR must be an absolute path' }
+    if (-not (Test-Path -LiteralPath $TraitsDir -PathType Container)) { Die "TRAITS_DIR $TraitsDir is not a directory" }
+} elseif (-not $Feed -or $Feed -eq 'zero-day') {
+    if (Test-Path $RulesTokenFile) {
+        if ([string]::IsNullOrWhiteSpace([IO.File]::ReadAllText($RulesTokenFile))) { Die "blank credential: $RulesTokenFile" }
+        $installRulesToken = $true
+    } elseif (-not (Test-Path $RulesTokDst) -or [string]::IsNullOrWhiteSpace([IO.File]::ReadAllText($RulesTokDst))) {
+        Die "the zero-day feed needs a token in $RulesTokenFile; FEED=oss or TRAITS_DIR runs without one"
+    }
+} elseif ($Feed -ne 'oss') {
+    Die 'FEED must be zero-day or oss'
 }
 
 # --- Retire atomscan ----------------------------------------------------------
@@ -197,6 +225,16 @@ if ($hasExplicitKey) {
         $changed = $true
     }
 }
+if ($installRulesToken) {
+    New-Item -ItemType Directory -Force -Path $RulesDir | Out-Null
+    & icacls.exe $RulesDir /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' | Out-Null
+    if ($LASTEXITCODE -ne 0) { Die "could not restrict rules token directory ACL: $RulesDir" }
+    $rulesText = (@{ token = (Get-Content $RulesTokenFile | Where-Object { $_.Trim() } | Select-Object -First 1).Trim() } | ConvertTo-Json -Compress) + "`n"
+    if (-not (Test-Path $RulesTokDst) -or [IO.File]::ReadAllText($RulesTokDst) -ne $rulesText) {
+        [IO.File]::WriteAllText($RulesTokDst, $rulesText)
+        $changed = $true
+    }
+}
 $scanTokDst = Join-Path $TokDir 'scan'
 $binaryChanged = -not (Same-File $binSrc $BinDst)
 $skipUpdate = $false
@@ -235,6 +273,9 @@ function Start-ServiceChecked {
     Log "nssm start returned $LASTEXITCODE with $ServiceName $status; checking startup"
 }
 $arguments = @($Mode)
+# Named, so a refused token stops startup rather than falling back to another
+# feed. cleave refuses a feed named beside a TraitsDir tree.
+if (-not $TraitsDir) { $arguments += @('--feed', $(if ($Feed) { $Feed } else { 'zero-day' })) }
 if ($Mode -eq 'worker') {
     $arguments += @('--url', $Url)
     if ($env:DATA_DIR) { $arguments += @('--data-dir', $env:DATA_DIR) }
@@ -255,6 +296,8 @@ foreach ($key in @('BIND','ALLOW_CIDR','WORKERS','DATA_DIR','MAX_RSS_GB','IDLE',
 }
 $configuration['LLM'] = [string]$Llm
 $configuration['LLM_MODEL'] = [string]$LlmModel
+if ($Feed) { $configuration['FEED'] = $Feed }
+if ($TraitsDir) { $configuration['TRAITS_DIR'] = $TraitsDir }
 $configuration[$(if ($Mode -eq 'serve') { 'HOPPER' } else { 'URL' })] = $(if ($Url) { $Url } else { 'none' })
 $configPath = Join-Path $StateHome "deploy-$Mode.json"
 $configText = $configuration | ConvertTo-Json
@@ -338,6 +381,7 @@ $svcEnv = @(
     "PATH=$env:PATH"
 )
 if ($LlmModel) { $svcEnv += "SCAN_LLM_MODEL=$LlmModel" }
+if ($TraitsDir) { $svcEnv += "CLEAVE_TRAITS_DIR=$TraitsDir" }
 & $nssm set $ServiceName AppEnvironmentExtra @svcEnv | Out-Null
 if ($LASTEXITCODE -ne 0) { Die "NSSM operation failed for $ServiceName" }
 

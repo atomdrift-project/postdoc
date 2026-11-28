@@ -177,13 +177,14 @@ Native FreeBSD/Windows service-manager validation still requires those hosts.
 
 ## The binary owns its defaults
 
-Deployment passes the hopper URL and installs credentials as files. The API
-credential used by Beamline and the hopper credential are separate secrets
-and must remain separate during the Scan/Postdoc fleet transition.
+Deployment passes the hopper URL and rule feed, and installs credentials as
+files. The API credential used by Beamline and the hopper credential are
+separate secrets and must remain separate during the Scan/Postdoc fleet
+transition.
 
 ```
-worker   worker --url <hopper>              # reads <state>/.tok/hopper
-serve    serve --token-file <state>/.tok/scan [--hopper <hopper>]
+worker   worker --feed zero-day --url <hopper>   # reads <state>/.tok/hopper
+serve    serve --feed zero-day --token-file <state>/.tok/scan [--hopper <hopper>]
 ```
 
 Everything else — slot count, memory ceiling, nice value, bind address, body
@@ -214,26 +215,30 @@ Unix deployments also copy `~/.tok/llm`, when present, into the service's home
 with mode 0600. `LLM_TOKEN_FILE` overrides its source path. The server and its
 idle child use this credential when the configured LLM endpoint requires one.
 
-On Linux and FreeBSD, `make deploy-server` and `make deploy-worker` run the
-zero-day rule feed when a subscription token is available: each ruleset the
-moment it clears QA, instead of the open-source roll-up.
-Deployment reads `ISOTOPE13_TOKEN`, then `~/.tok/isotope13`
-(`ISOTOPE13_TOKEN_FILE` overrides the source path), or reuses the service's
-installed token when the source is absent. It adds `--feed zero-day` to the service
-command and installs the token as `<state>/.config/atomdrift/isotope13-api.json`,
-mode 0600. The resolved `ENRICHED` setting is saved in the deployment manifest,
-so a rollout keeps it. With no token, deployment adds `--feed oss`;
-`ENRICHED=1` requires a token and fails deployment if none is available.
-`ENRICHED=0` skips token provisioning and runs the open-source feed.
-`--feed` changes only which rules postdoc analyzes with: postdoc serves other
-machines, so it never asks Uplink for a verdict, and refuses scan's `--local`
-and `--offline`. Without `--feed`, postdoc runs the zero-day feed (`auto` when
-`CLEAVE_TRAITS_DIR` supplies the rules). A missing or refused token stops the
-service from starting; one refused at a later renewal is logged at error level
-while the installed rules go on serving. `postdoc login` signs an operator's
-own account in, for running postdoc by hand.
-Windows deployments do not install the token yet, and name no feed: set
-`SCAN_TOKEN` in the service environment, or the service will not start.
+### Rules
+
+Every platform takes its rules from one of three sources:
+
+| Setting            | Rules                                          | Token    |
+|--------------------|------------------------------------------------|----------|
+| (default)          | zero-day feed: `--feed zero-day`               | required |
+| `FEED=oss`         | open-source feed: `--feed oss`                 | none     |
+| `TRAITS_DIR=/path` | that tree, as `CLEAVE_TRAITS_DIR`; no `--feed` | none     |
+
+The token is read from `~/.tok/rules` (`RULES_TOKEN_FILE` overrides the source)
+and installed, private to the service, where cleave reads it:
+`<state>/.config/atomdrift/isotope13-api.json` on Unix,
+`<state>\AppData\Roaming\atomdrift\isotope13-api.json` on Windows. Without a
+source, the installed token is reused; without either, deployment stops before
+touching the service. `FEED` and `TRAITS_DIR` are exclusive, and saved in the
+deployment manifest so a rollout keeps them. On Linux, `TRAITS_DIR` is
+bind-mounted read-only, so a tree under `/home` is visible.
+
+Run by hand, postdoc defaults to the zero-day feed, or `auto` when
+`CLEAVE_TRAITS_DIR` is set. A missing or refused token stops it starting; one
+refused at a later renewal is logged at error level while the installed rules
+go on serving. `postdoc login` signs an operator's own account in. postdoc
+never asks Uplink for a verdict, and refuses scan's `--local` and `--offline`.
 
 ## The three platforms are treated alike
 

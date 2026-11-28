@@ -147,7 +147,7 @@ class Host:
         self.home = self.root / "state-parent" / "postdoc"
         self.operator = self.root / "operator"
         (self.operator / ".tok").mkdir(parents=True)
-        for name in ("hopper", "scan", "llm", "openrouter"):
+        for name in ("hopper", "scan", "llm", "openrouter", "rules"):
             (self.operator / ".tok" / name).write_text(name + " token\n")
         self.config = self.root / "config"
         self.units = self.root / "units"
@@ -180,7 +180,7 @@ class Host:
             path.write_text(source)
         helper = self.scripts / "deploy-deps.sh"
         helper.write_text(helper.read_text().replace("SERVICE_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "SERVICE_PATH=" + str(self.bin)))
-        self.env = {k: v for k, v in os.environ.items() if k not in ("HOPPER_TOKEN_FILE", "SCAN_TOKEN_FILE", "LLM_TOKEN_FILE", "TOKEN_FILE", "SCAN_LLM_KEY", "OPENROUTER_TOKEN_FILE", "ISOTOPE13_TOKEN_FILE", "ISOTOPE13_TOKEN", "ENRICHED", "WORKERS", "IDLE", "BIND", "ALLOW_CIDR", "DATA_DIR", "MAX_RSS_GB")}
+        self.env = {k: v for k, v in os.environ.items() if k not in ("HOPPER_TOKEN_FILE", "SCAN_TOKEN_FILE", "LLM_TOKEN_FILE", "TOKEN_FILE", "SCAN_LLM_KEY", "OPENROUTER_TOKEN_FILE", "RULES_TOKEN_FILE", "FEED", "TRAITS_DIR", "WORKERS", "IDLE", "BIND", "ALLOW_CIDR", "DATA_DIR", "MAX_RSS_GB")}
         self.env.update(PATH=str(self.bin), HOME=str(self.operator), MOCK_ROOT=str(self.root),
                         MOCK_PLATFORM=platform, LLM="https://llm.example/v1", LLM_MODEL="", MEMORY_MAX="1G", HEALTH_WAIT="1",
                         # Installing scanners is exercised by test-deploy-scanners.py.
@@ -193,6 +193,37 @@ class Host:
 
     def state(self):
         return json.loads((self.root / "state.json").read_text())
+
+    def unit_name(self, mode):
+        if self.platform == "Linux":
+            return "postdoc.service" if mode == "serve" else "postdoc-worker.service"
+        return "postdoc" if mode == "serve" else "postdoc_worker"
+
+    def command(self, mode):
+        """The service's command line, environment included, as words."""
+        text = (self.units / self.unit_name(mode)).read_text()
+        if self.platform == "Linux":
+            return shlex.split(next(line.split("=", 1)[1] for line in text.splitlines() if line.startswith("ExecStart=")))
+        stub = self.root / "rc.subr"
+        stub.write_text('load_rc_config() { :; }\nrun_rc_command() { printf "%s" "$command_args"; }\n')
+        fixture = self.root / "generated.rc"
+        fixture.write_text(text.replace("/etc/rc.subr", str(stub)))
+        return shlex.split(subprocess.run(["/bin/sh", str(fixture), "start"], capture_output=True, text=True, check=True).stdout)
+
+    def argv(self, mode):
+        words = self.command(mode)
+        return words[words.index(mode, 1 if self.platform == "Linux" else words.index("/usr/bin/env")):]
+
+    def pairs(self, mode):
+        words = self.argv(mode)
+        return [words[i:i + 2] for i in range(len(words) - 1)]
+
+    def environment(self, mode):
+        if self.platform == "Linux":
+            text = (self.units / self.unit_name(mode)).read_text()
+            return [json.loads(line.split("=", 1)[1]) for line in text.splitlines() if line.startswith("Environment=")]
+        words = self.command(mode)
+        return words[words.index("/usr/bin/env") + 1:words.index(mode, words.index("/usr/bin/env"))]
 
     def close(self):
         self.temp.cleanup()
@@ -230,7 +261,6 @@ class DeployTests(unittest.TestCase):
                 host = self.host(platform=platform)
                 first = host.run()
                 self.assertEqual(first.returncode, 0, first.stderr)
-                self.assertNotIn("ENRICHED", json.loads((host.config / "serve.json").read_text()))
                 second = host.run()
                 self.assertEqual(second.returncode, 0, second.stderr)
                 self.assertEqual(host.state()["starts"], 1)
@@ -305,7 +335,7 @@ class DeployTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_blank_tokens_fail_before_any_service_changes(self):
-        for name in ("scan", "hopper", "llm", "openrouter"):
+        for name in ("scan", "hopper", "llm", "openrouter", "rules"):
             host = self.host()
             (host.operator / ".tok" / name).write_text(" \t\n")
             result = host.run()
@@ -315,7 +345,7 @@ class DeployTests(unittest.TestCase):
     def test_installed_credentials_survive_missing_sources(self):
         host = self.host()
         self.assertEqual(host.run().returncode, 0)
-        for name in ("scan", "hopper", "llm"):
+        for name in ("scan", "hopper", "llm", "rules"):
             (host.operator / ".tok" / name).unlink()
         result = host.run()
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -379,94 +409,97 @@ class DeployTests(unittest.TestCase):
         self.assertIn("SCAN_LLM_MODEL=a model with spaces", shlex.split(parsed.stdout))
         self.assertEqual(host.state()["rcconf"]["postdoc_worker_llm"], "")
 
-    def test_enriched_rules_get_the_flag_and_a_private_token(self):
-        for platform in ("Linux", "FreeBSD"):
-            with self.subTest(platform=platform):
-                host = self.host(platform=platform)
-                (host.operator / ".tok/isotope13").write_text("i13_test_secret\n")
-                result = host.run(ENRICHED="1")
-                self.assertEqual(result.returncode, 0, result.stderr)
-                saved = json.loads((host.config / "serve.json").read_text())
-                self.assertEqual(saved["ENRICHED"], "1")
-                if platform == "Linux":
-                    unit = (host.units / "postdoc.service").read_text()
-                    self.assertIn('"--feed" "zero-day"', unit)
-                else:
-                    self.assertIn("--feed zero-day", (host.units / "postdoc").read_text())
-                token = host.home / ".config/atomdrift/isotope13-api.json"
-                self.assertEqual(json.loads(token.read_text()), {"token": "i13_test_secret"})
-                self.assertEqual(token.stat().st_mode & 0o777, 0o600)
-                self.assertNotIn("i13_test_secret", json.dumps(host.state()))
-                # rollout.sh re-exports the saved manifest, ENRICHED included; an
-                # unchanged redeploy then restarts nothing.
-                again = host.run(ENRICHED=saved["ENRICHED"])
-                self.assertEqual(again.returncode, 0, again.stderr)
-                self.assertEqual(host.state()["starts"], 1)
-
-    def test_enriched_rules_without_a_token_fail_before_any_service_changes(self):
-        host = self.host()
-        result = host.run(ENRICHED="1")
-        self.assertNotEqual(result.returncode, 0)
-        self.assertFalse(any(command in ("install", "useradd", "service", "systemctl") for command, _ in host.state()["calls"]))
-        self.assertNotEqual(host.run(ENRICHED="yes").returncode, 0)
-
-    def test_enriched_token_is_automatically_provisioned_and_reused(self):
+    def test_zero_day_feed_is_the_default_and_gets_a_private_token(self):
         for platform in ("Linux", "FreeBSD"):
             for mode in ("serve", "worker"):
                 with self.subTest(platform=platform, mode=mode):
                     host = self.host(platform=platform)
-                    source = host.operator / ".tok/isotope13"
-                    source.write_text("i13_auto_secret\n")
+                    source = host.operator / ".tok/rules"
                     first = host.run(mode=mode)
                     self.assertEqual(first.returncode, 0, first.stderr)
-                    saved = json.loads((host.config / (mode + ".json")).read_text())
-                    self.assertEqual(saved["ENRICHED"], "1")
-                    unit = host.units / ({("Linux", "serve"): "postdoc.service",
-                                          ("Linux", "worker"): "postdoc-worker.service",
-                                          ("FreeBSD", "serve"): "postdoc",
-                                          ("FreeBSD", "worker"): "postdoc_worker"}[(platform, mode)])
-                    self.assertIn("zero-day", unit.read_text())
+                    self.assertNotIn("FEED", json.loads((host.config / (mode + ".json")).read_text()))
+                    self.assertIn(["--feed", "zero-day"], host.pairs(mode))
                     installed = host.home / ".config/atomdrift/isotope13-api.json"
-                    self.assertEqual(json.loads(installed.read_text()), {"token": "i13_auto_secret"})
+                    self.assertEqual(json.loads(installed.read_text()), {"token": "rules token"})
                     self.assertEqual(installed.stat().st_mode & 0o777, 0o600)
-                    source.write_text("i13_rotated_secret\n")
+                    source.write_text("rotated rules secret\n")
                     rotated = host.run(mode=mode)
                     self.assertEqual(rotated.returncode, 0, rotated.stderr)
                     self.assertEqual(host.state()["starts"], 2)
-                    self.assertEqual(json.loads(installed.read_text()), {"token": "i13_rotated_secret"})
+                    self.assertEqual(json.loads(installed.read_text()), {"token": "rotated rules secret"})
                     source.unlink()
                     again = host.run(mode=mode)
                     self.assertEqual(again.returncode, 0, again.stderr)
                     self.assertEqual(host.state()["starts"], 2)
-                    self.assertNotIn("i13_auto_secret", json.dumps(host.state()))
-                    self.assertNotIn("i13_rotated_secret", json.dumps(host.state()))
+                    self.assertNotIn("rules secret", json.dumps(host.state()))
 
-    def test_enriched_auto_detection_honors_sources_and_explicit_opt_out(self):
-        for source in ("environment", "file"):
-            with self.subTest(source=source):
-                host = self.host()
-                token = host.operator / "subscription-token"
-                token.write_text("i13_custom_secret\n")
-                override = ({"ISOTOPE13_TOKEN": "i13_custom_secret"} if source == "environment"
-                            else {"ISOTOPE13_TOKEN_FILE": str(token)})
-                result = host.run(**override)
-                self.assertEqual(result.returncode, 0, result.stderr)
-                installed = host.home / ".config/atomdrift/isotope13-api.json"
-                self.assertEqual(json.loads(installed.read_text()), {"token": "i13_custom_secret"})
-                self.assertNotIn("i13_custom_secret", json.dumps(host.state()))
+    def test_rules_token_file_overrides_the_source(self):
         host = self.host()
-        (host.operator / ".tok/isotope13").write_text("i13_unused_secret\n")
-        result = host.run(ENRICHED="0")
+        (host.operator / ".tok/rules").unlink()
+        token = host.operator / "subscription"
+        token.write_text("custom rules secret\n")
+        result = host.run(RULES_TOKEN_FILE=str(token))
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertFalse((host.home / ".config/atomdrift/isotope13-api.json").exists())
-        self.assertIn('"--feed" "oss"', (host.units / "postdoc.service").read_text())
+        installed = host.home / ".config/atomdrift/isotope13-api.json"
+        self.assertEqual(json.loads(installed.read_text()), {"token": "custom rules secret"})
 
-    def test_enriched_auto_detection_rejects_blank_source_before_service_changes(self):
+    def test_rules_settings_fail_before_any_service_changes(self):
+        traits = self.host().root
+        for platform in ("Linux", "FreeBSD"):
+            for env, message in (({}, "FEED=oss"), ({"FEED": "supporter"}, "FEED must be"),
+                                 ({"TRAITS_DIR": "relative/traits"}, "absolute"),
+                                 ({"TRAITS_DIR": "/nonexistent/traits"}, "not a directory"),
+                                 ({"TRAITS_DIR": str(traits), "FEED": "oss"}, "not both")):
+                with self.subTest(platform=platform, env=env):
+                    host = self.host(platform=platform)
+                    (host.operator / ".tok/rules").unlink()
+                    result = host.run(mode="worker", **env)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(message, result.stderr)
+                    self.assertFalse(any(command in ("install", "useradd", "pw", "service", "systemctl")
+                                         for command, _ in host.state()["calls"]))
+
+    def test_oss_feed_needs_no_token_and_survives_rollout(self):
+        for platform in ("Linux", "FreeBSD"):
+            with self.subTest(platform=platform):
+                host = self.host(platform=platform)
+                (host.operator / ".tok/rules").unlink()
+                result = host.run(FEED="oss")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn(["--feed", "oss"], host.pairs("serve"))
+                self.assertFalse((host.home / ".config/atomdrift").exists())
+                saved = json.loads((host.config / "serve.json").read_text())
+                self.assertEqual(saved["FEED"], "oss")
+                again = host.run(FEED=saved["FEED"])
+                self.assertEqual(again.returncode, 0, again.stderr)
+                self.assertEqual(host.state()["starts"], 1)
+
+    def test_traits_dir_replaces_the_feed(self):
+        for platform in ("Linux", "FreeBSD"):
+            for mode in ("serve", "worker"):
+                with self.subTest(platform=platform, mode=mode):
+                    host = self.host(platform=platform)
+                    (host.operator / ".tok/rules").unlink()
+                    traits = host.root / "local traits"
+                    traits.mkdir()
+                    result = host.run(mode=mode, TRAITS_DIR=str(traits))
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertNotIn("--feed", host.argv(mode))
+                    self.assertIn("CLEAVE_TRAITS_DIR=" + str(traits), host.environment(mode))
+                    if platform == "Linux":
+                        unit = (host.units / host.unit_name(mode)).read_text()
+                        self.assertIn("BindReadOnlyPaths=" + json.dumps(str(traits)) + "\n", unit)
+                    self.assertFalse((host.home / ".config/atomdrift").exists())
+                    saved = json.loads((host.config / (mode + ".json")).read_text())
+                    self.assertEqual(saved["TRAITS_DIR"], str(traits))
+
+    def test_rollout_drops_the_retired_enriched_setting(self):
         host = self.host()
-        (host.operator / ".tok/isotope13").write_text(" \t\n")
-        result = host.run()
-        self.assertNotEqual(result.returncode, 0)
-        self.assertFalse(any(command in ("install", "useradd", "service", "systemctl") for command, _ in host.state()["calls"]))
+        manifest = host.root / "worker.json"
+        manifest.write_text(json.dumps({"ENRICHED": "0", "URL": "https://hopper.example"}))
+        exported = subprocess.run(["python3", str(SCRIPTS / "deploy-config.py"), "export", str(manifest), "unused"],
+                                  capture_output=True, text=True, check=True).stdout
+        self.assertEqual(exported, "export URL=https://hopper.example\n")
 
     def test_openrouter_key_is_installed_without_argv_disclosure(self):
         host = self.host()

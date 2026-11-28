@@ -16,6 +16,9 @@
 #   HOPPER_TOKEN_FILE  hopper bearer token (default ~/.tok/hopper; TOKEN_FILE is a legacy alias)
 #   SCAN_TOKEN_FILE   API bearer token for Beamline (default ~/.tok/scan)
 #   LLM_TOKEN_FILE    LLM endpoint bearer token (default ~/.tok/llm)
+#   RULES_TOKEN_FILE  zero-day rule feed token (default ~/.tok/rules)
+#   FEED         `oss` runs the open-source feed, needing no rules token
+#   TRAITS_DIR   CLEAVE_TRAITS_DIR: a local rules tree, in place of a feed
 
 set -eu
 # pw, sysrc, and service live in sbin, which a deploying user's PATH may omit.
@@ -147,7 +150,7 @@ $SUDO install -d -m0700 -o "$SERVICE_USER" -g "$SERVICE_USER" "$STATE_HOME/.tok"
 # The scanners postdoc checks at startup, installed and running before it is.
 ensure_scanners FreeBSD "$SERVICE_USER"
 install_credentials
-LLM_MODEL_ENV=$(python3 "$DEPLOY_DIR/deploy-config.py" rc-model)
+RC_ENV=$(python3 "$DEPLOY_DIR/deploy-config.py" rc-env)
 RC_LLM_DEFAULT=$(python3 "$DEPLOY_DIR/deploy-config.py" shell-value "$LLM")
 TMP_RC=$DEPLOY_TMP/postdoc.rc
 install_binary
@@ -207,7 +210,7 @@ llm_arg=\$(printf '%s' "\${${SERVICE_NAME}_llm}" | sed "s/'/'\\\\\\\\''/g")
 # RUST_LIB_BACKTRACE=0 keeps ordinary errors from capturing one each, so the
 # cost is paid only on a panic, which is already a lost job.
 command_args="-c -f -r -R 5 -P \${pidfile} -o \${${SERVICE_NAME}_logfile} -u ${SERVICE_USER} \\
-  /usr/bin/env PATH=${SERVICE_PATH} MALLOC_CONF=\${malloc_conf} RUST_BACKTRACE=1 RUST_LIB_BACKTRACE=0 SCAN_LLM='\${llm_arg}' ${LLM_MODEL_ENV} \\
+  /usr/bin/env PATH=${SERVICE_PATH} MALLOC_CONF=\${malloc_conf} RUST_BACKTRACE=1 RUST_LIB_BACKTRACE=0 SCAN_LLM='\${llm_arg}' ${RC_ENV} \\
   ${RC_EXEC_ARGS}"
 
 # daemon(8) -u switches user with setusercontext(3), which applies the login
