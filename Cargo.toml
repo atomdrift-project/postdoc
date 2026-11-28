@@ -152,10 +152,6 @@ tree-sitter-language = { git = "https://github.com/tstromberg/tree-sitter" }
 # of each crate in the graph. isomer reaches scan and cleave through the same
 # URLs, so without this its `scan::Classification` and postdoc's would be two
 # unrelated types that happen to share a name.
-[patch."https://github.com/atomdrift-project/scan.git"]
-atomdrift-scan = { path = "../scan" }
-[patch."https://github.com/atomdrift-project/cleave.git"]
-cleave = { path = "../cleave" }
 
 [profile.release]
 strip = "debuginfo"
